@@ -93,7 +93,7 @@ describe('scanNsOwners — 扫 profiles 目录找出同一个槽的挂载者', (
 });
 
 describe('describeNsConflict — 告警要带判据与修法', () => {
-  it('点出所有挂载者、本实例所在 profile、以及三种后果与修法', () => {
+  it('隔离未生效（老行为）→ 风险文案：点出挂载者、后果与修法', () => {
     const s = describeNsConflict({
       ns: 'im-qqbot-2',
       owners: ['desktop', 'web'],
@@ -104,8 +104,21 @@ describe('describeNsConflict — 告警要带判据与修法', () => {
     expect(s).toContain('"web"');
     expect(s).toContain('appId/appSecret');
     expect(s).toContain('后连的会顶掉先连的');
-    expect(s).toContain('settingsNs');
     expect(s).toContain('im-qqbot-2-desktop');
+  });
+
+  it('隔离已生效（v1.8.4+）→ 降级成提示：明确说"不会再互相覆盖"，但保留平台连接互顶的提醒', () => {
+    const s = describeNsConflict({
+      ns: 'im-qqbot-2',
+      owners: ['desktop', 'web'],
+      myProfile: 'web',
+      settingsFile: 'C:\\Users\\x\\.dsh\\qqbot-settings\\web\\im-qqbot-2.json',
+      isolated: true,
+    });
+    expect(s).toContain('按 profile 隔离');
+    expect(s).toContain('不会再互相覆盖');
+    expect(s).toContain('后连的会顶掉先连的');
+    expect(s).not.toContain('⚠️');
   });
 });
 

@@ -77,17 +77,30 @@ export function scanNsOwners(dshHome, targetNs) {
     }
     return out.sort();
 }
-/** 生成告警文案（日志与设置页共用；含判据与修法，别只说"有冲突"）。 */
+/** 生成告警/提示文案（日志与设置页共用；含判据与修法，别只说"有冲突"）。 */
 export function describeNsConflict(opts) {
-    const { ns, owners, myProfile = '', settingsFile = '' } = opts;
+    const { ns, owners, myProfile = '', settingsFile = '', isolated = false } = opts;
     const others = owners.filter((p) => p !== myProfile);
+    const head = `settingsNs "${ns}" 同时被这些 profile 挂载 → ${owners.map((p) => `"${p}"`).join('、')}` +
+        `（本实例在 profile "${myProfile || 'unknown'}"）。`;
+    // 2026-10-11 v1.8.4 起：设置文件已按 profile 隔离 → 撞 ns 不再等于"会互相覆盖"，文案降级为**提示**
+    if (isolated) {
+        return [
+            `ℹ️ ${head}`,
+            `自 v1.8.4 起设置文件**按 profile 隔离**${settingsFile ? `（本实例写 ${settingsFile}）` : ''}，`,
+            `所以它们各写各的、**不会再互相覆盖**；老的那份共用文件（{DSH_HOME}/qqbot-settings/<ns>.json）已不再被写入，可留作备份。`,
+            `仍要注意 QQ 平台侧：两个 profile 同时跑且 appId 相同时只保留一条活跃连接，后连的会顶掉先连的 —— `,
+            `那只能靠"只在一个 profile 里启用该实例"或"两个 profile 用不同 appId"解决。`,
+        ].join('');
+    }
     return [
-        `⚠️ settingsNs 冲突：设置槽 "${ns}" 同时被这些 profile 挂载 → ${owners.map((p) => `"${p}"`).join('、')}。`,
-        `本实例在 profile "${myProfile || 'unknown'}"，与 ${others.map((p) => `"${p}"`).join('、')} 共用同一份设置文件`,
-        `${settingsFile ? `（${settingsFile}）` : ''}：谁最后保存谁生效，凭据(appId/appSecret)/preset/cwd 会被一起换掉`,
-        `（cwd/dataRoot 一变，数据根、群守则、表情包、会话台账全跟着变）；两个 profile 同时跑且 appId 相同时，`,
-        `QQ 只保留一条活跃连接 —— 后连的会顶掉先连的，表现就是"突然收不到消息"。`,
-        `修法：给其中一个 profile 换 settingsNs（如 "${ns}-desktop"），或只在一个 profile 里启用该实例（另一处写 disabled: true）。`,
+        `⚠️ ${head}`,
+        `本实例与 ${others.map((p) => `"${p}"`).join('、')} 共用同一份设置文件${settingsFile ? `（${settingsFile}）` : ''}：`,
+        `谁最后保存谁生效，凭据(appId/appSecret)/preset/cwd 会被一起换掉（cwd/dataRoot 一变，数据根、群守则、表情包、`,
+        `会话台账全跟着变）；两个 profile 同时跑且 appId 相同时，QQ 只保留一条活跃连接 —— 后连的会顶掉先连的，`,
+        `表现就是"突然收不到消息"。`,
+        `修法：升级到 1.8.4+（设置文件按 profile 隔离，各写各的），或给其中一个 profile 换 settingsNs（如 "${ns}-desktop"）、`,
+        `只在一个 profile 里启用该实例（另一处写 disabled: true）。`,
     ].join('');
 }
 /**

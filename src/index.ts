@@ -168,7 +168,9 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
     const owners = scanNsOwners(nsHome, ns);
     const others = owners.filter((p) => p !== myProfile);
     if (others.length) {
-      logger.warn(describeNsConflict({ ns, owners, myProfile, settingsFile: ownSettingsFile }));
+      // 拿得到 profile 名 = 隔离生效（v1.8.4 起设置文件按 profile 隔离）→ 只是提示；拿不到才是真风险 → warn
+      const msg = describeNsConflict({ ns, owners, myProfile, settingsFile: ownSettingsFile, isolated: !!myProfile });
+      if (myProfile) logger.info(msg); else logger.warn(msg);
     } else if (owners.length) {
       logger.info(`settingsNs 自检通过：设置槽 "${ns}" 只被 profile "${owners[0]}" 挂载`);
     }

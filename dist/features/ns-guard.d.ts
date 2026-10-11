@@ -7,12 +7,14 @@ export declare function settingsNsOfPatch(txt: string): string[];
  * 只读；任何一步失败都当作"没扫到" —— 自检绝不能反过来把启动搞挂。
  */
 export declare function scanNsOwners(dshHome: string, targetNs: string): string[];
-/** 生成告警文案（日志与设置页共用；含判据与修法，别只说"有冲突"）。 */
+/** 生成告警/提示文案（日志与设置页共用；含判据与修法，别只说"有冲突"）。 */
 export declare function describeNsConflict(opts: {
     ns: string;
     owners: string[];
     myProfile?: string;
     settingsFile?: string;
+    /** profile 隔离是否生效（拿得到 DSH_PROFILE = 生效）。生效时这只是**提示**，不生效才是真风险。 */
+    isolated?: boolean;
 }): string;
 /**
  * 设置文件的路径（2026-10-11 起**按 profile 隔离**）。
