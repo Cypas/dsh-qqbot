@@ -1,3 +1,22 @@
+## [1.8.3] - 2026-10-11
+
+> 修一个"看不见但会互相覆盖"的坑：**两个 profile 用同一个 settingsNs**（web + desktop 各挂一个实例）时，
+> 两边写的是同一份设置文件 `{DSH_HOME}/qqbot-settings/<ns>.json` —— 谁最后保存谁生效。
+
+### 🐛 修复
+
+- **web 与 desktop 的凭据/配置会互相覆盖**（实测：web 的 appId/preset/cwd 被 desktop 顶替，随后同一 appId
+  只保留一条 QQ 连接、后连的顶掉先连的 → 表现成"突然收不到消息"）：`settingsNs` 是**全局唯一**的设置槽名，
+  设置文件路径里没有 profile 维度，而插件原先没有任何冲突提示。现在两侧都加防护：
+  - **启动自检**（新增 `src/features/ns-guard.ts`，纯只读、不阻断启动）：扫 `profiles/*/cordis.patch.yml`，
+    发现同一 ns 还被**别的** profile 挂载（整行 `disabled: true` 的不算）就打出完整告警 —— 谁和谁共用、
+    后果是什么（凭据被换 / cwd 一变数据根与群守则跟着变 / 两个 profile 互顶连接）、以及两种修法。
+  - **写入者指纹**：设置槽旁记一份 `<ns>.writer.json`（记"这个槽是哪个 profile 在写"）。若该槽已被别的
+    profile 写过、而本实例在另一个 profile → 保存直接 **409 NS_CONFLICT** 并附修法，**不再静默覆盖**；
+    `GET /api/qqbot-settings/read` 同时返回 `writerProfile` / `nsConflict`，设置页能直接看到。
+    确实要让本 profile 接管：删掉 `<ns>.writer.json` 再保存即可。
+- 配套回归 `src/features/ns-guard.test.ts`（8 条）：insert 嵌套形态、整行 disabled 不算占用、没写 settingsNs 落默认槽、
+  目录不存在不抛错、告警文案必须含判据与修法。
 ## [1.8.2] - 2026-10-11
 
 > 引用体验补丁 + 一个能直接用的扩展示例。

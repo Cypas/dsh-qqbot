@@ -11,6 +11,7 @@ import { ConfigSchema, EditableConfigSchema } from './config.js';
 import { bootstrapGateway } from './gateway/index.js';
 import { takePendingMemoText } from './features/people-memo.js';
 import { getProfileDir, resolveEnv } from './shared/index.js';
+import { describeNsConflict, scanNsOwners } from './features/ns-guard.js';
 void getProfileDir;
 import { runQrSetup, persistCredentialsToProfile } from './setup.js';
 // 2026-09-24 关闭"启动自动扫码"后，这些符号保留给设置页路径使用；此处显式引用避免 TS 未使用报错。
@@ -139,6 +140,26 @@ export async function apply(ctx, config) {
     if (Object.keys(ownSettings).length) {
         Object.assign(resolvedConfig, mergeDeep(resolvedConfig, ownSettings));
         logger.info(`已加载插件自有设置(${Object.keys(ownSettings).length} 项): ${ownSettingsFile}`);
+    }
+    // ── 2026-10-11 新增：settingsNs 冲突自检（判据与修法见 features/ns-guard.ts 顶部注释）──
+    // ns 是"全局唯一"的设置槽名，而设置文件路径 {DSH_HOME}/qqbot-settings/<ns>.json 里**没有 profile 维度**：
+    // 两个 profile 各挂一个实例却填了同一个 ns 时，两边共用一份文件 → 谁最后保存谁生效，凭据/preset/cwd
+    // 一起被换掉（实测：web 的配置被 desktop 覆盖、QQ 连接被顶掉后收不到消息）。
+    // 这里只做**只读探测 + 告警**：不改任何 profile 文件、也不阻断启动。
+    try {
+        const nsHome = process.env.DSH_HOME || join(homedir(), '.dsh');
+        const myProfile = String(process.env.DSH_PROFILE ?? '').trim();
+        const owners = scanNsOwners(nsHome, ns);
+        const others = owners.filter((p) => p !== myProfile);
+        if (others.length) {
+            logger.warn(describeNsConflict({ ns, owners, myProfile, settingsFile: ownSettingsFile }));
+        }
+        else if (owners.length) {
+            logger.info(`settingsNs 自检通过：设置槽 "${ns}" 只被 profile "${owners[0]}" 挂载`);
+        }
+    }
+    catch (e) {
+        logger.warn(`settingsNs 自检跳过（不影响启动）: ${e instanceof Error ? e.message : String(e)}`);
     }
     // ⚠️ 2026-09-28 修：监听里除了热更新配置，还要处理"从无凭据 → 有凭据"的自动启动网关。
     //   背景：bootstrapGateway 只在 apply() 里跑一次。用户首次安装时没有凭据，

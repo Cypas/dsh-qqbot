@@ -231,11 +231,57 @@ function readOwnSettings(ns) {
     return o && typeof o === 'object' ? o : {};
   } catch { return {}; }
 }
+/**
+ * 写入者指纹（2026-10-11）：`<ns>.writer.json` 记「这个设置槽是哪个 profile 在写」。
+ *
+ * 起因（主人实测）：web 与 desktop 两个 profile 挂了**同一个 settingsNs**，于是共用
+ * `{DSH_HOME}/qqbot-settings/<ns>.json` —— 谁最后保存谁生效，凭据(appId/appSecret)/preset/cwd
+ * 一起被换掉（web 的配置被 desktop 顶替，紧接着 QQ 连接也被顶掉、收不到消息）。
+ *
+ * 指纹放**单独文件**而不塞进设置 JSON：配置结构保持干净，前端无感。
+ * 规则：槽里已记着"别的 profile"、而本实例在另一个 profile → **拒绝静默覆盖**（抛 NS_CONFLICT）。
+ * 想强行接管：删掉 `<ns>.writer.json` 再保存，或干脆给其中一个 profile 换 settingsNs。
+ */
+function nsWriterPath(ns) {
+  return ownSettingsPath(ns).replace(/\.json$/, '.writer.json');
+}
+function readNsWriter(ns) {
+  try {
+    const p = nsWriterPath(ns);
+    if (!existsSync(p)) return null;
+    const o = JSON.parse(readFileSync(p, 'utf8'));
+    return o && typeof o === 'object' ? o : null;
+  } catch { return null; }
+}
+function myProfileName() {
+  return String(process.env.DSH_PROFILE || '').trim() || 'unknown';
+}
+/** 该设置槽是否正被**别的** profile 占用（供 /read 与 /update 共用） */
+function nsConflictOf(ns) {
+  const prev = readNsWriter(ns);
+  const me = myProfileName();
+  if (!prev || !prev.profile) return null;
+  if (prev.profile === 'unknown' || me === 'unknown' || prev.profile === me) return null;
+  return { prev: String(prev.profile), me };
+}
 function writeOwnSettings(ns, obj) {
   const p = ownSettingsPath(ns);
+  const me = myProfileName();
+  const conflict = nsConflictOf(ns);
+  if (conflict) {
+    const err = new Error(
+      `设置槽 "${ns}" 已被 profile "${conflict.prev}" 占用，而本实例在 profile "${conflict.me}"：` +
+      `两个 profile 共用同一个 settingsNs 会互相覆盖（凭据/preset/cwd 一起被换）。` +
+      `修法：给其中一个 profile 换 settingsNs（如 "${ns}-${conflict.me}"）；` +
+      `确实要让本 profile 接管，就先删掉 ${nsWriterPath(ns)} 再保存。`,
+    );
+    err.code = 'NS_CONFLICT';
+    throw err;
+  }
   try { mkdirSync(OWN_SETTINGS_DIR, { recursive: true }); } catch { /* ignore */ }
   try { if (existsSync(p)) writeFileSync(p + '.bak-' + Date.now(), readFileSync(p)); } catch { /* 备份失败不阻塞 */ }
   writeFileSync(p, JSON.stringify(obj, null, 2), 'utf8');
+  try { writeFileSync(nsWriterPath(ns), JSON.stringify({ profile: me, at: Date.now(), file: p }, null, 2), 'utf8'); } catch { /* 指纹写失败不阻塞 */ }
   return p;
 }
 /** 深合并一层（够用：本插件嵌套只到 groupAdmin / sticker.gates 这一层）。 */
@@ -412,7 +458,17 @@ export function apply(ctx) {
     const own = readOwnSettings(ns);
     // 自有存储优先：它就是用户在设置页保存的那份
     const value = Object.assign({}, base.value || {}, own);
-    writeJson(res, 200, { value, revision: base.revision, source: Object.keys(own).length ? 'own' : 'patch' });
+    // 2026-10-11: 顺手把"这个槽是谁在写"告诉前端 —— 被**别的 profile**占用时设置页能一眼看到（判据同 writeOwnSettings）
+    const w = readNsWriter(ns);
+    const conflict = nsConflictOf(ns);
+    writeJson(res, 200, {
+      value,
+      revision: base.revision,
+      source: Object.keys(own).length ? 'own' : 'patch',
+      writerProfile: w && w.profile ? String(w.profile) : '',
+      writerAt: w && w.at ? Number(w.at) : 0,
+      nsConflict: conflict ? { writtenBy: conflict.prev, currentProfile: conflict.me } : null,
+    });
   });
   route(ctx, 'POST', '/api/qqbot-settings/update', async (req, res) => {
     const body = await readJsonBody(req);
@@ -437,6 +493,8 @@ export function apply(ctx) {
         note: '已保存（插件自有存储，热生效）',
       });
     } catch (e) {
+      // 2026-10-11: 设置槽被**别的 profile** 占用 → 409 + 原样文案（前端直接显示；绝不静默覆盖）
+      if (e && e.code === 'NS_CONFLICT') return writeJson(res, 409, { error: String(e.message ?? e), code: 'NS_CONFLICT' });
       writeJson(res, 500, { error: '保存失败：' + String(e?.message ?? e) });
     }
   });
