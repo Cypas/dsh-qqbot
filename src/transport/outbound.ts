@@ -9,7 +9,6 @@ import type { ImQQBotConfig } from '../config.js';
 import type { Logger, ReplyTarget } from '../types.js';
 import { OutboundBuffer, sendRichOutbound, type QQBotSender } from './outbound-buffer.js';
 import { resolveMsgIndex } from './msg-index.js';
-import { findSelfSaid } from './self-said.js';
 import { dataRootOf } from '../gateway/data-root.js';
 import { noteThinking } from '../features/thinking-log.js';
 import { noteTurnSignals, extractInnerText, applyTurnAttitude } from '../features/four-source.js';
@@ -554,14 +553,6 @@ class OutboundRouter {
         this.chunkTargetFn(_record),
         undefined,
         this.refLookupFor(_record),
-        // 自引用查表(2026-10-11 主人定): [rfself:一句文字] → 自己说过的那条 msg_id（纯词法：精确逐字 → 片段覆盖率）
-        (q) =>
-          findSelfSaid(
-            dataRootOf(this.config),
-            _record.replyTarget.scope,
-            String(_record.replyTarget.targetId ?? ''),
-            q,
-          ),
       );
     } catch (err) {
       this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);

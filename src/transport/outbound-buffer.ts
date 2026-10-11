@@ -12,7 +12,6 @@ import {
   containsRecall,
   collectRecallIndices,
   extractRefTag,
-  extractSelfRefTag,
   parseOutbound,
   stripDirectives,
   resolveSource,
@@ -81,33 +80,18 @@ export async function sendRichOutbound(
   onBlockSent?: (text: string, target: ReplyTarget) => void,
   /** 引用短号查表(2026-09-13 主人定): 传短号(如 0913a) → 完整 msg_id; 台账见 transport/msg-index.ts */
   refLookup?: (index: string) => string | undefined,
-  /** 自引用查表(2026-10-11 主人定): 传一句文字 → 「自己说过的那条」的 msg_id。
-   *  匹配是**纯词法**（精确逐字 → 片段覆盖率打分，命中不了返回 undefined），见 transport/self-said.ts */
-  selfLookup?: (query: string) => { id: string; t: string } | undefined,
 ): Promise<void> {
-  // 引用消息: 两种标记，二选一（一条消息只能引用一条）
-  //   ① [rf:短号]（2026-09-13）—— 按短号精确引用台账里的某条（多为群友的）
-  //   ② [rfself:一句文字]（2026-10-11）—— **按文字引用自己说过的话**（QQ 已实测允许机器人引用自己的消息）
+  // 引用消息(2026-09-13 主人定): 正文里的 [rf:短号] → 查本地台账还原完整 msg_id → 以"引用"形式发出
   const ref = extractRefTag(text);
-  const selfRef = extractSelfRefTag(text);
   const refId = (() => {
     const idx = ref?.index;
-    if (idx) {
-      if (refLookup) {
-        try { const hit = refLookup(idx); if (hit) return hit; } catch { /* 查表失败按无引用处理 */ }
-      }
-      // 兜底: AI 若直接写了完整 msg_id(ROBOT1.0_…)也接受
-      if (/^ROBOT1\.0_/i.test(idx)) return idx;
-      logError?.(`im-qqbot: 引用短号 ${idx} 在台账里查不到, 本条按普通消息发出`);
+    if (!idx) return '';
+    if (refLookup) {
+      try { const hit = refLookup(idx); if (hit) return hit; } catch { /* 查表失败按无引用处理 */ }
     }
-    // ② 模糊自引用：**命中才引用**，没命中就普通发出（宁可不引用，也绝不乱指一条）
-    if (selfRef?.query && selfLookup) {
-      try {
-        const hit = selfLookup(selfRef.query);
-        if (hit?.id) return hit.id;
-        logError?.(`im-qqbot: [rfself:${selfRef.query}] 没匹配到自己说过的消息, 本条按普通消息发出`);
-      } catch { /* 查表失败按无引用处理 */ }
-    }
+    // 兜底: AI 若直接写了完整 msg_id(ROBOT1.0_…)也接受
+    if (/^ROBOT1\.0_/i.test(idx)) return idx;
+    logError?.(`im-qqbot: 引用短号 ${idx} 在台账里查不到, 本条按普通消息发出`);
     return '';
   })();
   // 叠加引用(2026-09-13 修): 保留 msgId(被动回复) + 加 referenceMessageId —— SDK send() 支持

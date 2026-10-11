@@ -14,7 +14,6 @@ import { handleInbound, createOutboundHandler } from '../transport/index.js';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.js';
 import type { QQBotSender } from '../transport/outbound-buffer.js';
 import { buildUserAgent } from '../shared/index.js';
-import { rememberSelfSaid } from '../transport/self-said.js';
 import type { ImQQBotConfig, BotplayEventConfig } from '../config.js';
 import type { Logger } from '../types.js';
 import { setupMiddlewares } from './middleware-setup.js';
@@ -211,18 +210,13 @@ export async function bootstrapGateway(
   const HISTORY_LIMIT = 10;
   const sentByPeer = new Map<string, { target: ReplyTarget; id: string }[]>();
   const keyOf = (t: { scope: string; targetId: string }) => `${t.scope}:${t.targetId}`;
-  const pushSent = (target: ReplyTarget, id: string | undefined, text?: string): void => {
+  const pushSent = (target: ReplyTarget, id: string | undefined): void => {
     if (!id) return;
     const k = keyOf(target);
     let arr = sentByPeer.get(k);
     if (!arr) { arr = []; sentByPeer.set(k, arr); }
     arr.unshift({ target, id }); // 最新在前
     if (arr.length > HISTORY_LIMIT) arr.length = HISTORY_LIMIT;
-    // 2026-10-11: 顺手记进「自发言台账」(msg_id + 文本)，供正文里的 [rfself:一句文字] 把自己说过的话找回来。
-    //   ⚠️ 这里只落盘、不查表；匹配在 transport/self-said.ts（**纯词法**，不接本地小模型）。
-    try {
-      rememberSelfSaid(dataRootOf(config), target.scope, String(target.targetId ?? ''), id, text || '');
-    } catch { /* 记账失败不阻塞发送 */ }
   };
   const doRecall = async (target: ReplyTarget, index: number): Promise<boolean> => {
     const arr = sentByPeer.get(keyOf(target));
@@ -268,7 +262,7 @@ export async function bootstrapGateway(
             : { target, msgType: 0 as const, content: rawText, messageReference: { message_id: refId } };
           try {
             const resp = (await bot.send(refBody as never)) as { id?: string } | undefined;
-            pushSent(target, resp?.id, rawText);
+            pushSent(target, resp?.id);
             return resp;
           } catch (refErr) {
             logger.warn(`引用消息发送失败, 降级为普通发送: ${refErr instanceof Error ? refErr.message : String(refErr)}`);
@@ -278,11 +272,11 @@ export async function bootstrapGateway(
         // 纯文本降级: 无 markdown 语法/@标签 → 直接纯文本通道, 省富媒体额度与频控
         if (!hasMarkdownSyntax(rawText)) {
           const respT = (await bot.sendText(target, rawText)) as { id?: string } | undefined;
-          pushSent(target, respT?.id, rawText);
+          pushSent(target, respT?.id);
           return respT;
         }
         const resp = (await bot.sendMarkdown(target, content)) as { id?: string } | undefined;
-        pushSent(target, resp?.id, rawText);
+        pushSent(target, resp?.id);
         return resp;
       } catch (err) {
         const firstErr = err instanceof Error ? err.message : String(err);
@@ -302,7 +296,7 @@ export async function bootstrapGateway(
           try {
             const act = { scope: target.scope, targetId: target.targetId } as typeof target;
             const r0 = (await bot.sendMarkdown(act, content)) as { id?: string } | undefined;
-            pushSent(act, r0?.id, content);
+            pushSent(act, r0?.id);
             logger.warn(`被动回复被拒(msgId 失效) → 已去掉 msgId 转主动发送成功: ${firstErr}`);
             diagWrite('qqbot-send-diag', `[${new Date().toISOString()}] 已降级为主动发送成功 target=${String(target.targetId ?? '').slice(0, 12)}…`);
             return r0;
@@ -330,14 +324,14 @@ export async function bootstrapGateway(
           if (plain) {
             try {
               const r2 = (await bot.sendText(target, plain)) as { id?: string } | undefined;
-              pushSent(target, r2?.id, plain);
+              pushSent(target, r2?.id);
               logger.warn(`主动推送 markdown 被拒, 已降级纯文本发送: ${firstErr}`);
               return r2;
             } catch (err2) {
               if (target.scope === 'c2c') {
                 try {
                   const r3 = (await bot.sendWakeup(target, plain)) as { id?: string } | undefined;
-                  pushSent(target, r3?.id, plain);
+                  pushSent(target, r3?.id);
                   logger.warn(`主动纯文本被拒, 已降级 is_wakeup 召回通道: ${err2 instanceof Error ? err2.message : String(err2)}`);
                   return r3;
                 } catch (err3) {
@@ -359,7 +353,7 @@ export async function bootstrapGateway(
       const resp = (await bot.send(
         { target, msgType: 2, markdown: { content }, keyboard: keyboard as never },
       )) as { id?: string } | undefined;
-      pushSent(target, resp?.id, content);
+      pushSent(target, resp?.id);
       return resp;
     },
     openStream: (target) => bot.openStream({

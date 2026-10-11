@@ -84,13 +84,7 @@ export function parseOutbound(text: string): Segment[] {
  * 把标记文本清理成"仅剩要展示的纯文本"（去掉富媒体/撤回/引用指令），供降级/预览。
  */
 export function stripDirectives(text: string): string {
-  return text
-    .replace(MEDIA_RE, '')
-    .replace(RECALL_G_RE, '')
-    .replace(REF_TAG_RE, '')
-    .replace(RF_SELF_RE, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return text.replace(MEDIA_RE, '').replace(RECALL_G_RE, '').replace(REF_TAG_RE, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /**
@@ -106,24 +100,6 @@ export function extractRefTag(text: string): { index: string; rest: string } | u
   if (!index) return undefined;
   const rest = text.replace(REF_TAG_RE, '').replace(/\n{3,}/g, '\n\n').trim();
   return { index, rest };
-}
-
-/**
- * `[rfself:一句文字]`（2026-10-11 主人定）：**用文字找自己说过的话**并引用它。
- *
- * 与 `[rf:短号]` 并列的另一条路：短号是精确引用（要记住那串号），这个不用记号 ——
- * 写一句能认出那句话的文字即可，例如 `[rfself:先重启再在设置页保存]`。
- * 本函数只负责"取出这句查询"（顺带由 stripDirectives 把它从展示文本里剥掉）；
- * 真正的查找在 `transport/self-said.ts`，**纯词法**（精确逐字 → 片段覆盖率打分 → 不达标不引用）。
- */
-const RF_SELF_RE = /\[rfself:\s*([^\]\n]{1,120})\]/gi;
-
-export function extractSelfRefTag(text: string): { query: string } | undefined {
-  RF_SELF_RE.lastIndex = 0;
-  const m = RF_SELF_RE.exec(String(text ?? ''));
-  if (!m) return undefined;
-  const query = String(m[1] ?? '').trim();
-  return query ? { query } : undefined;
 }
 
 /**

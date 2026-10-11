@@ -51,13 +51,7 @@ chunkTarget?: (i: number, total: number) => ReplyTarget,
  *  配额即重置, 计数必须跟着归零, 否则会误补发(2026-09-10 主人指出)。 */
 onBlockSent?: (text: string, target: ReplyTarget) => void, 
 /** 引用短号查表(2026-09-13 主人定): 传短号(如 0913a) → 完整 msg_id; 台账见 transport/msg-index.ts */
-refLookup?: (index: string) => string | undefined, 
-/** 自引用查表(2026-10-11 主人定): 传一句文字 → 「自己说过的那条」的 msg_id。
- *  匹配是**纯词法**（精确逐字 → 片段覆盖率打分，命中不了返回 undefined），见 transport/self-said.ts */
-selfLookup?: (query: string) => {
-    id: string;
-    t: string;
-} | undefined): Promise<void>;
+refLookup?: (index: string) => string | undefined): Promise<void>;
 export declare class OutboundBuffer {
     private readonly record;
     private readonly bot;
