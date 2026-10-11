@@ -13,6 +13,7 @@
  * 挂载 preset（工具集、prompt sections 等），实现场景化配置。
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { describeExtCommandReload, reloadExtCommands } from '../features/ext-reload.js';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { FIXED_CHANNEL_CONTEXT, REFERENCE_CONTEXT } from '../config.js';
 import { takePendingMemoText } from '../features/people-memo.js';
@@ -827,8 +828,11 @@ export class SessionManager {
                 targets.push(agentCtx);
             }
         }
+        // 2026-10-12 主人定：命令表也要一起热重载（此前扩展命令改了必须重启插件才生效）。
+        //   放在"有没有活动会话"判断**之前** —— 没有任何会话时，命令照样能刷。
+        const cmdLine = describeExtCommandReload(await reloadExtCommands());
         if (targets.length === 0) {
-            return '当前没有活动会话可热刷(先随便发条消息让会话跑起来, 再试 /tools-reload)';
+            return `当前没有活动会话可热刷(先随便发条消息让会话跑起来, 再试 /tools-reload)\n${cmdLine}`;
         }
         let ok = 0;
         let fail = 0;
@@ -842,7 +846,7 @@ export class SessionManager {
                 this.logger.warn?.(`im-qqbot: 热刷新失败: ${err instanceof Error ? err.message : String(err)}`);
             }
         }
-        return `✅ 工具热刷新完成: ${ok} 个会话成功${fail > 0 ? `, ${fail} 个失败(见日志)` : ''}。新工具下一条消息即可用。`;
+        return `✅ 工具热刷新完成: ${ok} 个会话成功${fail > 0 ? `, ${fail} 个失败(见日志)` : ''}。新工具下一条消息即可用。\n${cmdLine}`;
     }
     /** cwd 分流(通用, 不写死实例名): 只对本实例配置的 cwd 匹配的 agent 注入本实例群守则。
      *  每个实例在 patch 里配自己的 cwd + settingsNs, 即自动分流;

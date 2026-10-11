@@ -9,6 +9,6 @@ export declare function pingCommand(): SlashCommand;
 export declare function versionCommand({ manager }: CommandDeps): SlashCommand;
 /** /bot-stop — 中止当前生成（隐藏） */
 export declare function stopCommand(): SlashCommand;
-/** /tools-reload — 热刷新 QQ 通道工具(开发用, 2026-09-05): 新增工具即时生效, 无需重启宿主 */
+/** /tools-reload — 热刷新 QQ 通道工具与扩展命令(开发用, 2026-09-05): 新增工具即时生效, 无需重启宿主 */
 export declare function toolsReloadCommand({ manager }: CommandDeps): SlashCommand;
 //# sourceMappingURL=misc.d.ts.map

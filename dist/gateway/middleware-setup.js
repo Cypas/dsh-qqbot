@@ -7,6 +7,7 @@ import { prefetchQuoteImages } from '../transport/quote-images.js';
 import { stickerCapture } from '../middleware/sticker-capture.js';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.js';
 import { loadExtensionCommands } from '../features/extension-store.js';
+import { registerExtCommandReloader } from '../features/ext-reload.js';
 import { makeExtCaps } from '../features/ext-capabilities.js';
 import { stickerActivityRecorder } from '../features/sticker-gate.js';
 import { chatLedgerRecorder } from '../features/chat-ledger.js';
@@ -17,20 +18,36 @@ export async function setupMiddlewares(bot, config, manager, logger,
 pluginCtx) {
     // 0. 用户扩展命令(P4.1): 加载插件包外扩展目录的命令, 并入下方 cmdList/slash,
     //    群聊前置解析 cmdMap 与 SDK slash 双通道自然覆盖 → /扩展命令 重启后即用。
-    const extensionCommands = await loadExtensionCommands(dataRootOf(config), logger);
-    if (extensionCommands.length > 0) {
-        logger.info(`[im-qqbot] 用户扩展命令已加载: ${extensionCommands.length} 个`);
-    }
+    // ⚠️ 2026-10-12 主人定：命令表改为**可重建**。此前扩展命令只在启动时扫一次，
+    //    改 `.qqbot-extensions/commands/*.js` 必须重启插件；现在与扩展工具一视同仁支持热重载
+    //    （热刷入口 SessionManager.reloadAllChannelTools → reloadExtCommands，见 features/ext-reload.ts）。
+    //    注意 cmdList / cmdMap 都**保持同一引用、只换内容** —— 它们还会被下面的对象捕获(如 commands: cmdList)。
     // ── 命令表提前构建(2026-09-08): 供"历史缓冲跳过命令消息"(命令不进 AI 上下文) + 第8步命令执行复用 ──
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cmdList = [...buildCommandList({ manager, config }), ...extensionCommands];
+    const cmdList = [];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cmdMap = new Map();
-    for (const c of cmdList) {
-        const names = Array.isArray(c.name) ? c.name : [c.name];
-        for (const n of names)
-            cmdMap.set(String(n).toLowerCase(), c);
-    }
+    /** 重扫扩展目录 + 重建命令表；首次启动与热重载走同一条路，避免两套逻辑漂移 */
+    const rebuildCommandTable = async () => {
+        const ext = await loadExtensionCommands(dataRootOf(config), logger);
+        const all = [...buildCommandList({ manager, config }), ...ext];
+        cmdList.length = 0;
+        cmdList.push(...all);
+        cmdMap.clear();
+        for (const c of all) {
+            const names = Array.isArray(c.name) ? c.name : [c.name];
+            for (const n of names)
+                cmdMap.set(String(n).toLowerCase(), c);
+        }
+        const names = Array.from(new Set(ext.flatMap((c) => (Array.isArray(c.name) ? c.name : [c.name])).map(String)));
+        if (names.length > 0) {
+            logger.info(`[im-qqbot] 用户扩展命令已加载: ${names.length} 个 → ${names.map((n) => '/' + n).join(', ')}`);
+        }
+        return { names };
+    };
+    await rebuildCommandTable();
+    // 注册给热重载入口：工具热刷时顺带重扫扩展命令（解耦见 features/ext-reload.ts）
+    registerExtCommandReloader(rebuildCommandTable);
     /** 斜杠开头且命中真实命令(含 stop/bot-stop)→ 返回命令名小写; 未知命令/纯文本 → null(放行) */
     const knownCmdName = (content) => {
         const t = String(content ?? '').trim();
@@ -261,9 +278,16 @@ pluginCtx) {
         })();
         const handlerArg = { ...ctx, command: parsed };
         if (capsForCmd) {
-            for (const [k, v] of Object.entries(capsForCmd))
-                if (!(k in handlerArg))
+            // ⚠️ 2026-10-12 修（探针实测驱动）：原判据 `!(k in handlerArg)` 只问"有没有这个键"，
+            //   而中间件 ctx 里 sender / agent 这类键**存在但值是 undefined**，于是 caps 里的好值
+            //   全被跳过 —— 命令 ctx 顶层 hasSender=false / hasAgent=false，可同一个 caps 在工具侧
+            //   却是好的。扩展工具拿得到的能力，扩展命令也必须拿得到：改成"值为 undefined 才补"。
+            for (const [k, v] of Object.entries(capsForCmd)) {
+                if (v === undefined)
+                    continue;
+                if (!(k in handlerArg) || handlerArg[k] === undefined)
                     handlerArg[k] = v;
+            }
             handlerArg.caps = capsForCmd;
         }
         try {

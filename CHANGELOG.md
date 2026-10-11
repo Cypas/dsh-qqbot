@@ -1,3 +1,25 @@
+## [1.8.6] - 2026-10-12
+
+> 扩展命令与扩展工具**能力对齐**：命令侧终于拿得到 sender / agent / kernel；热重载也覆盖扩展命令了。
+
+### 🐛 修复
+
+- **扩展命令的 caps 好值被跳过**（探针实测驱动）：合并能力包时判据是 `if (!(k in handlerArg))`，
+  只问"有没有这个键"，而中间件 ctx 里 `sender` / `agent` 这类键**存在但值为 undefined**
+  ⇒ caps 里的好值全被跳过。命令 ctx 实测 `hasSender=false` / `hasAgent=false`，而同一个 caps
+  在工具侧是好的 —— 这就是"扩展工具能开 MC 双向通道、`/mclink` 却装不上钩子"的根因。
+  判据改为「**值为 undefined 才补**」。
+
+### ✨ 新增
+
+- **扩展命令热重载**：`/tools-reload` 与 `tools_reload` 现在把 `.qqbot-extensions/commands` 与
+  `tools` 一起重扫，改扩展命令不再需要重启插件。
+  - 新增 `src/features/ext-reload.ts`（模块级注册表，解耦 SessionManager 与 gateway 层）；
+  - `middleware-setup` 把命令表构建抽成 `rebuildCommandTable()`，首次启动与热重载走**同一条路**；
+    `cmdList` / `cmdMap` 保持同一引用只换内容（有对象捕获了 `commands: cmdList`）；
+  - `SessionManager.reloadAllChannelTools()` 顺带重载命令，回执多一行「扩展命令: N 个已重载 → /xxx」，
+    且放在"有没有活动会话"判断之前 —— 没有会话时命令也能刷。
+  - 回归：`src/features/ext-reload.test.ts`（4 项）。
 ## [1.8.4] - 2026-10-11
 
 > 把"不同 profile 互相覆盖配置"从"拦住"升级成"根本不共用"：**设置文件按 profile 隔离**。

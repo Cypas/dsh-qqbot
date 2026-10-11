@@ -2079,7 +2079,7 @@ export async function apply(ctx: Context): Promise<void> {
   // 调本工具即可让新扩展注册进当前会话(等价于 /tools-reload 斜杠), 不再依赖主人手发。
   const toolsReloadTool = defineTool({
     name: 'tools_reload',
-    description: '热刷新 QQ 通道工具: 重新扫描并注册扩展目录(.qqbot-extensions/tools)里的用户工具+重载内置工具。写完/更新扩展工具后调用一次, 下条消息即可用新工具(等价于 /tools-reload)。开发/装配用, 平时不需要调。',
+    description: '热刷新 QQ 通道工具与扩展命令: 重新扫描扩展目录(.qqbot-extensions 的 tools 与 commands)并重载内置工具。写完/更新扩展工具或扩展命令后调用一次, 下条消息即可用新工具(等价于 /tools-reload)。开发/装配用, 平时不需要调。',
     parameters: {},
     output: {
       schema: {
