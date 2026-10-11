@@ -31,6 +31,9 @@ export declare function extractRefTag(text: string): {
     index: string;
     rest: string;
 } | undefined;
+export declare function extractSelfRefTag(text: string): {
+    query: string;
+} | undefined;
 /**
  * 把 agent 给出的 source 解析为可直接喂给底层 sendImage/sendFile 的来源。
  * 规则：

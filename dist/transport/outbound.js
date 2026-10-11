@@ -1,5 +1,6 @@
 import { OutboundBuffer, sendRichOutbound } from './outbound-buffer.js';
 import { resolveMsgIndex } from './msg-index.js';
+import { findSelfSaid } from './self-said.js';
 import { dataRootOf } from '../gateway/data-root.js';
 import { noteThinking } from '../features/thinking-log.js';
 import { noteTurnSignals, extractInnerText, applyTurnAttitude } from '../features/four-source.js';
@@ -468,7 +469,9 @@ class OutboundRouter {
     /** 统一发送：逐条自适应目标(适配主动) + 富媒体感知分块；媒体指令([MEDIA:..]/[RECALL])被剔除，失败降级记录 */
     async send(_record, text, tag) {
         try {
-            await sendRichOutbound(this.bot, _record.replyTarget, text, this.config.textChunkLimit, this.config.cwd, (m) => this.logger.error(m), () => this.resolveTarget(_record), this.chunkTargetFn(_record), undefined, this.refLookupFor(_record));
+            await sendRichOutbound(this.bot, _record.replyTarget, text, this.config.textChunkLimit, this.config.cwd, (m) => this.logger.error(m), () => this.resolveTarget(_record), this.chunkTargetFn(_record), undefined, this.refLookupFor(_record), 
+            // 自引用查表(2026-10-11 主人定): [rfself:一句文字] → 自己说过的那条 msg_id（纯词法：精确逐字 → 片段覆盖率）
+            (q) => findSelfSaid(dataRootOf(this.config), _record.replyTarget.scope, String(_record.replyTarget.targetId ?? ''), q));
         }
         catch (err) {
             this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);

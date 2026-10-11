@@ -4,6 +4,7 @@ import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol';
 import { SessionManager } from '../session/index.js';
 import { handleInbound, createOutboundHandler } from '../transport/index.js';
 import { buildUserAgent } from '../shared/index.js';
+import { rememberSelfSaid } from '../transport/self-said.js';
 import { setupMiddlewares } from './middleware-setup.js';
 import { configureDiag, diagWrite } from '../shared/diag.js';
 import { dataRootOf, migrateLegacyData, stickerDirOf } from './data-root.js';
@@ -194,7 +195,7 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
     const HISTORY_LIMIT = 10;
     const sentByPeer = new Map();
     const keyOf = (t) => `${t.scope}:${t.targetId}`;
-    const pushSent = (target, id) => {
+    const pushSent = (target, id, text) => {
         if (!id)
             return;
         const k = keyOf(target);
@@ -206,6 +207,12 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
         arr.unshift({ target, id }); // 最新在前
         if (arr.length > HISTORY_LIMIT)
             arr.length = HISTORY_LIMIT;
+        // 2026-10-11: 顺手记进「自发言台账」(msg_id + 文本)，供正文里的 [rfself:一句文字] 把自己说过的话找回来。
+        //   ⚠️ 这里只落盘、不查表；匹配在 transport/self-said.ts（**纯词法**，不接本地小模型）。
+        try {
+            rememberSelfSaid(dataRootOf(config), target.scope, String(target.targetId ?? ''), id, text || '');
+        }
+        catch { /* 记账失败不阻塞发送 */ }
     };
     const doRecall = async (target, index) => {
         const arr = sentByPeer.get(keyOf(target));
@@ -252,7 +259,7 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
                         : { target, msgType: 0, content: rawText, messageReference: { message_id: refId } };
                     try {
                         const resp = (await bot.send(refBody));
-                        pushSent(target, resp?.id);
+                        pushSent(target, resp?.id, rawText);
                         return resp;
                     }
                     catch (refErr) {
@@ -263,11 +270,11 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
                 // 纯文本降级: 无 markdown 语法/@标签 → 直接纯文本通道, 省富媒体额度与频控
                 if (!hasMarkdownSyntax(rawText)) {
                     const respT = (await bot.sendText(target, rawText));
-                    pushSent(target, respT?.id);
+                    pushSent(target, respT?.id, rawText);
                     return respT;
                 }
                 const resp = (await bot.sendMarkdown(target, content));
-                pushSent(target, resp?.id);
+                pushSent(target, resp?.id, rawText);
                 return resp;
             }
             catch (err) {
@@ -284,7 +291,7 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
                     try {
                         const act = { scope: target.scope, targetId: target.targetId };
                         const r0 = (await bot.sendMarkdown(act, content));
-                        pushSent(act, r0?.id);
+                        pushSent(act, r0?.id, content);
                         logger.warn(`被动回复被拒(msgId 失效) → 已去掉 msgId 转主动发送成功: ${firstErr}`);
                         diagWrite('qqbot-send-diag', `[${new Date().toISOString()}] 已降级为主动发送成功 target=${String(target.targetId ?? '').slice(0, 12)}…`);
                         return r0;
@@ -312,7 +319,7 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
                     if (plain) {
                         try {
                             const r2 = (await bot.sendText(target, plain));
-                            pushSent(target, r2?.id);
+                            pushSent(target, r2?.id, plain);
                             logger.warn(`主动推送 markdown 被拒, 已降级纯文本发送: ${firstErr}`);
                             return r2;
                         }
@@ -320,7 +327,7 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
                             if (target.scope === 'c2c') {
                                 try {
                                     const r3 = (await bot.sendWakeup(target, plain));
-                                    pushSent(target, r3?.id);
+                                    pushSent(target, r3?.id, plain);
                                     logger.warn(`主动纯文本被拒, 已降级 is_wakeup 召回通道: ${err2 instanceof Error ? err2.message : String(err2)}`);
                                     return r3;
                                 }
@@ -341,7 +348,7 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
             // 卡片按钮(审批/提问): bot.send 显式 msg_type=2 + keyboard。
             // 失败直接抛(不静默降级)——由调用方决定文本兜底, 避免"卡片+文本码"双发。
             const resp = (await bot.send({ target, msgType: 2, markdown: { content }, keyboard: keyboard }));
-            pushSent(target, resp?.id);
+            pushSent(target, resp?.id, content);
             return resp;
         },
         openStream: (target) => bot.openStream({
