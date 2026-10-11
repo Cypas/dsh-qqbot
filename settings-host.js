@@ -219,16 +219,36 @@ function viewOf(settings, ns) {
  * 位置：{DSH_HOME}/qqbot-settings/<instanceNs>.json
  */
 const OWN_SETTINGS_DIR = join(DSH_HOME_DIR, 'qqbot-settings');
+
+/**
+ * 路径按 profile 隔离（2026-10-11；规则必须与 `src/features/ns-guard.ts` 的 `nsPathsOf()` 保持一致，改一处同步另一处）：
+ *   新布局 `{DSH_HOME}/qqbot-settings/<profile>/<ns>.json` —— 各 profile 各一份，**同一个 ns 也不再互相覆盖**；
+ *   老布局 `{DSH_HOME}/qqbot-settings/<ns>.json`            —— 所有 profile 共用（就是本次踩坑的根源），仅作读取兜底。
+ * 读：新路径优先 → 老路径兜底（老数据不丢）；写：一律写新路径 —— 读取已兜底到老文件，首次保存天然是
+ * "老内容 + 本次改动"，等于**自动搬家**。profile 取自 `DSH_PROFILE`；取不到时落 `_default`
+ * （退化回老行为，此时由写入者指纹兜底拦住互相覆盖）。
+ */
+const NS_PROFILE_DIR = String(process.env.DSH_PROFILE || '').trim().replace(/[^A-Za-z0-9_-]/g, '_') || '_default';
+function safeNsOf(ns) {
+  return String(ns || NS).replace(/[^A-Za-z0-9_-]/g, '_') || 'im-qqbot';
+}
+function ownSettingsDir(ns) {
+  return join(OWN_SETTINGS_DIR, NS_PROFILE_DIR);
+}
 function ownSettingsPath(ns) {
-  const safe = String(ns || NS).replace(/[^A-Za-z0-9_-]/g, '_');
-  return join(OWN_SETTINGS_DIR, safe + '.json');
+  return join(ownSettingsDir(ns), safeNsOf(ns) + '.json');
+}
+function legacySettingsPath(ns) {
+  return join(OWN_SETTINGS_DIR, safeNsOf(ns) + '.json');
 }
 function readOwnSettings(ns) {
   try {
-    const p = ownSettingsPath(ns);
-    if (!existsSync(p)) return {};
-    const o = JSON.parse(readFileSync(p, 'utf8'));
-    return o && typeof o === 'object' ? o : {};
+    for (const p of [ownSettingsPath(ns), legacySettingsPath(ns)]) {   // 新优先 → 老兜底
+      if (!existsSync(p)) continue;
+      const o = JSON.parse(readFileSync(p, 'utf8'));
+      if (o && typeof o === 'object') return o;
+    }
+    return {};
   } catch { return {}; }
 }
 /**
@@ -278,7 +298,7 @@ function writeOwnSettings(ns, obj) {
     err.code = 'NS_CONFLICT';
     throw err;
   }
-  try { mkdirSync(OWN_SETTINGS_DIR, { recursive: true }); } catch { /* ignore */ }
+  try { mkdirSync(ownSettingsDir(ns), { recursive: true }); } catch { /* ignore */ }
   try { if (existsSync(p)) writeFileSync(p + '.bak-' + Date.now(), readFileSync(p)); } catch { /* 备份失败不阻塞 */ }
   writeFileSync(p, JSON.stringify(obj, null, 2), 'utf8');
   try { writeFileSync(nsWriterPath(ns), JSON.stringify({ profile: me, at: Date.now(), file: p }, null, 2), 'utf8'); } catch { /* 指纹写失败不阻塞 */ }

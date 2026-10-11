@@ -1,3 +1,17 @@
+## [1.8.4] - 2026-10-11
+
+> 把"不同 profile 互相覆盖配置"从"拦住"升级成"根本不共用"：**设置文件按 profile 隔离**。
+
+### ✨ 优化
+
+- **设置/凭据按 profile 隔离**：路径从 `{DSH_HOME}/qqbot-settings/<ns>.json` 改为
+  `{DSH_HOME}/qqbot-settings/<profile>/<ns>.json`（profile 取 `DSH_PROFILE`，拿不到时落 `_default`）。
+  web 与 desktop 从此各写各的，**同一个 settingsNs 也不再互相覆盖** —— 不必再手工给其中一个改 ns。
+  - **读**：新路径优先 → 老路径兜底，老配置不丢；
+  - **写**：一律写新路径 —— 读取已兜底到老文件，所以**首次保存即"自动搬家"**（老内容 + 本次改动）；
+  - 老文件**保留不动**作备份；万一拿不到 profile 名（退化回共用行为），仍由 1.8.3 的写入者指纹兜住、不静默覆盖。
+- 配套回归：`ns-guard.test.ts` 增加 4 条路径用例（同 ns 不同 profile 是两份文件、老路径单列用于兜底、缺 profile 落 `_default`、
+  ns/profile 非法字符一律替换以防路径逃逸），该文件合计 12 条。
 ## [1.8.3] - 2026-10-11
 
 > 修一个"看不见但会互相覆盖"的坑：**两个 profile 用同一个 settingsNs**（web + desktop 各挂一个实例）时，

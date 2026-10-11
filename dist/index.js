@@ -11,7 +11,7 @@ import { ConfigSchema, EditableConfigSchema } from './config.js';
 import { bootstrapGateway } from './gateway/index.js';
 import { takePendingMemoText } from './features/people-memo.js';
 import { getProfileDir, resolveEnv } from './shared/index.js';
-import { describeNsConflict, scanNsOwners } from './features/ns-guard.js';
+import { describeNsConflict, nsPathsOf, scanNsOwners } from './features/ns-guard.js';
 void getProfileDir;
 import { runQrSetup, persistCredentialsToProfile } from './setup.js';
 // 2026-09-24 关闭"启动自动扫码"后，这些符号保留给设置页路径使用；此处显式引用避免 TS 未使用报错。
@@ -99,12 +99,19 @@ export async function apply(ctx, config) {
     // 插件重新 apply → 凭据无效时再写 → 自反馈闭环（实测把 dsh 启动刷死、无限弹二维码）。
     // 现在写到 {DSH_HOME}/qqbot-settings/<ns>.json；插件在此读取并覆盖 patch 值，
     // 并监听桥发出的变更事件实现**热生效**（不写宿主配置 → 不触发任何热更新）。
-    const ownSettingsFile = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'qqbot-settings', String(ns).replace(/[^A-Za-z0-9_-]/g, '_') + '.json');
+    // 2026-10-11 起**按 profile 隔离**（路径规则见 features/ns-guard.ts 的 nsPathsOf）：
+    //   新布局 {DSH_HOME}/qqbot-settings/<profile>/<ns>.json —— web 与 desktop 各一份，同一个 ns 也不再互相覆盖；
+    //   读：新路径优先 → 老路径兜底（老数据不丢）；写：settings-host.js 一侧一律写新路径（首次保存即"自动搬家"）。
+    const nsPaths = nsPathsOf(process.env.DSH_HOME || join(homedir(), '.dsh'), String(ns), process.env.DSH_PROFILE);
+    const ownSettingsFile = nsPaths.file;
     const readOwnSettings = () => {
         try {
-            if (!existsSync(ownSettingsFile))
+            const f = existsSync(ownSettingsFile)
+                ? ownSettingsFile
+                : (existsSync(nsPaths.legacyFile) ? nsPaths.legacyFile : ''); // 老布局兜底
+            if (!f)
                 return {};
-            const o = JSON.parse(readFileSync(ownSettingsFile, 'utf8'));
+            const o = JSON.parse(readFileSync(f, 'utf8'));
             return o && typeof o === 'object' ? o : {};
         }
         catch {

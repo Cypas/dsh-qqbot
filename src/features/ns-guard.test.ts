@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_NS, describeNsConflict, scanNsOwners, settingsNsOfPatch } from './ns-guard.js';
+import { DEFAULT_NS, describeNsConflict, nsPathsOf, scanNsOwners, settingsNsOfPatch } from './ns-guard.js';
 
 const PATCH_WEB = `# web profile
 - id: im-qqbot
@@ -106,5 +106,32 @@ describe('describeNsConflict — 告警要带判据与修法', () => {
     expect(s).toContain('后连的会顶掉先连的');
     expect(s).toContain('settingsNs');
     expect(s).toContain('im-qqbot-2-desktop');
+  });
+});
+
+describe('nsPathsOf — 设置文件按 profile 隔离（2026-10-11 新增）', () => {
+  it('带 profile → 落在 profile 子目录；同 ns 不同 profile 是两份文件（互不干扰）', () => {
+    const web = nsPathsOf('C:\\h', 'im-qqbot-2', 'web');
+    const desk = nsPathsOf('C:\\h', 'im-qqbot-2', 'desktop');
+    expect(web.file).toContain(join('qqbot-settings', 'web', 'im-qqbot-2.json'));
+    expect(desk.file).toContain(join('qqbot-settings', 'desktop', 'im-qqbot-2.json'));
+    expect(web.file).not.toBe(desk.file);
+  });
+
+  it('老路径单列出来：读取兜底 + 老数据自动搬家要用它', () => {
+    const p = nsPathsOf('C:\\h', 'im-qqbot', 'web');
+    expect(p.legacyFile).toContain(join('qqbot-settings', 'im-qqbot.json'));
+    expect(p.legacyFile).not.toContain(join('qqbot-settings', 'web'));
+  });
+
+  it('拿不到 profile → 落 _default（退化回老行为，由写入者指纹兜底拦覆盖）', () => {
+    expect(nsPathsOf('C:\\h', 'im-qqbot', '').file).toContain(join('qqbot-settings', '_default', 'im-qqbot.json'));
+    expect(nsPathsOf('C:\\h', 'im-qqbot', undefined).file).toContain('_default');
+  });
+
+  it('ns / profile 里的非法字符一律替换（不能出现 .. 或 : 这类路径逃逸）', () => {
+    const p = nsPathsOf('C:\\h', '../../etc/passwd', 'web:1');
+    expect(p.file).not.toContain('..');
+    expect(p.file).toMatch(/qqbot-settings[\\/]web_1[\\/]_+etc_passwd\.json$/);
   });
 });
