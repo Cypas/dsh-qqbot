@@ -70,16 +70,28 @@ export function extractFaceImageUrls(text: string): string[] {
 }
 
 /**
- * 引用块正文瘦身：剥模板壳 → **只取最外层那一句** → 表情标签转可读 → 压平空白 → 限长。
+ * 引用块正文瘦身：剥模板壳 → 表情标签转可读 → 压平水平空白 → 限长。
  *
- * ⚠️ 只取最外层 —— 那才是"他引用的内容"。QQ 给的嵌套链（`[关联消息] --- 第1条 --- [消息内容] …`）
- *   全是"那句话又引用了谁"，又长又乱（主人：「不止是排版乱的问题，这是内容就乱了」）。
+ * ⚠️ 2026-10-11 修（主人实测：引用一条多行长消息，AI 只看到首行）：
+ *   原来无条件取 `lines[0]`，本意是砍 QQ 的**嵌套引用链**（`[关联消息] --- 第1条 --- [消息内容] …`
+ *   全是"这句话又引用了谁"，又长又乱，主人原话「不止是排版乱的问题，这是内容就乱了」）。
+ *   但普通多行正文也被一起剁掉了 —— 那才是"他引用的内容"本身。现在分两种情况：
+ *     · 模板串   → 只取最外层那一句（原行为，防嵌套噪声进上下文）
+ *     · 普通文本 → 保留多行（限长仍交给调用方：当前消息走 trimQuoteBlock 的 60 字截断+缓存+提示）
+ *
  * @param max 最大字数（默认 160；传 0 = 不限长）
  */
 export function slimQuoteText(s: string, max = 160): string {
-  const lines = stripQqQuoteTemplate(s);
+  const raw = String(s ?? '');
+  const lines = stripQqQuoteTemplate(raw);
+  const isTemplate = looksLikeQqTemplate(raw);
+  const body = isTemplate ? (lines[0] ?? '') : lines.join('\n');
   // 表情标签 → `【表情: 微笑】`（原来是 `<faceType=6,faceId="0",ext="…">` 这种谁也看不懂的串）
-  let out = resolveFaceTags(lines[0] ?? '').replace(/\s+/g, ' ').trim();
+  // ⚠️ 只压**水平空白**，别把换行也压没 —— 多行正文靠它分段
+  let out = resolveFaceTags(body)
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
   if (max > 0 && out.length > max) out = out.slice(0, max) + '…';
   return out;
 }

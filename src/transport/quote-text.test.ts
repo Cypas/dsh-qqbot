@@ -37,6 +37,20 @@ describe('slimQuoteText — 压平 + 限长', () => {
     expect(slimQuoteText('一二三四五', 3)).toBe('一二三…');
     expect(slimQuoteText('一二三四五', 0)).toBe('一二三四五');
   });
+
+  /**
+   * 2026-10-11 修（主人实测：引用一条多行长消息，AI 只看到首行）。
+   * `lines[0]` 本意是砍 QQ 的嵌套引用链，但把**普通多行正文**也一起剁了。
+   * 现在：模板串仍只取最外层（上面那条用例守着），普通多行必须整段保留。
+   */
+  it('普通多行整段保留，不再只剩首行', () => {
+    const multi =
+      '天恩猎人sama，端上来了～\n《某作品》 链接：https://example.com/x 提取码：y00g\nRJ00000000 ／ 某社团 ／ 2025-02-19';
+    expect(slimQuoteText(multi, 0)).toBe(multi);
+    // 空行收敛、行内多余空白压平，但**换行结构**要留着
+    expect(slimQuoteText('第一行\n\n\n第二行', 0)).toBe('第一行\n第二行');
+    expect(slimQuoteText('甲  乙\t丙\n丁', 0)).toBe('甲 乙 丙\n丁');
+  });
 });
 
 describe('slimQuoteBlockOneLine — 历史行用（一行 + 附件行豁免截断）', () => {
