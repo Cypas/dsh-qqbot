@@ -381,22 +381,46 @@ export function seedExampleTools(dataRoot: string, logger: Logger): number {
       ['../../examples/ext-tools/', join(dataRoot, EXT_TOOLS_SUBDIR)],
       ['../../examples/botplay/', join(dataRoot, EXT_BOTPLAY_SUBDIR)],
     ];
+    // 2026-10-12：改成**递归**铺设（原来 readdirSync 只取直接子文件）。
+    //   起因：跨会话工具示例（session_create / session_watch）把可变逻辑放在 `lib/*.mjs` 子目录里
+    //   （按 mtime 版本化加载），非递归就只搬主文件、`lib/` 不跟着走 → 用户拿到的是 import 不到库的残废示例。
+    //   `lib/` 这类子目录**不参与工具扫描**（扫描只看 tools/ 根下的直接子文件），所以铺进去是安全的。
     for (const [rel, dstDir] of sets) {
       try {
         const srcDir = fileURLToPath(new URL(rel, import.meta.url));
         if (!existsSync(srcDir)) continue;
-        try { mkdirSync(dstDir, { recursive: true }); } catch { /* 建不出就跳过这套 */ }
-        for (const file of readdirSync(srcDir)) {
-          if (!ALLOWED_EXT.has(extname(file))) continue;
-          const to = join(dstDir, file);
-          if (existsSync(to)) continue; // ★ 不覆盖用户已有的（也就不会重复搬）
-          try { copyFileSync(join(srcDir, file), to); n += 1; } catch { /* 单个失败继续 */ }
-        }
+        n += copyExampleTree(srcDir, dstDir);
       } catch { /* 单套失败继续下一套 */ }
     }
     if (n > 0) logger.info?.(`[ext-tools] 已自动铺 ${n} 个扩展示例（tools + botplay）`);
   } catch (err) {
     logger.debug?.('[ext-tools] 示例铺设跳过: ' + (err instanceof Error ? err.message : String(err)));
+  }
+  return n;
+}
+
+/**
+ * 递归把一个示例目录铺到目标目录，返回本次真正复制的文件数。
+ *
+ * 纪律与 `seedExampleTools` 一致：**只补不存在**（绝不覆盖用户改过/写过的同名文件）、
+ * 任何一步失败都只跳过那一个文件，绝不抛出（示例只是见面礼，不能影响插件启动）。
+ */
+function copyExampleTree(srcDir: string, dstDir: string): number {
+  let n = 0;
+  try { mkdirSync(dstDir, { recursive: true }); } catch { return 0; }
+  const entries = (() => {
+    try { return readdirSync(srcDir, { withFileTypes: true }); } catch { return []; }
+  })();
+  for (const ent of entries) {
+    const src = join(srcDir, ent.name);
+    const dst = join(dstDir, ent.name);
+    if (ent.isDirectory()) {
+      n += copyExampleTree(src, dst);          // 子目录（如 lib/）一并搬
+      continue;
+    }
+    if (!ALLOWED_EXT.has(extname(ent.name).toLowerCase())) continue;
+    if (existsSync(dst)) continue;             // ★ 不覆盖用户已有的（也就不会重复搬）
+    try { copyFileSync(src, dst); n += 1; } catch { /* 单个失败继续 */ }
   }
   return n;
 }

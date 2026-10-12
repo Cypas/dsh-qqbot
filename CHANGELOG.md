@@ -1,3 +1,46 @@
+## [1.8.7] - 2026-10-12
+
+> 修「设置按 profile 隔离**根本没生效**」，并把**跨会话工具四件套**收进扩展示例。
+
+### 🐛 修复
+
+- **profile 名读不到 ⇒ 永远落 `_default`**：v1.8.4 起设置路径是 `qqbot-settings/<profile>/<ns>.json`，
+  但 profile 名取自 `process.env.DSH_PROFILE` —— 而宿主**不会**把这个变量放进自己的环境：
+  DSH 是通过 `ctx.get('profileContext').name` 提供 profile 名的，`DSH_PROFILE` 只在**每次 shell / 工具调用**
+  时由 harness 临时注入（见 `@deepseek-ai/dsh-shell-env`：`values[DSH_PROFILE_KEY] = profile.name`，
+  且该命名空间"每次调用重建、ambient `DSH_*` 会被丢弃"）。于是插件在宿主进程里读**永远是空**
+  ⇒ 一直写 `_default/`，"web 与 desktop 各写各的"形同虚设。
+  实测证据：`qqbot-settings/_default/<ns>.writer.json` 里记的是 `"profile": "unknown"`，
+  连带**写入者指纹（`NS_CONFLICT` 拦截）永久失效** —— 越是需要它拦的场景，它越不工作。
+  - `src/index.ts` 与包根 `settings-host.js`（两处**必须同步**，规则写在 `ns-guard.ts` 注释里）
+    改用新的 `resolveProfileName()`：① `DSH_PROFILE` 环境变量 → ② **代码位置**
+    （包根上溯到 `node_modules` 的父目录 = profile 根）→ ③ 宿主扫描兜底 → 都拿不到才落 `_default`。
+  - ② **优先于扫描**是故意的：`~/.dsh/profiles/` 下可能**多个** profile 都装着本插件，
+    `scanDshProfiles()` 只返回 readdir 顺序里的第一个，未必是当前这份安装。
+  - 目录名要当 profile 名，判据是其**父目录名为 `profiles`** —— 挡住源码 checkout 目录，
+    否则开发态会把仓库目录名当成 profile 名、写出一个莫名其妙的设置子目录。
+
+### ✨ 新增
+
+- **扩展示例：跨会话四件套** —— `examples/ext-tools/` 新增 `session_create.mjs` / `session_send.mjs` /
+  `session_watch.mjs` / `sessions_list.mjs`（含 `lib/preset_resolve.mjs`、`lib/session_watch_lib.mjs`）。
+  演示「让一个会话**开**另一个会话、把消息**投**过去、再把结果**收**回来」，并附三条踩坑经验：
+  ① 别手拼消息对象（用 `agent.inject` / `agent.followup`）；② 投递前先 resume（非 live 会话 `append` 会**静默丢弃**）；
+  ③ 可见性靠 `expose` 控（`'all'` 全局可见，其他值只在 QQ 会话注册）。
+
+### 🔧 其它
+
+- `seedExampleTools()` 改为**递归**铺设：示例可能带 `lib/` 子目录（**不参与工具扫描**，放那里安全），
+  非递归会只搬主文件、给用户留下 import 不到库的残废示例。纪律不变：**只补不存在**、绝不覆盖用户文件。
+- 清理仓库里既有的发布红线残留（见开发维护手册 §3）：`ns-guard.test.ts` 里的真实 AppID，
+  以及 README / USER-GUIDE / 源码注释中若干人格昵称。
+
+### 🧪 回归
+
+- `vitest run`：**179 项通过**（`classify-accuracy` 依赖本地小模型，环境不具备时会超时，
+  不计入本次改动）。
+- `npm run build` + `npm run check:package`（单包自含校验）通过。
+
 ## [1.8.6] - 2026-10-12
 
 > 扩展命令与扩展工具**能力对齐**：命令侧终于拿得到 sender / agent / kernel；热重载也覆盖扩展命令了。

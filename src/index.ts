@@ -12,7 +12,7 @@ import { ConfigSchema, EditableConfigSchema, type EditableConfig, type ImQQBotCo
 import { bootstrapGateway } from './gateway/index.js';
 import { takePendingMemoText } from './features/people-memo.js';
 import type { DshAgentRegistry } from './session/index.js';
-import { getProfileDir, resolveEnv } from './shared/index.js';
+import { getProfileDir, resolveEnv, resolveProfileName } from './shared/index.js';
 import { describeNsConflict, nsPathsOf, scanNsOwners } from './features/ns-guard.js';
 void getProfileDir;
 import { runQrSetup, persistCredentialsToProfile } from './setup.js';
@@ -117,7 +117,11 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   // 2026-10-11 起**按 profile 隔离**（路径规则见 features/ns-guard.ts 的 nsPathsOf）：
   //   新布局 {DSH_HOME}/qqbot-settings/<profile>/<ns>.json —— web 与 desktop 各一份，同一个 ns 也不再互相覆盖；
   //   读：新路径优先 → 老路径兜底（老数据不丢）；写：settings-host.js 一侧一律写新路径（首次保存即"自动搬家"）。
-  const nsPaths = nsPathsOf(process.env.DSH_HOME || join(homedir(), '.dsh'), String(ns), process.env.DSH_PROFILE);
+  // 2026-10-12 修：profile 名**不能只读 `process.env.DSH_PROFILE`** —— 宿主不会把 profile 名放进自己的
+  //   环境（DSH 走 `ctx.get('profileContext').name`，DSH_PROFILE 只在每次 shell/工具调用时临时注入），
+  //   于是这里永远拿到空 → 永远落 `_default/`，"web 与 desktop 各写各的"形同虚设。
+  //   改用 `resolveProfileName()`（环境变量 → 代码位置 → 宿主扫描兜底，细节见 src/shared/utils.ts）。
+  const nsPaths = nsPathsOf(process.env.DSH_HOME || join(homedir(), '.dsh'), String(ns), resolveProfileName());
   const ownSettingsFile = nsPaths.file;
   const readOwnSettings = (): Record<string, unknown> => {
     try {
@@ -164,7 +168,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   // 这里只做**只读探测 + 告警**：不改任何 profile 文件、也不阻断启动。
   try {
     const nsHome = process.env.DSH_HOME || join(homedir(), '.dsh');
-    const myProfile = String(process.env.DSH_PROFILE ?? '').trim();
+    const myProfile = resolveProfileName();
     const owners = scanNsOwners(nsHome, ns);
     const others = owners.filter((p) => p !== myProfile);
     if (others.length) {

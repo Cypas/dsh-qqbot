@@ -4,7 +4,7 @@
  * 仅 web profile 装配; 同源 fence 抄 modsearch。
  */
 import { readFileSync, writeFileSync, appendFileSync, rmSync, mkdirSync, existsSync, readdirSync, statSync, cpSync, renameSync, openSync, readSync, closeSync, createWriteStream } from 'node:fs';
-import { extname, join, resolve, dirname, normalize, sep } from 'node:path';
+import { basename, extname, join, resolve, dirname, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -225,10 +225,25 @@ const OWN_SETTINGS_DIR = join(DSH_HOME_DIR, 'qqbot-settings');
  *   新布局 `{DSH_HOME}/qqbot-settings/<profile>/<ns>.json` —— 各 profile 各一份，**同一个 ns 也不再互相覆盖**；
  *   老布局 `{DSH_HOME}/qqbot-settings/<ns>.json`            —— 所有 profile 共用（就是本次踩坑的根源），仅作读取兜底。
  * 读：新路径优先 → 老路径兜底（老数据不丢）；写：一律写新路径 —— 读取已兜底到老文件，首次保存天然是
- * "老内容 + 本次改动"，等于**自动搬家**。profile 取自 `DSH_PROFILE`；取不到时落 `_default`
- * （退化回老行为，此时由写入者指纹兜底拦住互相覆盖）。
+ * "老内容 + 本次改动"，等于**自动搬家**。
+ *
+ * ⚠️ profile 名（2026-10-12 修）：**不能只读 `process.env.DSH_PROFILE`**。宿主不会把 profile 名放进
+ * 自己的环境变量 —— DSH 是通过 `ctx.get('profileContext').name` 提供的，`DSH_PROFILE` 只在
+ * **每次 shell / 工具调用**时由 harness 临时注入（见 `@deepseek-ai/dsh-shell-env`）。于是这里永远拿到空
+ * → 永远落 `_default/`，"各 profile 各一份"形同虚设（实测 `writer.json` 记的是 `"profile": "unknown"`）。
+ * 现在与 `src/shared/utils.ts` 的 `resolveProfileName()` **同规则**：环境变量 → `PROFILE_ROOT` 目录名
+ * （要求其父目录名为 `profiles`，挡住源码 checkout 目录）→ 落 `_default`。改一处务必同步另一处。
  */
-const NS_PROFILE_DIR = String(process.env.DSH_PROFILE || '').trim().replace(/[^A-Za-z0-9_-]/g, '_') || '_default';
+function resolveProfileName() {
+  const env = String(process.env.DSH_PROFILE || '').trim();
+  if (env) return env;
+  try {
+    return basename(dirname(PROFILE_ROOT)) === 'profiles' ? basename(PROFILE_ROOT) : '';
+  } catch {
+    return '';
+  }
+}
+const NS_PROFILE_DIR = String(resolveProfileName()).trim().replace(/[^A-Za-z0-9_-]/g, '_') || '_default';
 function safeNsOf(ns) {
   return String(ns || NS).replace(/[^A-Za-z0-9_-]/g, '_') || 'im-qqbot';
 }
@@ -274,7 +289,9 @@ function readNsWriter(ns) {
   } catch { return null; }
 }
 function myProfileName() {
-  return String(process.env.DSH_PROFILE || '').trim() || 'unknown';
+  // 2026-10-12：改用 resolveProfileName()（同规则见其定义处注释）——
+  // 原来只读 process.env.DSH_PROFILE，宿主里永远是空 → 指纹恒为 "unknown" → NS_CONFLICT 拦截永久失效。
+  return resolveProfileName() || 'unknown';
 }
 /** 该设置槽是否正被**别的** profile 占用（供 /read 与 /update 共用） */
 function nsConflictOf(ns) {

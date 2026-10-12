@@ -18,7 +18,7 @@ const PATCH_WEB = `# web profile
     - id: im-qqbot-2
       name: '@zaofan/dsh-qqbot'
       config:
-        appId: '1905515836'
+        appId: '1000000000'
         settingsNs: 'im-qqbot-2'
         preset: 'whale-girl'
 `;
@@ -46,7 +46,7 @@ const PATCH_DISABLED_SAME_NS = `- id: im-qqbot-2
 const PATCH_NO_NS = `- id: im-qqbot-2
   name: '@zaofan/dsh-qqbot'
   config:
-    appId: '1905515836'
+    appId: '1000000000'
 `;
 
 describe('settingsNsOfPatch — 从 patch 文本里认启用中的实例槽名', () => {
