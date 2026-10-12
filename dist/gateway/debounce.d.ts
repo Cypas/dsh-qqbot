@@ -25,10 +25,51 @@
  * 配置: config.behavior.debounce { enabled, silenceSec, maxMsgs, mentionDelayed } + behavior.freeIntervalSec, 每次现读(live 热更)。
  * ⚠️ 本地手改功能: 同步纪律同 middleware-setup.ts 内群冷却中间件(改完保持 src 与部署 dist 一致)。
  */
-import type { Middleware } from '@tencent-connect/qqbot-nodejs';
+import type { Middleware, HistoryEntry } from '@tencent-connect/qqbot-nodejs';
 import type { ImQQBotConfig } from '../config.js';
 import type { SessionManager } from '../session/index.js';
 import type { Logger } from '../types.js';
+/** 窗口内单条消息的最小形状(展开拷贝, 不持有中间件 ctx 引用) */
+interface DebounceEntry {
+    msg: Record<string, unknown>;
+    wasMentioned: boolean;
+    /** QQ 服务器下发时间戳(ms)。QQ 官方事件推送可能乱序, 窗口排序/计时一律以此为准 */
+    ts: number;
+    /** 中间件处理结果(语音转写等)。插话只有文本通道, 要靠它把 [语音] 的转写文本带出去 */
+    processed?: unknown;
+    /**
+     * ★ 2026-10-12：这条被**入站扩展强制入站**（`ctx.forceWake()` 写的 `ctx.state.qqInboundForceWake`）。
+     * 为什么要存到窗口条目上：群消息先被本层吞进窗口，flush 时**新建**一个 state 交给 handleInbound，
+     * 上游挂在 ctx.state 上的标记不带上就丢了 —— forceWake 会在 "群冷却等待" 这一步被吃掉。
+     */
+    forceWake?: boolean;
+}
+/** 窗口条目与 store 历史合并后的一条（`wasMentioned` = 这条**到底算不算被 @**） */
+export interface MergedWindowItem {
+    messageId: string;
+    ts: number;
+    msg?: Record<string, unknown>;
+    content?: string;
+    senderId?: string;
+    senderName?: string;
+    wasMentioned?: boolean;
+}
+/**
+ * 把「store 群历史」与「当前窗口条目」合并去重、按服务器时间序排好。
+ *
+ * ⚠️ 这里是"到底算不算被 @ 了"的**最终裁定点**（2026-10-12 为此单独抽成可单测的纯函数）：
+ *   · store 条目上的 `mentioned` 是链上**第 4 步**（media-history，在 mentionGate **之前**）
+ *     按**平台原始信号**写进去的；
+ *   · 窗口条目上的 `wasMentioned` 是**晚于 mentionGate**（可能已被用户入站扩展改写）的判定。
+ * 后者才是最终判定 ⇒ 命中同一条时**以窗口条目为准**。
+ *
+ * 反面教训（原实现 `if (e.wasMentioned) hit.wasMentioned = true;`，**只升不降**）：
+ *   入站扩展把 `ctx.state.mention.wasMentioned` 压成 false 也没用 —— 会被 store 的
+ *   `mentioned:true` 顶回来 ⇒ 静默 X 秒后照样强制唤醒；该条还会带着 mentioned 进历史行，
+ *   被 inbound 的聚合加权聚成 `aggMentioned=true`。即"看起来拦住了，其实是假动作"。
+ * 真 @ 时两个来源同源同值（都是平台信号）⇒ 改成"以窗口为准"没有任何回归。
+ */
+export declare function mergeWindowWithStore(storeHist: HistoryEntry[], entries: DebounceEntry[]): MergedWindowItem[];
 export declare function markTurnAborted(sessionId: string): void;
 export declare function injectSynthetic(scope: 'group' | 'c2c', peerId: string, text: string, opts?: {
     senderId?: string;
@@ -36,4 +77,5 @@ export declare function injectSynthetic(scope: 'group' | 'c2c', peerId: string, 
     wasMentioned?: boolean;
 }, owner?: unknown): boolean;
 export declare function debounceLayer(config: ImQQBotConfig, manager: SessionManager, logger: Logger, cooldownAt: Map<string, number>): Middleware;
+export {};
 //# sourceMappingURL=debounce.d.ts.map

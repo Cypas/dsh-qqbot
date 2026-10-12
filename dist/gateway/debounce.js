@@ -30,6 +30,60 @@ function num(v, d) {
     const n = Number(v);
     return Number.isFinite(n) ? n : d;
 }
+/**
+ * 把「store 群历史」与「当前窗口条目」合并去重、按服务器时间序排好。
+ *
+ * ⚠️ 这里是"到底算不算被 @ 了"的**最终裁定点**（2026-10-12 为此单独抽成可单测的纯函数）：
+ *   · store 条目上的 `mentioned` 是链上**第 4 步**（media-history，在 mentionGate **之前**）
+ *     按**平台原始信号**写进去的；
+ *   · 窗口条目上的 `wasMentioned` 是**晚于 mentionGate**（可能已被用户入站扩展改写）的判定。
+ * 后者才是最终判定 ⇒ 命中同一条时**以窗口条目为准**。
+ *
+ * 反面教训（原实现 `if (e.wasMentioned) hit.wasMentioned = true;`，**只升不降**）：
+ *   入站扩展把 `ctx.state.mention.wasMentioned` 压成 false 也没用 —— 会被 store 的
+ *   `mentioned:true` 顶回来 ⇒ 静默 X 秒后照样强制唤醒；该条还会带着 mentioned 进历史行，
+ *   被 inbound 的聚合加权聚成 `aggMentioned=true`。即"看起来拦住了，其实是假动作"。
+ * 真 @ 时两个来源同源同值（都是平台信号）⇒ 改成"以窗口为准"没有任何回归。
+ */
+export function mergeWindowWithStore(storeHist, entries) {
+    const merged = storeHist.map(h => ({
+        messageId: h.messageId,
+        ts: h.timestamp || 0,
+        content: h.content,
+        senderId: h.senderId,
+        senderName: h.senderName,
+        // 2026-09-15 修: store 条目上的[@过bot]标记要接过来(media-history 写入的 mentioned),
+        //   否则只有[当前还在窗口里]的那条能靠 entries 循环补上, store 来源的会丢。
+        wasMentioned: h.mentioned === true,
+    }));
+    for (const e of entries) {
+        const id = String(e.msg.messageId ?? '');
+        // ⚠️ 空 messageId(合成消息, 如 /资源 求助)不参与去重 —— 否则同一窗口里的第二条会被当"重复"吞掉
+        const hit = id ? merged.find(m => m.messageId === id) : undefined;
+        if (hit) {
+            // ★ 2026-10-12 修（入站扩展点配套的真 bug）：**以窗口条目为准**，不能只升不降。
+            //   窗口条目 = 链上实时判定（mentionGate 之后、可能已被 .qqbot-extensions/inbound/*.mjs 改写）；
+            //   store 条目 = 链第 4 步的原始平台信号。分歧只可能出现在"被入站扩展压掉 @ 判定"的那种。
+            hit.wasMentioned = e.wasMentioned === true;
+            // ⚠️ 2026-09-10 去重(主人实测: "图片链接重复两次, 那不是又回原来的长上下文咯?"):
+            //   store 条目只带 foldMedia 折叠文本(`[图片: url]` / `[语音: url]`), **窗口条目才带
+            //   原始 content + attachments**。命中时若不给 hit 补 msg, current 就会取 store 版本,
+            //   于是附件 URL 在上下文里出现两次: 折叠文本一次 + Layer4 的 `- Image: 名 → url` 一次。
+            //   补上后: current 走 cur.msg(原始 content, 附件交给 Layer4 描述), history 仍用折叠文本。
+            if (!hit.msg)
+                hit.msg = e.msg;
+        }
+        else {
+            merged.push({
+                messageId: id, ts: e.ts, msg: e.msg, wasMentioned: e.wasMentioned,
+                // 从 msg 提上来: 合成消息(如 /资源 求助)的 senderName 只在 msg 里, 不带上历史行会渲染成 []
+                senderId: String(e.msg.senderId ?? ''), senderName: String(e.msg.senderName ?? ''),
+            });
+        }
+    }
+    merged.sort((a, b) => a.ts - b.ts);
+    return merged;
+}
 /** 现读设置(live 热更): 回合中消息策略。缺省/未知值一律当 queue(排队=现状, 最安全) */
 function busySendModeOf(config) {
     const raw = config.behavior?.debounce?.busySendMode;
@@ -228,6 +282,10 @@ export function debounceLayer(config, manager, logger, cooldownAt) {
         }
         const fKind = String(f0.msg.kind ?? '');
         const hasMention = pre.some(e => e.wasMentioned);
+        // ★ 2026-10-12：窗口里只要有一条被**入站扩展强制入站**（`ctx.forceWake()`），
+        //   这一批就按"必须进站"处理 —— 下面是**群冷却等待**（"冷却到没到"那一步）不再拦它。
+        //   注意：forceWake **不伪造 @**（不写 wasMentioned），所以 (@you) 标注、聚合加权都不受影响。
+        const hasForceWake = pre.some(e => e.forceWake === true);
         // ── LLM 回合中聚合(2026-09-07 主人定, 2026-09-11 主人改): 我正在思考/输出时, 新消息全攒着,
         //    不派发不入站 —— 无时间限制, 必须等 turn/end(record.turnActive=false)后窗口才批量 flush;
         //    只受条数约束(窗口防御上限 + maxMsgs 攒满尝试派发)。──
@@ -286,8 +344,9 @@ export function debounceLayer(config, manager, logger, cooldownAt) {
                 }
             }
         }
-        if (fKind === 'group' && !hasMention) {
+        if (fKind === 'group' && !hasMention && !hasForceWake) {
             // 群普通消息: 距上次普通派发不足 freeIntervalSec → 冷却中, 窗口保留继续攒
+            // （★ 被入站扩展 forceWake 的批次不走这里：定义就是"跳过冷却到没到"）
             const gid = String(f0.msg.groupOpenid ?? f0.msg.senderId ?? '');
             const freeSec = Math.max(0, num(config.behavior?.freeIntervalSec, 0));
             if (gid && freeSec > 0) {
@@ -334,40 +393,8 @@ export function debounceLayer(config, manager, logger, cooldownAt) {
                     logger.warn?.(`[debounce] 拉群历史失败: ${err instanceof Error ? err.message : String(err)}`);
                 }
                 dbg(`  store-raw=[${storeHist.map(h => JSON.stringify(String(h.content).slice(0, 24))).join(',')}]`);
-                const merged = storeHist.map(h => ({
-                    messageId: h.messageId,
-                    ts: h.timestamp || 0,
-                    content: h.content,
-                    senderId: h.senderId,
-                    senderName: h.senderName,
-                    // 2026-09-15 修: store 条目上的[@过bot]标记要接过来(media-history 写入的 mentioned),
-                    //   否则只有[当前还在窗口里]的那条能靠 entries 循环补上, store 来源的会丢。
-                    wasMentioned: h.mentioned === true,
-                }));
-                for (const e of entries) {
-                    const id = String(e.msg.messageId ?? '');
-                    // ⚠️ 空 messageId(合成消息, 如 /资源 求助)不参与去重 —— 否则同一窗口里的第二条会被当"重复"吞掉
-                    const hit = id ? merged.find(m => m.messageId === id) : undefined;
-                    if (hit) {
-                        if (e.wasMentioned)
-                            hit.wasMentioned = true;
-                        // ⚠️ 2026-09-10 去重(主人实测: "图片链接重复两次, 那不是又回原来的长上下文咯?"):
-                        //   store 条目只带 foldMedia 折叠文本(`[图片: url]` / `[语音: url]`), **窗口条目才带
-                        //   原始 content + attachments**。命中时若不给 hit 补 msg, current 就会取 store 版本,
-                        //   于是附件 URL 在上下文里出现两次: 折叠文本一次 + Layer4 的 `- Image: 名 → url` 一次。
-                        //   补上后: current 走 cur.msg(原始 content, 附件交给 Layer4 描述), history 仍用折叠文本。
-                        if (!hit.msg)
-                            hit.msg = e.msg;
-                    }
-                    else {
-                        merged.push({
-                            messageId: id, ts: e.ts, msg: e.msg, wasMentioned: e.wasMentioned,
-                            // 从 msg 提上来: 合成消息(如 /资源 求助)的 senderName 只在 msg 里, 不带上历史行会渲染成 []
-                            senderId: String(e.msg.senderId ?? ''), senderName: String(e.msg.senderName ?? ''),
-                        });
-                    }
-                }
-                merged.sort((a, b) => a.ts - b.ts);
+                // 合并去重 + "@ 判定以窗口条目为准" 的裁定逻辑抽在 mergeWindowWithStore()（可单测，见文件上部）
+                const merged = mergeWindowWithStore(storeHist, entries);
                 // current 恒取时间序最后一条(纯时间序, 上下文永不倒置)。
                 // ⚠️ 2026-10-01 修（主人实测：引用块挂到上一条消息上）：
                 //   cur 必须是**触发本次派发的那条**（= 窗口最后入队的那条），不能拿"时间最大"的 ——
@@ -430,6 +457,11 @@ export function debounceLayer(config, manager, logger, cooldownAt) {
                 else {
                     state.batchDispatch = true;
                 }
+                // ★ 2026-10-12：把"入站扩展强制入站"的标记**带给下游**（handleInbound 的
+                //   `mwState.qqInboundForceWake`）—— 上游挂在 ctx.state 上的东西到这里是新 state，
+                //   不带就丢；丢了的话价值评分照样会因为低分把这条拦掉（forceWake 就白写了）。
+                if (hasForceWake)
+                    state.qqInboundForceWake = true;
                 dbg(`  merged-order=[${merged.map(m => JSON.stringify(String(m.content ?? m.msg?.content ?? '').slice(0, 16))).join(',')}] cur=${JSON.stringify(String(cur.content ?? cur.msg?.content ?? '').slice(0, 16))} hasMention=${hasMention}`);
                 // 群普通(无@)批派发 → 记冷却(与群冷却中间件共享 lastDispatchAt, 防刷屏语义保留)
                 // ⚠️ 2026-09-13(主人要求): 冷却要"**真产生回复**才算消耗" —— 批派发只是一次尝试,
@@ -470,6 +502,8 @@ export function debounceLayer(config, manager, logger, cooldownAt) {
                 await handleInbound(merged, manager, config, logger, {
                     aggregated: w.turnDeferred === true,
                     ...(w.quote ? { quote: w.quote } : {}),
+                    // ★ 2026-10-12：私聊同样把 forceWake 带下去（私聊本来就每条都进站，这里只是不丢标记）
+                    ...(hasForceWake ? { qqInboundForceWake: true } : {}),
                 });
             }
         }
@@ -591,6 +625,8 @@ export function debounceLayer(config, manager, logger, cooldownAt) {
             msg: { ...msg }, wasMentioned, ts,
             // 2026-10-07: 插话只有文本通道 → 把中间件处理结果(语音转写)一起存着, 拼插话文本时用
             processed: ctx.state?.processed,
+            // ★ 2026-10-12: 入站扩展的 forceWake 必须**随条目**存下来（flush 时会新建 state，见 hasForceWake）
+            forceWake: ctx.state?.qqInboundForceWake === true,
         });
         // 2026-10-01: 把上游 quoteRef 解析好的引用存到窗口上（flush 时用）
         const _q = ctx.state.quote;

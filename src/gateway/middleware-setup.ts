@@ -28,7 +28,15 @@ import { prefetchQuoteImages } from '../transport/quote-images.js';
 import { stickerCapture } from '../middleware/sticker-capture.js';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.js';
 import { loadExtensionCommands } from '../features/extension-store.js';
-import { registerExtCommandReloader, type ExtCommandReloadResult } from '../features/ext-reload.js';
+import { registerExtCommandReloader, registerExtInboundReloader, type ExtCommandReloadResult } from '../features/ext-reload.js';
+import {
+  loadInboundExtensions,
+  runEarlyInboundExtensions,
+  runInboundExtensions,
+  type ExtRunOptions,
+  type InboundExtension,
+  type InboundLoadResult,
+} from '../features/ext-inbound.js';
 import { makeExtCaps } from '../features/ext-capabilities.js';
 import { stickerActivityRecorder } from '../features/sticker-gate.js';
 import { chatLedgerRecorder } from '../features/chat-ledger.js';
@@ -141,6 +149,43 @@ export async function setupMiddlewares(
     preferMsgElements: true,
   }));
 
+  // 3.95. 用户「入站中间件」扩展点（第五套扩展，2026-10-12）—— ★早挂点 onInbound ★
+  //   `{dataRoot}/.qqbot-extensions/inbound/*.mjs` 里导出的 `onInbound` 挂**这里**：
+  //   **quoteRef 之后、记群历史（下一步）之前** —— 四个动作里三个只有这个位置做得到：
+  //     · 消灭 annihilate："链停在这里" ⇒ 群历史不记、上下文不进、冷却不占；
+  //     · 改写 rewrite：群历史缓冲读的就是 `ctx.message.content`，这里改才来得及（历史里就是改后文本）；
+  //     · 强制入站 forceWake：写 `ctx.state.qqInboundForceWake`，供紧随其后的 mentionGate（见第 5 步的
+  //       resolveConfig）与后面的 debounce/价值评分放行；
+  //     · 查禁言名单：名单必须在"值不值得回 / @ 没 @ / 冷却到没到"之前生效 —— 也只能在最早处查。
+  //   ⚠️ 这里**读不到** `ctx.state.mention`（那是后面 mentionGate 赋的值）；要判"这条有没有 @ 她"
+  //      请用 `ctx.platform.mentioned`（与 SDK mentionGate 同款三选一判据）。
+  //   引擎在 features/ext-inbound.ts：单扩展独立 try/catch（抛错只告警并继续 next()，绝不因用户脚本坏了
+  //   就吞掉入站消息）、next() 幂等且一定被 await、目录缺失/为空完全安静、动作永不抛到链上。
+  //   这里挂的是**代理**（现读 inboundExts），所以热重载只换内容、不用重挂中间件（见下方 registerExtInboundReloader）。
+  const inboundExts: InboundExtension[] = [];
+  /** 入站扩展的运行环境：状态文件/审计落 dataRoot；owners 用于"白名单最高优先"；appId 给 platform 判定 */
+  const extRunOpts = (): ExtRunOptions => ({
+    dataRoot: dataRootOf(config),
+    owners: (config.groupAdmin?.owners ?? []).map(String),
+    appId: config.appId,
+  });
+  /** 重扫入站扩展目录并原地换掉生效列表；首次启动与热重载走同一条路，避免两套逻辑漂移 */
+  const reloadInboundExtensions = async (): Promise<InboundLoadResult> => {
+    const r = await loadInboundExtensions({ dataRoot: dataRootOf(config), logger });
+    inboundExts.length = 0;
+    inboundExts.push(...r.extensions);
+    return r;
+  };
+  await reloadInboundExtensions();
+  // 注册给热重载入口：工具热刷（/tools-reload、tools_reload）时顺带重扫入站扩展 → **不重启也生效**
+  registerExtInboundReloader(async () => {
+    const r = await reloadInboundExtensions();
+    return { count: r.total, names: r.extensions.map((e) => e.name) };
+  });
+  bot.use(async (ctx, next) => {
+    await runEarlyInboundExtensions(inboundExts, ctx, next, logger, extRunOpts());
+  });
+
   // 3.95. 被引用图片**预取**（2026-10-01 主人要求"尽可能转换成本地路径"）：
   //   有人引用一张图问"这是啥"时，那张图我们可能从没收藏过 → 缓存/图库都查不到，
   //   引用块只能回退 QQ 长链接(带 rkey、还会过期, AI 读不了)。
@@ -191,7 +236,29 @@ export async function setupMiddlewares(
   // 5. 群聊 @bot 门控
   bot.use(mentionGate({
     requireMentionInGroup: config.requireMention,
+    // ★ 2026-10-12：入站扩展的 `forceWake` 必须能**跳过 @ 门控**（"强唤醒优先"落到门控这一层）。
+    //   为什么用 resolveConfig：SDK 里 `dynamic?.requireMentionInGroup` 是**最高优先**的入参
+    //   （它被当成 resolvePolicy 的 explicit 参数，压过静态选项与 ctx.state.policy），
+    //   而没被 forceWake 时这里返回空对象 → 判定与原来**逐字一致**（零回归）。
+    //   语义：置了 forceWake ⇒ 这一条按"无需 @"放行（wasMentioned 仍如实为 false，不伪造 (@you)）。
+    resolveConfig: (ctx) => (ctx.state as { qqInboundForceWake?: unknown }).qqInboundForceWake === true
+      ? { requireMentionInGroup: false }
+      : {},
   }));
+
+  // 5.5 用户「入站中间件」扩展点（第五套扩展，2026-10-12）—— ★晚挂点（默认导出 / onDecide）★
+  //     早挂点（onInbound）挂在第 3.95 步（记群历史之前），装载/热重载与运行环境都在那里一次办好；
+  //     这里只挂**晚**挂点，位置与语义与 2026-10-12 起的旧契约**完全一致**：
+  //     ① 读 `ctx.state.mention`（mentionGate 刚赋的判定）② **改写**它（把 wasMentioned 压成 false
+  //     = 这条不按 @ 处理）③ 不调 next() 把这条**整条拦掉**（注意：群历史此时已经记过了，
+  //     真"消灭"要用早挂点的 `ctx.annihilate()`）。
+  //     ⚠️ 挂载位置是**硬要求，别挪**：
+  //        · 必须在 mentionGate **之后** —— 否则读不到 `ctx.state.mention`（那正是门控写的）；
+  //        · 必须在 contentSanitizer / debounce **之前** —— 否则改了不算数：debounce 的窗口条目读的就是
+  //          这里改过的 `ctx.state.mention.wasMentioned`，再往后（inbound/评分/唤醒）已经决定完了。
+  bot.use(async (ctx, next) => {
+    await runInboundExtensions(inboundExts, ctx, next, logger, extRunOpts());
+  });
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({

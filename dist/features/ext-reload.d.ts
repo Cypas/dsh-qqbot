@@ -35,4 +35,26 @@ export declare function reloadExtCommands(): Promise<ExtCommandReloadResult | {
 export declare function describeExtCommandReload(r: ExtCommandReloadResult | {
     error: string;
 }): string;
+/** 一次入站扩展重载的结果（回执/日志用） */
+export interface ExtInboundReloadResult {
+    /** 本次装载到的扩展数 */
+    count: number;
+    /** 扩展展示名（去重前，便于回执里展示） */
+    names: string[];
+}
+/** 注册/注销入站扩展重载器（注销传 undefined；插件重建时调用方会覆盖为新的） */
+export declare function registerExtInboundReloader(fn: (() => Promise<ExtInboundReloadResult>) | undefined): void;
+/**
+ * 热重载入站扩展。
+ * 返回 `{ error }` 表示"没装成"（比如插件还没启动完）—— 不抛错，理由同 {@link reloadExtCommands}。
+ */
+export declare function reloadExtInbound(): Promise<ExtInboundReloadResult | {
+    error: string;
+}>;
+/** 给回执文本用：把入站扩展重载结果拼成一句人话 */
+export declare function describeExtInboundReload(r: ExtInboundReloadResult | {
+    error: string;
+}): string;
+/** 当前是否已注册入站扩展重载器（诊断用） */
+export declare function hasExtInboundReloader(): boolean;
 //# sourceMappingURL=ext-reload.d.ts.map

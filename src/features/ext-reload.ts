@@ -50,3 +50,53 @@ export function describeExtCommandReload(r: ExtCommandReloadResult | { error: st
   if (r.names.length === 0) return '扩展命令: 0 个(目录里没有 commands/*.js?)';
   return `扩展命令: ${r.names.length} 个已重载 → ${r.names.map((n) => '/' + n).join(', ')}`;
 }
+
+// ══════════════════════════════════════════════════════════════
+// 入站中间件扩展（第五套扩展，2026-10-12）—— 同一套热重载入口，同一个理由
+// ══════════════════════════════════════════════════════════════
+//   `{dataRoot}/.qqbot-extensions/inbound/*.mjs` 挂在 SDK 中间件链上（见 gateway/middleware-setup.ts），
+//   挂的是"现读可变列表"的代理 ⇒ 热重载只需**重扫目录 + 原地换列表**，不用重挂中间件。
+//   注册表放这里而不是 ext-inbound.ts 自己调，是因为"热刷入口"只有一个：
+//   `/tools-reload` / `tools_reload` → SessionManager.reloadAllChannelTools() → 本模块。
+//   （卸载时由 ext-inbound 的 disposeInboundExtensions 把这里清空，避免指向已死实例。）
+
+/** 一次入站扩展重载的结果（回执/日志用） */
+export interface ExtInboundReloadResult {
+  /** 本次装载到的扩展数 */
+  count: number;
+  /** 扩展展示名（去重前，便于回执里展示） */
+  names: string[];
+}
+
+/** 由 middleware-setup 注册：重扫入站扩展目录并原地换掉生效列表 */
+let inboundReloader: (() => Promise<ExtInboundReloadResult>) | undefined;
+
+/** 注册/注销入站扩展重载器（注销传 undefined；插件重建时调用方会覆盖为新的） */
+export function registerExtInboundReloader(fn: (() => Promise<ExtInboundReloadResult>) | undefined): void {
+  inboundReloader = fn;
+}
+
+/**
+ * 热重载入站扩展。
+ * 返回 `{ error }` 表示"没装成"（比如插件还没启动完）—— 不抛错，理由同 {@link reloadExtCommands}。
+ */
+export async function reloadExtInbound(): Promise<ExtInboundReloadResult | { error: string }> {
+  if (!inboundReloader) return { error: '入站扩展表尚未注册(插件还没完成启动?)' };
+  try {
+    return await inboundReloader();
+  } catch (err) {
+    return { error: `入站扩展重载失败: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/** 给回执文本用：把入站扩展重载结果拼成一句人话 */
+export function describeExtInboundReload(r: ExtInboundReloadResult | { error: string }): string {
+  if ('error' in r) return `入站扩展: ${r.error}`;
+  if (r.count === 0) return '入站扩展: 0 个(目录里没有 inbound/*.mjs?)';
+  return `入站扩展: ${r.count} 个已重载 → ${r.names.join(', ')}`;
+}
+
+/** 当前是否已注册入站扩展重载器（诊断用） */
+export function hasExtInboundReloader(): boolean {
+  return typeof inboundReloader === 'function';
+}

@@ -394,6 +394,13 @@ export async function handleInbound(
     const lmOn = (ovRaw.enabled ?? lmCfg?.enabled) !== false;
     if (scope === 'group' && lmOn && gate !== 'off') {
       const mentioned = mwState.mention?.wasMentioned === true;
+      // ★ 2026-10-12：**forceWake 是入站扩展的显式覆盖**（`{dataRoot}/.qqbot-extensions/inbound/*.mjs`
+      //   里 `ctx.forceWake()` 写的 `ctx.state.qqInboundForceWake`）。
+      //   语义 = "这条必须进站"：跳过一切"值不值得回"的判断（价值评分拦截、免@放行、群冷却等待都在内）。
+      //   它**不伪造 @**：`mentioned` 仍如实为 false ⇒ 上下文里不会多出假的 (@you)，
+      //   聚合加权/点名豁免这些读 mentioned 的地方照旧不受影响。
+      //   没有扩展调用 forceWake 时该值恒为 undefined ⇒ 下面三处判定与改动前**逐字一致**（零回归）。
+      const forced = mwState.qqInboundForceWake === true;
       // 这条消息 @ 的是**别人**(不是她)吗？—— 2026-09-15 主人修正的扣分依据（判据见 mentionsOthers 的注释）
       const mentionedOthers = mentionsOthers((msg as { mentions?: MentionLike[] }).mentions, mentioned);
       try {
@@ -748,6 +755,10 @@ export async function handleInbound(
             //   拦截条件三处都写着 `!mentioned`，所以被 @ 时分数再低也放行；
             //   但 worth 只表示"分数够不够"，日志里会显示成没通过 → 单记一个字段说明白。
             mentionForced: (mentioned || aggMentioned) || undefined,
+            // ★ 2026-10-12：这条是**入站扩展强制入站**（`ctx.forceWake()`）—— 与"被 @"分开记，
+            //   排查"为什么低分还回话"时一眼能分辨是扩展显式要求的，而不是评分坏了。
+            forceWake: forced || undefined,
+            forceWakeWhy: forced ? (typeof mwState.qqInboundForceWakeReason === 'string' ? mwState.qqInboundForceWakeReason : undefined) : undefined,
             min: minScore,
             // 好感度档位与偏移（2026-09-14 定稿：偏移**加在分数上**，门槛保持主人设的值不动）
             //   ⚠️ 加权模式下 attTier/attOff 是**主角那条**的（权重最大的人），分值本身已各算各的
@@ -799,7 +810,9 @@ export async function handleInbound(
           //   入口条件去掉 `sc &&` 与 `!firstImg` —— 无分（纯视频/纯文件）也要能拦，
           //   "该不该放行"全交给上面的 worth（含**附件类型开关**），这里只负责执行。
           //   （原来"带图不拦"里那个 firstImg 是**不区分格式**的，视频/文件跟着沾光 ✗）
-          if (gate === 'block' && !mentioned && !aggMentioned && !worth) {
+          // ★ 2026-10-12 加 `!forced`：入站扩展用 `ctx.forceWake()` 显式要求"这条必须进站"时，
+          //   连价值评分拦截也不再适用（forceWake 的定义就是"跳过一切值不值得回的判断"）。
+          if (gate === 'block' && !mentioned && !aggMentioned && !forced && !worth) {
             const ag = record.agent as unknown as {
               whenIdle?: () => Promise<void>;
               session?: { append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown };
@@ -839,11 +852,20 @@ export async function handleInbound(
             return;
           }
           // ② 附件放行（图片默认放行、或主人勾了放行的类型）：只打日志，分数照记
-          if (gate === 'block' && !mentioned && mediaPass && (sc ? sc.score < minScore : true)) {
+          //   ★ 2026-10-12 加 `!forced`：forceWake 已经无条件放行了，这条日志不该再说"附件放行"。
+          if (gate === 'block' && !mentioned && !forced && mediaPass && (sc ? sc.score < minScore : true)) {
             const kinds = Object.entries(attKinds).filter(([, v]) => v).map(([k]) => k).join('+');
             logger.debug(`[价值评分] 附件放行(${kinds || '未知'})不看分数 ${sc ? sc.score.toFixed(2) : '无分'}<${minScore}: key=${scope}:${peerId}`);
           }
-          if (sc && gate !== 'block' && !mentioned && !worth) {
+          // ★ 2026-10-12：forceWake 导致的"低分照样进站"单独留一行——排查"为什么低分还回话"时，
+          //   看到这行就知道是**入站扩展显式要求**的（而不是模式配错/评分坏了）。
+          if (forced && !worth) {
+            logger.debug(
+              `[价值评分] 强制入站(入站扩展 forceWake${String(mwState.qqInboundForceWakeReason ?? '') ? `: ${String(mwState.qqInboundForceWakeReason)}` : ''})` +
+              ` → 跳过低分拦截 ${sc ? sc.score.toFixed(2) : '无分'}<${minScore}${aggCount ? ` agg=${aggCount}` : ''}: key=${scope}:${peerId} "${plain.slice(0, 30)}"`,
+            );
+          }
+          if (sc && gate !== 'block' && !mentioned && !forced && !worth) {
             // ⚠️ 提到 info(2026-09-13): 主人排查"低分为什么还回话"时, 一眼就能在控制台看到
             //    "哦，是模式还在 log" —— 而不是靠猜。平时也就每次群消息一行, 可接受。
             logger.debug(`[价值评分] 低分放行(模式=${gate} 不是 block 所以不拦) ${sc.score.toFixed(2)}<${minScore}${aggCount ? ` agg=${aggCount}` : ''}: key=${scope}:${peerId} "${plain.slice(0, 30)}"`);

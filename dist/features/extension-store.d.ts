@@ -13,6 +13,13 @@ export declare const EXT_BOTPLAY_SUBDIR: string;
  */
 export declare const EXT_HOOKS_SUBDIR: string;
 /**
+ * 入站中间件目录名(相对数据根; 2026-10-12 第五套扩展)。
+ * 与前几套的区别: 入站扩展**每条消息都跑一遍**, 且能读到/改写 ctx.state.mention、
+ * 甚至不调 next() 把这条整条拦掉 —— 它是"影响入站"的扩展点。
+ * 引擎在 features/ext-inbound.ts(本文件只提供目录常量, 免得两边各写一份字符串写歪)。
+ */
+export declare const EXT_INBOUND_SUBDIR: string;
+/**
  * 扫描并加载扩展命令目录下的全部命令。
  * fail-soft: 单个文件坏/抛错只记日志, 不影响其它扩展与插件本体。
  */

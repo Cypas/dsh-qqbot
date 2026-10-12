@@ -837,6 +837,17 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
             catch (err) {
                 logger.warn?.(`[ext-hook] 清理启动钩子异常(已忽略): ${err instanceof Error ? err.message : String(err)}`);
             }
+            // ── 入站中间件扩展（ext-inbound，第五套扩展；2026-10-12）──────────────────────
+            //    与启动钩子同一时机：卸载 / 宿主退出 / 保存连接设置后重建网关时，
+            //    调各扩展可选导出的 dispose()，并把热重载入口摘掉（否则它会指向已经死掉的实例）。
+            //    引擎内部逆序 + 逐个 try/catch，单个失败只告警，绝不阻断其余拆卸步骤。
+            try {
+                const inbound = await import('../features/ext-inbound.js');
+                await inbound.disposeInboundExtensions(logger);
+            }
+            catch (err) {
+                logger.warn?.(`[ext-inbound] 清理入站扩展异常(已忽略): ${err instanceof Error ? err.message : String(err)}`);
+            }
             await manager.disposeAll();
             bot.stop();
         };

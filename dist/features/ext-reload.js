@@ -27,4 +27,36 @@ export function describeExtCommandReload(r) {
         return '扩展命令: 0 个(目录里没有 commands/*.js?)';
     return `扩展命令: ${r.names.length} 个已重载 → ${r.names.map((n) => '/' + n).join(', ')}`;
 }
+/** 由 middleware-setup 注册：重扫入站扩展目录并原地换掉生效列表 */
+let inboundReloader;
+/** 注册/注销入站扩展重载器（注销传 undefined；插件重建时调用方会覆盖为新的） */
+export function registerExtInboundReloader(fn) {
+    inboundReloader = fn;
+}
+/**
+ * 热重载入站扩展。
+ * 返回 `{ error }` 表示"没装成"（比如插件还没启动完）—— 不抛错，理由同 {@link reloadExtCommands}。
+ */
+export async function reloadExtInbound() {
+    if (!inboundReloader)
+        return { error: '入站扩展表尚未注册(插件还没完成启动?)' };
+    try {
+        return await inboundReloader();
+    }
+    catch (err) {
+        return { error: `入站扩展重载失败: ${err instanceof Error ? err.message : String(err)}` };
+    }
+}
+/** 给回执文本用：把入站扩展重载结果拼成一句人话 */
+export function describeExtInboundReload(r) {
+    if ('error' in r)
+        return `入站扩展: ${r.error}`;
+    if (r.count === 0)
+        return '入站扩展: 0 个(目录里没有 inbound/*.mjs?)';
+    return `入站扩展: ${r.count} 个已重载 → ${r.names.join(', ')}`;
+}
+/** 当前是否已注册入站扩展重载器（诊断用） */
+export function hasExtInboundReloader() {
+    return typeof inboundReloader === 'function';
+}
 //# sourceMappingURL=ext-reload.js.map

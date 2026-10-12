@@ -13,7 +13,7 @@
  * 挂载 preset（工具集、prompt sections 等），实现场景化配置。
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { describeExtCommandReload, reloadExtCommands } from '../features/ext-reload.js';
+import { describeExtCommandReload, describeExtInboundReload, reloadExtCommands, reloadExtInbound } from '../features/ext-reload.js';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, Logger, ReplyTarget } from '../types.js';
@@ -886,8 +886,12 @@ export class SessionManager {
     // 2026-10-12 主人定：命令表也要一起热重载（此前扩展命令改了必须重启插件才生效）。
     //   放在"有没有活动会话"判断**之前** —— 没有任何会话时，命令照样能刷。
     const cmdLine = describeExtCommandReload(await reloadExtCommands());
+    // 2026-10-12 追加：入站中间件扩展（`.qqbot-extensions/inbound/*.mjs`）同一时机一起重扫。
+    //   挂载点是个"现读可变列表"的代理，重扫只是换内容 ⇒ **不重启即生效**，不用另加一条热刷入口。
+    const inboundLine = describeExtInboundReload(await reloadExtInbound());
+    const extLines = `${cmdLine}\n${inboundLine}`;
     if (targets.length === 0) {
-      return `当前没有活动会话可热刷(先随便发条消息让会话跑起来, 再试 /tools-reload)\n${cmdLine}`;
+      return `当前没有活动会话可热刷(先随便发条消息让会话跑起来, 再试 /tools-reload)\n${extLines}`;
     }
     let ok = 0; let fail = 0;
     for (const c of targets) {
@@ -899,7 +903,7 @@ export class SessionManager {
         this.logger.warn?.(`im-qqbot: 热刷新失败: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    return `✅ 工具热刷新完成: ${ok} 个会话成功${fail > 0 ? `, ${fail} 个失败(见日志)` : ''}。新工具下一条消息即可用。\n${cmdLine}`;
+    return `✅ 工具热刷新完成: ${ok} 个会话成功${fail > 0 ? `, ${fail} 个失败(见日志)` : ''}。新工具下一条消息即可用。\n${extLines}`;
   }
 
   /** cwd 分流(通用, 不写死实例名): 只对本实例配置的 cwd 匹配的 agent 注入本实例群守则。
