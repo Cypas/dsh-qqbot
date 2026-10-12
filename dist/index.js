@@ -183,6 +183,21 @@ export async function apply(ctx, config) {
     //   配置对象虽然更新了，但**网关从未启动** → 表现就是"填了密码却不会自动重连"（必须重启）。
     //   现在：一旦检测到凭据从无到有，就自动启动一次网关。
     let gatewayStarted = false;
+    /** 拆卸当前网关（由 bootstrapGateway 经 hooks 交回；**幂等**，与 cordis 生命周期共用同一个函数） */
+    let gatewayDispose;
+    /**
+     * **与连接相关的字段** —— 其中任何一个变了都必须「先拆后建」，光热更新配置是不会重连的。
+     *
+     * 判据来自 `src/config.ts` 顶部注释：appId/appSecret 故意**不标 volatile**，期望靠宿主
+     * "配置变了 → 重新挂载插件 → 重建 bot"来重连。但本插件为了躲开 2026-09-24 那个
+     * "写 patch → 宿主热更新 → 再写"的自反馈死循环，改成了**只写自有存储、不碰宿主配置**
+     * ⇒ remount 永不触发。于是只剩下面这条自补的「保存即重连」路径。
+     */
+    const CONN_KEYS = ['appId', 'appSecret', 'preset', 'cwd', 'disabled', 'settingsNs', 'dataRoot'];
+    const connSnapshot = () => {
+        const cur = resolvedConfig;
+        return CONN_KEYS.map((k) => `${k}=${String(cur[k] ?? '')}`).join('\u0001');
+    };
     const tryStartGateway = async () => {
         if (gatewayStarted)
             return;
@@ -194,7 +209,10 @@ export async function apply(ctx, config) {
         gatewayStarted = true;
         try {
             logger.info(`实例 ${ns}: 检测到凭据已就绪，开始启动网关…`);
-            await bootstrapGateway(ctx, agents, resolvedConfig, logger);
+            await bootstrapGateway(ctx, agents, resolvedConfig, logger, {
+                // 拿到"拆卸本次网关"的函数 —— 保存了连接相关设置后要靠它先拆后建（否则永不重连）
+                onDisposer: (d) => { gatewayDispose = d; },
+            });
             logger.info(`实例 ${ns}: 网关已启动（凭据热更新生效，无需重启）`);
         }
         catch (err) {
@@ -208,11 +226,29 @@ export async function apply(ctx, config) {
         ctx.on('qqbot/settings-changed', (changedNs) => {
             if (changedNs && changedNs !== ns)
                 return;
-            const next = readOwnSettings();
-            Object.assign(resolvedConfig, mergeDeep(resolvedConfig, next));
-            logger.info(`设置已热更新(${ns}): ${Object.keys(next).length} 项`);
-            setLexicalFallback((resolvedConfig.localModel?.lexicalFallback) === true); // 兜底开关热生效
-            void tryStartGateway(); // ← 若刚从"无凭据"变成"有凭据"，自动把网关拉起来
+            void (async () => {
+                const before = connSnapshot();
+                const next = readOwnSettings();
+                Object.assign(resolvedConfig, mergeDeep(resolvedConfig, next));
+                logger.info(`设置已热更新(${ns}): ${Object.keys(next).length} 项`);
+                setLexicalFallback((resolvedConfig.localModel?.lexicalFallback) === true); // 兜底开关热生效
+                // ★ 2026-10-12：**连接相关字段变了就拆旧建新**。
+                //   不加这步的话，下面的 tryStartGateway() 会被 `gatewayStarted` 守卫直接挡回
+                //   ⇒ 表现成"改了 appSecret/preset 却永远不重连，非得重启宿主"（主人 2026-10-12 实测反馈：
+                //   只有新建实例并保存那一次才会连上）。日志会明说走了哪条路，便于排查。
+                if (gatewayStarted && connSnapshot() !== before) {
+                    logger.info(`实例 ${ns}: 连接相关设置已变化 → 重建网关（先拆后建）`);
+                    try {
+                        await gatewayDispose?.();
+                    }
+                    catch (e) {
+                        logger.warn?.(`实例 ${ns}: 拆旧网关失败（仍继续尝试新建，避免卡死）: ${e instanceof Error ? e.message : String(e)}`);
+                    }
+                    gatewayDispose = undefined;
+                    gatewayStarted = false; // 放行 tryStartGateway，让它重新 bootstrap
+                }
+                await tryStartGateway(); // ← 若刚从"无凭据"变成"有凭据"，自动把网关拉起来
+            })();
         });
     }
     catch { /* 事件系统不可用 → 退化为重启生效 */ }

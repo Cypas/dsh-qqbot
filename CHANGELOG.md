@@ -1,3 +1,39 @@
+## [1.8.8] - 2026-10-12
+
+> 修「设置页保存了凭据/预设，却**永远不重连**」—— 只有新建实例那一次会连上。
+
+### 🐛 修复
+
+- **保存连接相关设置后不重建网关**（主人 2026-10-12 实测反馈："貌似只有新建机器人实例并保存的时候才有连接"）。
+  根因是 `src/index.ts` 里 `tryStartGateway()` 的"只启动一次"守卫：
+
+  ```js
+  let gatewayStarted = false;
+  const tryStartGateway = async () => { if (gatewayStarted) return; /* … */ };
+  ```
+
+  它只覆盖了「首次安装 → 填凭据」这一条路（那时 `gatewayStarted` 还是 false）；
+  **已有实例改 appId / appSecret / preset / cwd 时，事件进来了、配置也热更新了，但网关不会被重建**
+  ⇒ 只能重启宿主。
+
+  而 `src/config.ts` 顶部原本期望的是另一条路：appId/appSecret **故意不标 volatile**，
+  让宿主"配置变化 → 重新挂载插件 → 重建 bot"来重连。但本插件为躲开 2026-09-24 那个
+  "写 patch → 宿主热更新 → 再写"的自反馈死循环，早已改成**只写自有存储、不碰宿主配置**
+  ⇒ remount 那条路**根本不会触发**。两条路都断了，于是"保存即生效"只剩配置层、没有连接层。
+
+  - `bootstrapGateway()` 新增可选 `hooks.onDisposer`：把「拆卸本次网关」的函数交出去
+    （与交给 `im-qqbot.lifecycle` 的是**同一个**，并加了**幂等守卫** —— 两条路都可能触发）。
+  - `src/index.ts` 的 `qqbot/settings-changed` 监听改为：先取**连接相关字段快照**
+    （`appId` / `appSecret` / `preset` / `cwd` / `disabled` / `settingsNs` / `dataRoot`），
+    合并新设置后**若快照变了** → `await gatewayDispose()` 拆旧 → 复位守卫 → 重新 `bootstrapGateway()`。
+  - 日志会明说走了哪条路：`连接相关设置已变化 → 重建网关（先拆后建）`，便于排查。
+  - 纯展示类设置（行为间隔、出站模式、贴纸开关…）**不触发重建**，避免每保存一次就断线重连。
+
+### 🧪 回归
+
+- `npm run build` + `npm run check:package` 通过；`vitest run` **179 项通过**
+  （`classify-accuracy` 依赖本地小模型，环境不具备时不参与）。
+
 ## [1.8.7] - 2026-10-12
 
 > 修「设置按 profile 隔离**根本没生效**」，并把**跨会话工具四件套**收进扩展示例。

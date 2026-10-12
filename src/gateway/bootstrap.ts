@@ -55,11 +55,26 @@ function replyTargetOfInteraction(
   return { scope: (e?.chat_type === 1 || e?.scene === 'group') ? 'group' : 'c2c', targetId: e?.group_member_openid ?? '' };
 }
 
+/**
+ * `bootstrapGateway` 的可选钩子（2026-10-12 新增）。
+ *
+ * 起因：设置页保存凭据后**本应"自动重连"**，但 `src/index.ts` 里那个 `tryStartGateway()`
+ * 带"只启动一次"的守卫（`gatewayStarted`）—— 已有实例改 appId/appSecret 时它直接 return，
+ * 于是表现成"只有新建实例并保存才会连上"（主人 2026-10-12 实测反馈）。
+ *
+ * 这里把「拆卸本次网关」的函数交出去，让调用方能在**连接相关字段变化**时先拆后建。
+ * 与交给 `im-qqbot.lifecycle` 的是同一个函数，且做了幂等守卫 —— 重复调用只生效一次。
+ */
+export interface GatewayBootstrapHooks {
+  onDisposer?: (dispose: () => Promise<void>) => void;
+}
+
 export async function bootstrapGateway(
   ctx: Context,
   agents: DshAgentRegistry,
   config: ImQQBotConfig,
   logger: Logger,
+  hooks?: GatewayBootstrapHooks,
 ): Promise<void> {
   const manager = new SessionManager(ctx, agents, config, logger);
   // 实例标识(settingsNs), 全 bootstrap 共用: 注册表按 ns 隔离(B类修复 2026-09-11)
@@ -778,7 +793,14 @@ export async function bootstrapGateway(
       }, 60_000);
       botplaySweeper.unref?.();
 
-      return async () => {
+      // 2026-10-12：拆成**幂等的 dispose**。它现在有两条调用路径：
+      //   ① cordis 作用域销毁（把返回值交给 'im-qqbot.lifecycle'）
+      //   ② 保存了「连接相关设置」后的"先拆后建"（index.ts 通过 hooks.onDisposer 拿到它）
+      // 幂等守卫是必需的：两条路都可能触发，重复 dispose 会把 manager/bot 拆两次。
+      let disposed = false;
+      const dispose = async (): Promise<void> => {
+        if (disposed) return;
+        disposed = true;
         logger.info('Shutting down');
         registerApprovalController(myNs, undefined);
         registerQuestionController(myNs, undefined);
@@ -797,5 +819,7 @@ export async function bootstrapGateway(
         await manager.disposeAll();
         bot.stop();
       };
+      try { hooks?.onDisposer?.(dispose); } catch (e) { logger.warn?.(`bootstrap hooks.onDisposer 失败: ${e instanceof Error ? e.message : String(e)}`); }
+      return dispose;
     }, 'im-qqbot.lifecycle');
 }

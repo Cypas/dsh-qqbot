@@ -37,7 +37,7 @@ function replyTargetOfInteraction(event, _ctx, _manager) {
     // 兜底: 群聊 member_openid 只能推群, 但没有 group_openid 无法构造 → 空 target(上层会忽略)
     return { scope: (e?.chat_type === 1 || e?.scene === 'group') ? 'group' : 'c2c', targetId: e?.group_member_openid ?? '' };
 }
-export async function bootstrapGateway(ctx, agents, config, logger) {
+export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
     const manager = new SessionManager(ctx, agents, config, logger);
     // 实例标识(settingsNs), 全 bootstrap 共用: 注册表按 ns 隔离(B类修复 2026-09-11)
     const myNs = config.settingsNs?.trim() || 'im-qqbot';
@@ -777,7 +777,15 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
             catch { /* ignore */ }
         }, 60_000);
         botplaySweeper.unref?.();
-        return async () => {
+        // 2026-10-12：拆成**幂等的 dispose**。它现在有两条调用路径：
+        //   ① cordis 作用域销毁（把返回值交给 'im-qqbot.lifecycle'）
+        //   ② 保存了「连接相关设置」后的"先拆后建"（index.ts 通过 hooks.onDisposer 拿到它）
+        // 幂等守卫是必需的：两条路都可能触发，重复 dispose 会把 manager/bot 拆两次。
+        let disposed = false;
+        const dispose = async () => {
+            if (disposed)
+                return;
+            disposed = true;
             logger.info('Shutting down');
             registerApprovalController(myNs, undefined);
             registerQuestionController(myNs, undefined);
@@ -799,6 +807,13 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
             await manager.disposeAll();
             bot.stop();
         };
+        try {
+            hooks?.onDisposer?.(dispose);
+        }
+        catch (e) {
+            logger.warn?.(`bootstrap hooks.onDisposer 失败: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        return dispose;
     }, 'im-qqbot.lifecycle');
 }
 //# sourceMappingURL=bootstrap.js.map
