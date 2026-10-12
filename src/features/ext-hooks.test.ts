@@ -274,3 +274,42 @@ export function run(env) {
     expect(lines).toEqual([]);
   });
 });
+
+/**
+ * ★ 2026-10-12 真 bug 回归：**网关重建后不能把刚起来的钩子当场拆掉**。
+ *
+ * 触发链（v1.8.8「保存连接相关设置即重建网关」正好走到）：
+ *   runStartupHooks → disposeStartupHooks()（disposed = true）→ 再 runStartupHooks
+ * 若第二轮不把 disposed 复位，钩子里 `registerDispose(fn)` 会命中 pushDisposer 的
+ * "卸载后登记 ⇒ 立即执行"分支 ⇒ **注册即被清理**（刚订阅就退订）。
+ */
+describe('启动钩子 · 网关重建后的第二轮（回归）', () => {
+  it('dispose 之后再次 runStartupHooks，新钩子登记的清理函数不能被立刻执行', async () => {
+    writeHook('rebuild.mjs', `
+      export function run(env) {
+        env.registerDispose(() => { globalThis.__rebuildCleaned = (globalThis.__rebuildCleaned ?? 0) + 1; });
+        globalThis.__rebuildRan = (globalThis.__rebuildRan ?? 0) + 1;
+        return 'ok';
+      }
+    `);
+    const g = globalThis as unknown as Record<string, unknown>;
+    delete g.__rebuildRan; delete g.__rebuildCleaned;
+
+    // 第一轮：启动
+    const first = await runStartupHooks({ dataRoot, logger: makeLogger().logger });
+    expect(first.ok).toBe(1);
+    expect(g.__rebuildRan).toBe(1);
+
+    // 网关重建：先 dispose（这一步会把 disposed 置 true）
+    await disposeStartupHooks(makeLogger().logger);
+    expect(g.__rebuildCleaned).toBe(1);        // 第一轮的清理确实跑了
+
+    // 第二轮：重新启动
+    const second = await runStartupHooks({ dataRoot, logger: makeLogger().logger });
+    expect(second.ok).toBe(1);
+    expect(g.__rebuildRan).toBe(2);
+    // ★ 关键断言：这一轮刚登记的清理**不能**被立刻执行
+    expect(g.__rebuildCleaned).toBe(1);
+    expect(startupHooksDisposeCount()).toBe(1);
+  });
+});

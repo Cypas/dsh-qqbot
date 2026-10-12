@@ -142,6 +142,14 @@ async function withTimeout(p, ms) {
  */
 export async function runStartupHooks(opts) {
     const { dataRoot, logger } = opts;
+    // ★ 2026-10-12 修（真 bug）：**新一轮生命周期开始，必须把 disposed 复位**。
+    //   不重置的话，下面这条链会把刚起来的钩子当场拆掉：
+    //     启动 → runStartupHooks（此时 disposed=false，正常）→ 保存连接设置触发网关重建
+    //     → dispose 里调 disposeStartupHooks() ⇒ disposed=true → 重新 bootstrap
+    //     → 再次 runStartupHooks，钩子调 registerDispose() 时看到 disposed===true
+    //     ⇒ pushDisposer 走"卸载后登记 ⇒ 立即执行"分支 ⇒ 注册即被清理（刚订阅就退订）。
+    //   `disposeStartupHooks` 已经把 disposers 清空，所以这里只补复位标志即可。
+    disposed = false;
     const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
         ? Number(opts.timeoutMs)
         : DEFAULT_HOOK_TIMEOUT_MS;
