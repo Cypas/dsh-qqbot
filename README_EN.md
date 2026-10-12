@@ -27,6 +27,10 @@ The little ball at the corner of the settings panel opens a whole control deck: 
 
 **🛡️ Group-admin helper** — join approval + mute management over official APIs, with human-readable errors (not an admin / cannot mute the owner…).
 
+**👢 Kick members (v1.6.3)** — QQ's official API has **no kick endpoint**, so this part drives *your own* QQ account through the group website: panel → **🔨 Hammer → 👢 Kick** → refresh the QR code, scan it once with your phone (it keeps you signed in afterwards), then pick a group, search a member (exact uin or fuzzy nickname) and hit kick. The login state is **shared with the AI**, so you can also just tell her “kick X out of the group”. (Credentials stay in `{dataRoot}/qun-cookie.json`, the browser runs in its own throwaway profile, and nothing is kept running.)
+
+**💗 She remembers who is close and who is not** (v1.5.1) — two independent dimensions: **familiarity** (how firmly she remembers you — days seen, messages sent, being @-ed, being answered: a slow-moving variable) and **affinity** (her current attitude, which can rise or fall with every interaction). The panel lists one row per person and can **export the whole thing to Excel in one click**. Judging uses a local small model that reads both her reasoning (“inside”) and her actual reply (“outside”): *reluctant inside but still polite outside = a concession*; *warm inside but cold outside = does not count*. Affinity only tunes **how willing she is to speak up on her own** — negative affinity means fewer spontaneous messages, **never coldness, snark or attacks**. Group-chat aggregation weights value × affinity, so a single message cannot bait her.
+
 **🔝 A QQ message brings her session back to the top** (v1.6.8)
 The web-sidebar session you are actually talking to should not be buried. As soon as a QQ message lands in one of her web sessions **and she really replies**, that session is moved to just after the still-"hot" ones (anything active within 10 minutes counts as hot; **pinned sessions never move**), so it leapfrogs whatever has gone cold. Fully event-driven, no polling — and nothing happens when the chat page is closed or the host is not up yet.
 
@@ -65,12 +69,18 @@ Right: sticker-battle in action — the bot answers with stickers from its own l
   - A message containing `@bot` means someone @-ed this bot (`@bot` is yourself).
 - Host-level fixes (workspace session attachment, upstream PR #21) are included — idempotent and fully fail-soft.
 
-**What's new in v1.1.4** (user-facing):
-- **Join-request dual channel**: live QQ event = 【入群申请】 message note (silent, no wake); polling fallback = 【审批轮询】 system alert (wakes the AI to handle it). Notes land in the group-manager (hub) session; ordinary groups follow the dock switches.
-- **Four independent group-admin switches (dock settings)**: 唤醒AI (wake hub-session AI) / 注入群管会话 (hub web note) / 通知普通群 (note the requesting group) / 唤醒普通群AI (wake the requesting group's AI) — effective on both the event and polling paths.
-- **Inbound `@bot` long-id cleanup**: the bot's own openid in inbound mentions is shortened to `@bot` (saves tokens); outbound `<@other-openid>` mentions are untouched.
-- **Web model changes persist** across restarts (QQ-side overrides take precedence); `/model` lists only the current provider's models.
-- **Multi-instance isolation**: sticker stores / timers / gates / history buffers are isolated per instance (`settingsNs`).
+**What's new** (user-facing highlights; full history in [CHANGELOG](./CHANGELOG.md)):
+
+- **v1.8.8** — saving connection-related settings (AppID / AppSecret / persona / working dir) now **rebuilds the gateway immediately**. Previously only the *first* credential save (fresh install) would connect; anything later updated the config object but never touched the connection, so people had to restart the host manually.
+- **v1.8.7** — settings/credentials are isolated **per dsh profile** (`qqbot-settings/<profile>/<ns>.json`), and the profile name is now derived from the **install location** instead of `DSH_PROFILE` (which the host process never sets). Without that fix every profile silently wrote into `_default/`, and the writer-fingerprint conflict guard never worked.
+- **v1.8.6** — extension **commands** now get the same capability pack as extension tools, and `/tools-reload` reloads commands too.
+- **v1.8.0** — extension tools can declare `expose: 'all'` to become visible **in every conversation** (web / terminal / …) and act on QQ from there — see “Cross-channel tools” below.
+- **v1.6.8** — a QQ message pulls her web-sidebar session back to the top (see above).
+- **v1.6.7** — **custom botplay events**, plus “let the AI write one for you” (see below).
+- **v1.6.3** — **🔨 Hammer panel: mute / kick**; kicking drives *your own* QQ account, because the official API exposes no kick endpoint (see below).
+- **v1.5.1** — **familiarity / affinity ledger** (two separate dimensions, one row per person, one-click Excel export).
+- **v1.4.5** — optional local small model for smart replies (a token saver; see below).
+- **v1.3.0** — token-lean by design (see the developer bullets above).
 
 > 🛡️ This repo contains **no** bot credentials, sticker data, logs or personal paths (cleaned before publishing). Inject AppID/AppSecret via env vars or the Web panel — **never commit them**.
 
@@ -414,7 +424,17 @@ export default {
 - **`env.qq`** = that persona's account pack: `{ preset, appId, appSecret, owners, groups:[{gid,name,lastAt}], c2c:[{openid,name,lastAt}], sender, sendText(scope,id,text), sendMarkdown(...), sendImage(...), apiCall(method,path,body) }`.
 - **Sending is passive-first**: `sendText()` looks up the target conversation's latest inbound `msgId` and replies with it (passive — no active-message quota, and QQ will not drop it); on failure it **retries without the msgId** (active fallback). A passive window only exists in conversations with **recent activity** — a cold group has none and will always go active.
 - Registration happens **at plugin startup** (no need to wait for a QQ message), idempotent and fail-soft.
-- **New users get examples for free**: at startup the plugin copies `examples/ext-tools/*.mjs` and `examples/botplay/*.mjs` into `{dataRoot}/.qqbot-extensions/{tools,botplay}/` — **only missing files**, never overwriting what you wrote.
+- **New users get examples for free**: at startup the plugin copies `examples/ext-tools/**` and `examples/botplay/*.mjs` into `{dataRoot}/.qqbot-extensions/{tools,botplay}/` — **only missing files**, never overwriting what you wrote. (`examples/ext-tools/lib/` is copied along too: subdirectories are **not** scanned as tools, which makes them the safe place for a tool's private helper modules.)
+- **Cross-session toolchain (shipped as working examples)**: `examples/ext-tools/` contains four tools that let one session **create another session, hand it a task, and receive the result back**:
+
+  | Tool | What it does |
+  |---|---|
+  | `session_create` | create a **child session** (optionally in another workspace and/or with another persona — both accept a display name *or* an id) and post the initial task into it |
+  | `session_send` | deliver a message to **any session** (the send tool): busy → `inject` (interject into the running turn, no wake), idle → `followup` (start a turn); the first line carries the source session id |
+  | `session_watch` | attach / detach a “backfill when the turn ends” hook, so a child's final text is posted back to the parent automatically |
+  | `sessions_list` | list workspaces and sessions (read-only; the workspace filter is a **substring** match) |
+
+  Three lessons are baked into them: **never hand-build message objects** (use `agent.inject` / `agent.followup` — a hand-rolled `user/message` can corrupt a session), **resume before delivering** (a non-live session silently drops `append`), and **control visibility with `expose`** (`'all'` = visible everywhere, anything else = QQ sessions only) so that parent-only tools stay invisible to children.
 
 **For AI agents — you can write these yourself (no feature request needed):**
 - Card bodies are **plain markdown you write** (`#`, bold, `![alt](url)`, fenced code). This plugin has **no template engine — the model is the engine**. Cards with buttons go through a botplay event or the dock card editor (button callbacks must be registered host-side).
@@ -425,6 +445,60 @@ export default {
 - Limitation: extensions **cannot register button callbacks** — those require a botplay event or the dock card editor. Extension-only flows are "card + user replies a number", with the AI acting as the state machine.
 - Example (song request): fetch a search API → build a markdown card (cover / title / artist / lyrics) → `sender.sendMarkdown(replyTarget, card)` → optionally `sender.sendMedia(...)` for a preview → return `{ ok: true, msg: 'card sent' }`.
 - API reference: when a field/event/error code is unclear, read the official QQ bot api-v2 docs <https://bot.q.qq.com/wiki/develop/api-v2/> instead of guessing (button `action.type` 0=link / 1=callback / 2=command, keyboard 5-row limit, error codes…).
+
+## 🔨 Hammer panel: mute / kick (v1.6.3)
+
+The dock's **🔨 Hammer** (formerly “🔇 Mute”) has two tabs:
+
+| Tab | Path | Notes |
+|---|---|---|
+| **🔇 Mute** | official bot API | works as soon as the bot is a group admin — no login at all |
+| **👢 Kick** | **your own QQ account** (group website API) | the official API exposes no kick endpoint, so you sign in once |
+
+**Kick, step by step**
+
+1. Panel → **🔨 Hammer** → **👢 Kick** → **📱 Refresh QR**
+2. The QR appears **inside the page** — scan it with mobile QQ's “Scan”, pointing the **camera at the screen**
+   > Tencent only accepts the camera: picking the image from the gallery / long-press recognition is answered with “本次请求不支持图片识别或长按扫描二维码授权”.
+3. Once signed in: pick a group → search a member (exact uin or fuzzy nickname) → hit 👢 Kick.
+
+![Hammer · Kick panel: searching “鱼”, one 👢 button per member](docs/screenshots/hammer-kick-panel.png)
+
+**Why you do not have to scan again** — after a successful login the credentials are stored in `{dataRoot}/qun-cookie.json`; every later login silently launches a **headless** browser, injects those cookies (CDP `Network.setCookie`), reads them back and closes it. **No window, no scan.** Only the first time (or after the credentials really expire) needs a scan; `skey` lives about a day and re-login uses that same silent path.
+
+**The AI shares the same login state** — the panel and the AI read/write the *same* `qun-cookie.json`. The AI-side tool is **`qq_group_admin`**:
+
+| action | Effect |
+|---|---|
+| `status` | login state / keep waiting for the scan |
+| `login` | sign in (silent first; returns a QR path only when needed) |
+| `groups` | list groups you own / manage |
+| `members` | look up members (exact uin / fuzzy nickname / all) |
+| `kick` | kick — **requires `confirmed=true`**, otherwise it only answers “please confirm the group and the member with the owner first” |
+
+Privacy: the browser runs in its **own profile** inside the plugin data dir (it cannot see your everyday browser), it is **not** kept running (credentials are read, then it closes; a QR wait lasts at most 5 minutes; it goes away with the host), and credentials never leave your machine.
+
+## 🚫 No-context mode (saves tokens per session)
+
+Let a given QQ session remember only the last few exchanges — older history is folded away. Handy for busy groups.
+
+**Turn it on**: dock panel (bottom-right 🛡) → “⚙ Single-session settings” → tab “🚫 No context” → enable it, set “keep N lines before the @” → save.
+
+Worth knowing: the **web transcript is not deleted** (only a “context compacted” fold marker is added), **N counts dsh-side messages** (one of them may bundle several QQ messages), it costs **zero extra model calls** (the placeholder text is static), and it takes effect **from the next turn onward**.
+
+## ✅ QQ approval cards: who may click
+
+An approval card is posted **into the requester's conversation** (a group request posts to the group), but only these people can press the buttons: **① the requester, ② the owner allow-list** (`groupAdmin.owners`).
+
+> ⚠️ **In group chats, set the allow-list**: Settings → QQ Bot → “Owner openids allowed to act (comma-separated; empty = no check)”. Otherwise the owner's clicks on somebody else's approval do nothing.
+
+## 🤖 Custom events + “let the AI write one for you” (v1.6.7)
+
+`botplay` events let you ship interactive cards (check-ins, mini-games, polls) whose button presses the plugin routes back to you — the full contract lives in [docs/botplay-contract.md](./docs/botplay-contract.md).
+
+- Button capacity is **`5 × buttonsPerRow`** — an event registered with `buttonsPerRow: 3` really fits only 15 buttons; extra ones are silently dropped.
+- **Do not rely on a `card.dirty` repaint alone** to push new content into the group. The proven pattern: send an idempotent aggregate card on phase change / game over, and answer explicit user requests (view state, reveal, self-healing old buttons) with `post: true`.
+- You do not have to write the JavaScript yourself — just ask the AI to *“write me a botplay event that does X”*; it can author it into your data root and a reload picks it up.
 
 ## Core Modules
 
