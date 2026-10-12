@@ -392,23 +392,26 @@ export function seedExampleTools(dataRoot: string, logger: Logger): number {
     // 项目里**所有**扩展示例都要送（2026-10-10 主人定）：工具示例 + botplay 卡片示例
     // 2026-10-12 追加第三套：启动钩子示例（examples/ext-hooks/ → .qqbot-extensions/hooks/）。
     //   与 seed 同一时机铺设 ⇒ **首次安装当次启动就能跑到示例钩子**（不用重启宿主）。
-    // 2026-10-12 追加第四套：入站中间件示例（examples/ext-inbound/ → .qqbot-extensions/inbound/）。
-    //   与 hooks 同理：铺完当次启动就被装载，用户不用自己搬示例。
-    const sets: Array<[string, string]> = [
+    // 2026-10-12 追加第五套：入站中间件示例（examples/ext-inbound/ → .qqbot-extensions/inbound/）。
+    //   ⚠️ 2026-10-12 主人定：**这一套只铺"最无害的那个"** —— 见下面第三个元素（文件名白名单）。
+    //   理由：入站扩展能影响**每一条**消息（消灭/改写/禁言），自动铺一个"会真动手"的规则到用户目录
+    //   等于替他做决定、还会往他数据目录里写状态文件。示例是给人**看和抄**的，不该自己跑起来。
+    const sets: Array<[string, string, string[]?]> = [
       ['../../examples/ext-tools/', join(dataRoot, EXT_TOOLS_SUBDIR)],
       ['../../examples/botplay/', join(dataRoot, EXT_BOTPLAY_SUBDIR)],
       ['../../examples/ext-hooks/', join(dataRoot, EXT_HOOKS_SUBDIR)],
-      ['../../examples/ext-inbound/', join(dataRoot, EXT_INBOUND_SUBDIR)],
+      //   只铺这一个：它只在"引用一条子会话转发消息"时改一下 @ 判定，不改内容、不写状态、不动手。
+      ['../../examples/ext-inbound/', join(dataRoot, EXT_INBOUND_SUBDIR), ['no-wake-on-child-quote.mjs']],
     ];
     // 2026-10-12：改成**递归**铺设（原来 readdirSync 只取直接子文件）。
     //   起因：跨会话工具示例（session_create / session_watch）把可变逻辑放在 `lib/*.mjs` 子目录里
     //   （按 mtime 版本化加载），非递归就只搬主文件、`lib/` 不跟着走 → 用户拿到的是 import 不到库的残废示例。
     //   `lib/` 这类子目录**不参与工具扫描**（扫描只看 tools/ 根下的直接子文件），所以铺进去是安全的。
-    for (const [rel, dstDir] of sets) {
+    for (const [rel, dstDir, allow] of sets) {
       try {
         const srcDir = fileURLToPath(new URL(rel, import.meta.url));
         if (!existsSync(srcDir)) continue;
-        n += copyExampleTree(srcDir, dstDir);
+        n += copyExampleTree(srcDir, dstDir, allow);
       } catch { /* 单套失败继续下一套 */ }
     }
     if (n > 0) logger.info?.(`[ext-tools] 已自动铺 ${n} 个扩展示例（tools + botplay + hooks + inbound）`);
@@ -423,8 +426,12 @@ export function seedExampleTools(dataRoot: string, logger: Logger): number {
  *
  * 纪律与 `seedExampleTools` 一致：**只补不存在**（绝不覆盖用户改过/写过的同名文件）、
  * 任何一步失败都只跳过那一个文件，绝不抛出（示例只是见面礼，不能影响插件启动）。
+ *
+ * `allowFiles`（可选）：**顶层文件名白名单** —— 只搬名单里的文件，其余跳过。
+ * 用于"这一套示例里只有某个是安全的"的场合（见 `seedExampleTools` 里 inbound 那条注释）。
+ * 子目录（`lib/` 之类）不受白名单限制，照旧整棵搬。
  */
-function copyExampleTree(srcDir: string, dstDir: string): number {
+function copyExampleTree(srcDir: string, dstDir: string, allowFiles?: string[]): number {
   let n = 0;
   try { mkdirSync(dstDir, { recursive: true }); } catch { return 0; }
   const entries = (() => {
@@ -437,6 +444,7 @@ function copyExampleTree(srcDir: string, dstDir: string): number {
       n += copyExampleTree(src, dst);          // 子目录（如 lib/）一并搬
       continue;
     }
+    if (allowFiles && !allowFiles.includes(ent.name)) continue;   // ★ 顶层白名单：不在名单里就不搬
     if (!ALLOWED_EXT.has(extname(ent.name).toLowerCase())) continue;
     if (existsSync(dst)) continue;             // ★ 不覆盖用户已有的（也就不会重复搬）
     try { copyFileSync(src, dst); n += 1; } catch { /* 单个失败继续 */ }

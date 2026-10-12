@@ -55,11 +55,22 @@
  *     `{数据根}/.qqbot-extensions/inbound/.state/audit.jsonl`；
  *     `ctx.muteUser` 随时可以用 `ctx.unmuteUser({ id })` 解掉。
  *
- * ── 状态存哪 ───────────────────────────────────────────────────────────────
- *   `{数据根}/.qqbot-extensions/inbound/.state/class-advisor.mjs.json`
- *   形状：`{ "mutes": [{ "id", "until", "reason", "by", "at" }], "kv": { … } }`
- *   `until = 0` 表示**永久**（`minutes <= 0`）；读名单时会**惰性清理过期项**。
- *   文件坏了当空处理（插件不会因为一个坏 JSON 崩掉）。
+ * ── 本文件**不会被自动铺到你的目录**（2026-10-12 主人定）────────────────────
+ *   同目录的 `no-wake-on-child-quote.mjs` 属"装上就该有"的规则，插件首次启动会替你铺一份；
+ *   本文件不铺 —— 因为它会**真动手删消息、封人**，不该替你决定。要试就自己拷：
+ *     copy 本文件 → `{数据根}/.qqbot-extensions/inbound/class-advisor.mjs`
+ *   （拷完 `/tools-reload` 或重启即生效；**记得先留 `DRY_RUN = true` 观察几天**。）
+ *
+ * ── 它会往你数据目录里写什么（就这两样，别的一样不碰）──────────────────────
+ *   · `{数据根}/.qqbot-extensions/inbound/.state/<本文件名>.json`
+ *     形状：`{ "mutes": [{ "id", "until", "reason", "by", "at" }], "kv": {} }`
+ *     **只在真的禁言/解禁时才写**；`until = 0` 表示永久（`minutes <= 0`）；读名单时惰性清理过期项；
+ *     文件坏了当空处理（插件不会因为一个坏 JSON 崩掉）。
+ *   · `{数据根}/.qqbot-extensions/inbound/.state/audit.jsonl`
+ *     每次真动作（含被白名单/熔断拒绝的）追加一行，摘要截断、512KB 轮转。
+ *   ⚠️ **刷屏计数不写盘**（只在内存里存 30 秒窗口）—— 早先版本用 `ctx.kv` 落盘，
+ *      而它对每一条消息都会被调到 ⇒ 每条群消息写一次文件。已改掉，这条路径不碰磁盘。
+ *   ⚠️ **`DRY_RUN = true` 时上面两个文件都不会出现**（只打日志、不动手）。
  */
 
 /** 日志展示名 */
@@ -164,17 +175,28 @@ export function maskText(text) {
 }
 
 /**
- * 刷屏判定（用 `ctx.kv` 记最近发言时刻 —— **落盘**，重启不清零）。
- * 返回 true = 这次已经构成刷屏。
+ * 刷屏判定：**只存在内存里**（30 秒的窗口，重启清零完全没影响）。
+ *
+ * ⚠️ 2026-10-12 改（主人："别给我拉屎"）：原来这里用 `ctx.kv` **落盘**，而这个函数对
+ *   **每一条**入站消息都会被调到 ⇒ **每来一条群消息就同步写一次状态文件**。
+ *   那既没必要（窗口只有 30 秒，重启还留着它毫无意义），也是在用户数据目录里拉屎。
+ *   改成进程内的 Map 之后，**这条路径彻底不碰磁盘**。
  */
+const spamHits = new Map();   // senderId -> 最近发言时刻数组
+
 export function noteAndCheckSpam(ctx) {
-  const key = `spam:${ctx.sender}`;
+  const key = String(ctx.sender ?? '');
   const now = Date.now();
-  const prev = ctx.kv.get(key);
-  const recent = (Array.isArray(prev) ? prev : [])
-    .filter((t) => typeof t === 'number' && now - t < SPAM_WINDOW_MS);
+  const prev = spamHits.get(key) ?? [];
+  const recent = prev.filter((t) => now - t < SPAM_WINDOW_MS);
   recent.push(now);
-  ctx.kv.set(key, recent.slice(-SPAM_MAX));   // 只留最近 SPAM_MAX 个时刻，别让 kv 无限涨
+  spamHits.set(key, recent.slice(-SPAM_MAX));   // 只留最近 SPAM_MAX 个时刻
+  // 顺带把"早就不说话了"的人清掉，别让 Map 无限涨（几百人规模也只是个小 Map）
+  if (spamHits.size > 500) {
+    for (const [k, v] of spamHits) {
+      if (!v.some((t) => now - t < SPAM_WINDOW_MS)) spamHits.delete(k);
+    }
+  }
   return recent.length >= SPAM_MAX;
 }
 
