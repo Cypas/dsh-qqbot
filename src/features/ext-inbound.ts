@@ -164,6 +164,24 @@ export interface ExtRunOptions {
   owners?: string[];
   /** bot 的 appId（`ctx.platform.mentioned` 的内容兜底扫描用，与 SDK mentionGate 同款判据） */
   appId?: string;
+
+  // ── ★ 2026-10-12 主人定「能力面对齐」：统一能力包（features/ext-capabilities.ts）的输入 ──
+  //    入站扩展要和另外四套（自定义命令 / 扩展工具 / botplay 卡片 / 启动钩子）拿到**同一套**
+  //    能力（store / api() / markdown / appendSilent / user / kernel …，见 docs/USER-GUIDE.md
+  //    §「统一能力包」）。这几项由挂载点（gateway/middleware-setup.ts）喂进来；
+  //    缺哪个，对应能力就优雅降级（返回 false），**绝不抛**，不影响入站主链。
+  /** 当前会话的发送器（发消息/发富媒体用） */
+  sender?: unknown;
+  /** 当前这条消息的回复目标（被动回复优先） */
+  replyTarget?: unknown;
+  /** bot 密钥（`api()` 自建 token 兜底） */
+  appSecret?: string;
+  /** 带 token 的官方 API 调用（挂载点取 `manager.groupAdmin.apiCall`） */
+  apiCall?: unknown;
+  /** 插件自己的 cordis Context → 能力包里的 `kernel`（"遥控器"） */
+  kernel?: unknown;
+  /** `silentInto` 用：把"这条消息所属会话的宿主 agent"解析出来 */
+  resolveAgent?: (ctx: MiddlewareContext) => unknown;
 }
 
 /** 入站扩展目录（相对数据根） */
@@ -350,6 +368,14 @@ function runEnvOf(opts: ExtRunOptions | undefined, logger: Logger): ExtRunEnv {
     owners: Array.isArray(opts?.owners) ? opts.owners.map(String) : [],
     logger,
     ...(opts?.appId ? { appId: String(opts.appId) } : {}),
+    // ★ 2026-10-12 能力面对齐：统一能力包（与 silentInto）要的输入**原样透传**。
+    //   用 `!== undefined` 判据（不是真值判据）：sender 之类可能是对象/函数，别被布尔化吃掉。
+    ...(opts?.sender !== undefined ? { sender: opts.sender } : {}),
+    ...(opts?.replyTarget !== undefined ? { replyTarget: opts.replyTarget } : {}),
+    ...(opts?.appSecret ? { appSecret: String(opts.appSecret) } : {}),
+    ...(opts?.apiCall !== undefined ? { apiCall: opts.apiCall } : {}),
+    ...(opts?.kernel !== undefined ? { kernel: opts.kernel } : {}),
+    ...(opts?.resolveAgent ? { resolveAgent: opts.resolveAgent } : {}),
   };
 }
 

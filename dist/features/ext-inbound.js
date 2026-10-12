@@ -268,6 +268,14 @@ function runEnvOf(opts, logger) {
         owners: Array.isArray(opts?.owners) ? opts.owners.map(String) : [],
         logger,
         ...(opts?.appId ? { appId: String(opts.appId) } : {}),
+        // ★ 2026-10-12 能力面对齐：统一能力包（与 silentInto）要的输入**原样透传**。
+        //   用 `!== undefined` 判据（不是真值判据）：sender 之类可能是对象/函数，别被布尔化吃掉。
+        ...(opts?.sender !== undefined ? { sender: opts.sender } : {}),
+        ...(opts?.replyTarget !== undefined ? { replyTarget: opts.replyTarget } : {}),
+        ...(opts?.appSecret ? { appSecret: String(opts.appSecret) } : {}),
+        ...(opts?.apiCall !== undefined ? { apiCall: opts.apiCall } : {}),
+        ...(opts?.kernel !== undefined ? { kernel: opts.kernel } : {}),
+        ...(opts?.resolveAgent ? { resolveAgent: opts.resolveAgent } : {}),
     };
 }
 /** 记一次"该扩展参与了这条消息"，返回熔断原因（有的话由调用方告警） */

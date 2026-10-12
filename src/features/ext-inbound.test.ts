@@ -39,6 +39,7 @@ import {
   type ExtRunOptions,
   type InboundExtension,
 } from './ext-inbound.js';
+import { makeExtCaps } from './ext-capabilities.js';
 import {
   BURST_MAX,
   __resetBreakersForTest,
@@ -1173,5 +1174,227 @@ describe('示例·class-advisor 真链行为', () => {
     expect(X(ctx).isMuted('U_TARGET')).toMatchObject({ id: 'U_TARGET' });
     // 主人自己不受影响（白名单）
     expect(X(ctx).isMuted(OWNER)).toBeNull();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★ 能力面对齐（2026-10-12 主人定）★★
+//
+// 入站扩展（第五套）必须和另外四套 —— 自定义命令 / 扩展工具 / botplay 卡片 /
+// 启动钩子 —— 拿到**同一套**能力包。依据：`docs/USER-GUIDE.md`
+// §「★ 统一能力包（v1.7.0+）」原文「写扩展时**不用再自己接生**」。
+//
+// 这一组就是"到底对齐了没有"的**证据**（不是文档承诺）：直接在入站挂点里
+// 把 ctx 上那些成员的类型抓下来断言。哪天有人再把入站侧的 ctx 改成私有小 API，
+// 这里会立刻红。
+// ══════════════════════════════════════════════════════════════════════════
+describe('能力面对齐 · 入站扩展拿到统一能力包', () => {
+  let seen: Record<string, unknown> = {};
+  let logger: Logger;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'ext-inbound-align-'));
+    dataRoot = join(root, 'dshqqbot');
+    mkdirSync(dataRoot, { recursive: true });
+    seen = {};
+    logger = makeLogger().logger;
+  });
+  afterEach(() => {
+    try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  /** 观察型扩展：只记录"统一能力包那几个成员在不在、是什么类型"，不做任何动作 */
+  const observer: Middleware = async (ctx, next) => {
+    const c = ctx as unknown as Record<string, unknown>;
+    const ns = c.caps as Record<string, unknown> | undefined;
+    seen = {
+      // ── 统一能力包（与另外四套同一份实现）──
+      caps: typeof c.caps,
+      appendSilent: typeof c.appendSilent,
+      appendWake: typeof c.appendWake,
+      canAppendSilent: typeof c.canAppendSilent,
+      markdown: typeof c.markdown,
+      image: typeof c.image,
+      at: typeof c.at,
+      api: typeof c.api,
+      store: typeof c.store,
+      user: typeof c.user,
+      ownersIsArray: Array.isArray(c.owners),
+      peer: typeof c.peer,
+      kernel: typeof c.kernel,
+      // ── 命名空间里也有一份 ──
+      nsAppendSilent: typeof ns?.appendSilent,
+      nsText: typeof ns?.text,
+      // ── 入站专属的一个都不能少 ──
+      annihilate: typeof c.annihilate,
+      rewrite: typeof c.rewrite,
+      forceWake: typeof c.forceWake,
+      decide: typeof c.decide,
+      silentInto: typeof c.silentInto,
+      muteUser: typeof c.muteUser,
+      kv: typeof c.kv,
+      // ── 唯一同名冲突：text 保留"入站=读当前正文"的语义 ──
+      textIsMessageText: typeof c.text === 'string',
+    };
+    return next();
+  };
+
+  const fullOpts = (): ExtRunOptions => runOpts({
+    dataRoot,
+    sender: { sendText: async () => true, sendMarkdown: async () => true },
+    replyTarget: {},
+    apiCall: async () => ({ ok: true as const, data: {} }),
+    kernel: { get: () => undefined },
+  });
+
+  it('统一能力包的成员都在（appendSilent / store / api / at / user / kernel / caps）', async () => {
+    const ctx = makeCtx({ kind: 'group', groupOpenid: 'G1', senderId: 'U1', content: 'hi' });
+    await runEarlyInboundExtensions([asBoth('obs.mjs', observer)], ctx, async () => { /* 下游 */ }, logger, fullOpts());
+
+    // ★ 主人点名要的那条：`appendSilent` = "进上下文（静默）、不唤醒" —— 契约里本来就有
+    expect(seen.appendSilent).toBe('function');
+    expect(seen.appendWake).toBe('function');
+    expect(seen.canAppendSilent).toBe('function');
+    expect(seen.nsAppendSilent).toBe('function');
+    expect(seen.caps).toBe('object');
+    // 其余同套能力
+    expect(seen.markdown).toBe('function');
+    expect(seen.image).toBe('function');
+    expect(seen.at).toBe('function');
+    expect(seen.api).toBe('function');
+    expect(seen.store).toBe('object');
+    expect(seen.user).toBe('object');
+    expect(seen.ownersIsArray).toBe(true);
+    expect(seen.peer).toBe('object');
+    expect(seen.kernel).toBe('object');
+  });
+
+  it('入站专属动作一个都没被覆盖掉（annihilate / rewrite / forceWake / decide / silentInto / muteUser / kv）', async () => {
+    const ctx = makeCtx({ kind: 'group', groupOpenid: 'G1', senderId: 'U1', content: 'hi' });
+    await runEarlyInboundExtensions([asBoth('obs.mjs', observer)], ctx, async () => { /* 下游 */ }, logger, fullOpts());
+
+    expect(seen.annihilate).toBe('function');
+    expect(seen.rewrite).toBe('function');
+    expect(seen.forceWake).toBe('function');
+    expect(seen.decide).toBe('function');
+    expect(seen.silentInto).toBe('function');
+    expect(seen.muteUser).toBe('function');
+    expect(seen.kv).toBe('object');
+  });
+
+  it('同名冲突按约定解：ctx.text 仍是"当前正文"（读），发文本走 ctx.caps.text', async () => {
+    const ctx = makeCtx({ kind: 'group', groupOpenid: 'G1', senderId: 'U1', content: '你好呀' });
+    await runEarlyInboundExtensions([asBoth('obs.mjs', observer)], ctx, async () => { /* 下游 */ }, logger, fullOpts());
+
+    expect(seen.textIsMessageText).toBe(true);   // 入站语义保住了
+    expect(seen.nsText).toBe('function');        // 发文本的能力在命名空间里
+  });
+
+  it('缺发送器/agent 时优雅降级：不抛、入站主链照常走完', async () => {
+    let downstream = 0;
+    const ctx = makeCtx({ kind: 'group', groupOpenid: 'G1', senderId: 'U1', content: 'hi' });
+    // 故意只给 dataRoot：sender / replyTarget / agent / kernel 全缺
+    await runEarlyInboundExtensions([asBoth('obs.mjs', observer)], ctx, async () => { downstream += 1; }, logger, runOpts({ dataRoot }));
+
+    expect(downstream).toBe(1);                   // ★ 主链没被打断
+    expect(seen.appendSilent).toBe('function');   // 方法照样在（内部拿不到 agent ⇒ 返回 false，契约写明不抛）
+    expect(seen.silentInto).toBe('function');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★ 能力面对齐 · 第二半（2026-10-12 主人定）★★
+//
+// 「入站操控」这一组**也要进能力包**：契约是「一套包、五套扩展」，
+// 不能只把公共部分写进包里、把入站那一块留在包外面。
+//
+// 断言的是 `ctx.caps.inbound.*`：它和 ctx 上平铺的 `ctx.annihilate` 等
+// 是**同一份实现的两个入口**（不是两套代码），所以这里顺带把这条也钉住。
+// ══════════════════════════════════════════════════════════════════════════
+describe('能力面对齐 · 入站操控进了能力包（caps.inbound）', () => {
+  let got: Record<string, unknown> = {};
+  let logger: Logger;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'ext-inbound-pack-'));
+    dataRoot = join(root, 'dshqqbot');
+    mkdirSync(dataRoot, { recursive: true });
+    got = {};
+    logger = makeLogger().logger;
+  });
+  afterEach(() => {
+    try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  /** 读 `ctx.caps.inbound` 那一组 */
+  const reader: Middleware = async (ctx, next) => {
+    const ns = (ctx as unknown as Record<string, unknown>).caps as Record<string, unknown> | undefined;
+    const ib = ns?.inbound as Record<string, unknown> | undefined;
+    const msg = ib?.message as Record<string, unknown> | undefined;
+    got = {
+      isObject: typeof ib,
+      annihilate: typeof ib?.annihilate,
+      rewrite: typeof ib?.rewrite,
+      forceWake: typeof ib?.forceWake,
+      decide: typeof ib?.decide,
+      silentInto: typeof ib?.silentInto,
+      muteUser: typeof ib?.muteUser,
+      unmuteUser: typeof ib?.unmuteUser,
+      isMuted: typeof ib?.isMuted,
+      mutedUsers: typeof ib?.mutedUsers,
+      kv: typeof ib?.kv,
+      message: typeof ib?.message,
+      // message 的只读视图：现算（不是快照）
+      msgText: msg?.text,
+      msgSender: msg?.sender,
+      msgScope: msg?.scope,
+      msgGroupId: msg?.groupId,
+      // ★ 同一份实现：包里的和 ctx 上平铺的读的是**同一个 ctx / 同一套内核**。
+      //   注：两者是各自的一层薄包装（闭包不同，引用不相等），所以这里验"行为等价"：
+      //   读出来的东西必须一样（后面单独拿 annihilate 做动作验证）。
+      flatText: (ctx as unknown as Record<string, unknown>).text,
+      flatSender: (ctx as unknown as Record<string, unknown>).sender,
+    };
+    return next();
+  };
+
+  it('caps.inbound 的动作齐全，且与 ctx 上平铺的是同一份实现', async () => {
+    const ctx = makeCtx({ kind: 'group', groupOpenid: 'G9', senderId: 'U9', content: '你好' });
+    await runEarlyInboundExtensions([asBoth('reader.mjs', reader)], ctx, async () => { /* 下游 */ }, logger, runOpts({ dataRoot }));
+
+    expect(got.isObject).toBe('object');
+    expect(got.annihilate).toBe('function');
+    expect(got.rewrite).toBe('function');
+    expect(got.forceWake).toBe('function');
+    expect(got.decide).toBe('function');
+    expect(got.silentInto).toBe('function');
+    expect(got.muteUser).toBe('function');
+    expect(got.unmuteUser).toBe('function');
+    expect(got.isMuted).toBe('function');
+    expect(got.mutedUsers).toBe('function');
+    expect(got.kv).toBe('object');
+    // 同一份实现（不是各读各的快照）：包里的视图与 ctx 上的读出来的一致
+    expect(got.flatText).toBe(got.msgText);
+    expect(got.flatSender).toBe(got.msgSender);
+  });
+
+  it('caps.inbound.message 是只读视图，值就是这条消息的现场', async () => {
+    const ctx = makeCtx({ kind: 'group', groupOpenid: 'G9', senderId: 'U9', senderName: '小明', content: '你好' });
+    await runEarlyInboundExtensions([asBoth('reader.mjs', reader)], ctx, async () => { /* 下游 */ }, logger, runOpts({ dataRoot }));
+
+    expect(got.message).toBe('object');
+    expect(got.msgText).toBe('你好');
+    expect(got.msgSender).toBe('U9');
+    expect(got.msgScope).toBe('group');
+    expect(got.msgGroupId).toBe('G9');
+  });
+
+  it('别的四套拿不到这一组：不给入站动作时 caps.inbound 就是 undefined（语义，不是缺失）', () => {
+    // 直接调 makeExtCaps：不给 inbound ⇒ 包里就没有这一组
+    const caps = makeExtCaps({ dataRoot, logger });
+    expect(caps.inbound).toBeUndefined();
+    // 而公共部分照旧在
+    expect(typeof caps.markdown).toBe('function');
+    expect(typeof caps.appendSilent).toBe('function');
   });
 });

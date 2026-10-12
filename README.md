@@ -424,6 +424,47 @@ export async function dispose(env) {                 // 可选：卸载 / 宿主
 `session-watch-hook.mjs` 演示"注册监听 + dispose 清理"）；插件启动时会自动铺一份到你的扩展目录。
 ⚠️ 钩子**只在启动时跑一次**（没有热重载），改完要重启插件/宿主才生效。
 
+## 🚦 入站中间件：让扩展管"每条消息的命运"（v1.9.0）
+
+前面四套扩展都要**有人触发**才跑（敲命令 / LLM 调用 / 点卡片 / 启动）。但有些规则得管**每一条**消息：
+这条广告别进群、这句敏感话换掉、这条必须叫醒她、这条引用的是子会话转发**不算 @ 她**。
+
+把 `.mjs` 放进 `{dataRoot}/.qqbot-extensions/inbound/` 就生效：
+
+```js
+// {dataRoot}/.qqbot-extensions/inbound/my-rule.mjs
+export async function onInbound(ctx, next) {   // 早：记群历史之前
+  if (isAd(ctx.text)) {
+    ctx.silentInto();                          // 内容仍静默进她上下文
+    ctx.annihilate({ reason: '广告' });        // 消灭：不进历史/不进上下文/不占冷却
+    return;                                    // ★ 不调 next()
+  }
+  return next();
+}
+export default async function (ctx, next) {    // 晚：@门控之后
+  if (isChildForwardQuote(ctx.state?.quote?.text)) {
+    ctx.decide({ mention: 'ignore', reason: '引用子会话转发' });
+  }
+  return next();
+}
+```
+
+- **两个挂点**：早（引用解析后、**记群历史之前**）／晚（@门控之后，语义与旧契约一致）；
+- **四个动作**：`annihilate` 消灭 · `rewrite` 改写（早挂点连历史一起改）· `forceWake` 跳过 @门控/评分/冷却 ·
+  `decide` 覆盖 @ 判定；另有 `silentInto` 静默进上下文、`muteUser` 系列用户维禁言、`kv` 自己的持久化；
+- **能力面对面齐平**：入站扩展和另外四套**共用同一套能力包**（`store` / `api()` / `markdown` /
+  `appendSilent` / `user` / `kernel` …），入站专属的那组走 `ctx.caps.inbound`；
+- **四条保命件**：主人白名单最高优先（不可被消灭/禁言）、强唤醒优先于静默、熔断（扩展失控自动停手）、
+  审计 + 可撤销（每次动作一行，带轮转）；
+- 目录**不存在或为空完全安静**；单个扩展抛错只告警并放行 —— 你的脚本坏了**永远不会吞掉消息**。
+
+示例见 [`examples/ext-inbound/`](./examples/ext-inbound/README.md)。⚠️ 自动铺到你目录的**只有**
+`no-wake-on-child-quote.mjs`（它只改 @ 判定，不动手）；`class-advisor.mjs`（辅导员：删广告/封人/改写/
+求助优先）**不会自动铺**，要自己拷 —— 示例是给人**看和抄**的，不该在你没读过它之前就自己跑起来。
+
+> 📘 **写扩展前先读**：[`docs/extension-contract.md`](./docs/extension-contract.md) —— 五套扩展点、
+> 统一能力包、入站操控、安全红线和常见坑，一份写全。
+
 ## 🔨 锤子面板：禁言 / 踢人（v1.6.3）
 
 dock 面板里的 **🔨 锤子**（原来叫「🔇 禁言」），下面分两页：

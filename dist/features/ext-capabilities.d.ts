@@ -59,6 +59,8 @@ export interface ExtCapsDeps {
      * 由调用方把插件的 cordis Context 原样传进来；不传 = 没有这个能力。
      */
     kernel?: unknown;
+    /** ★ 入站操控（只有入站扩展能提供；见 {@link ExtInboundCaps}） */
+    inbound?: ExtInboundCaps;
     /**
      * 自重启实现（仅供测试注入；生产走内置 `selfRestart`）。
      * ⚠️ 真跑它会 spawn 一个助手去 kill 宿主进程 —— 测试里**必须**用这个接缝替换。
@@ -66,6 +68,83 @@ export interface ExtCapsDeps {
     restartImpl?: (delayMs?: number) => boolean;
 }
 /** 能力包对外形状（写扩展时看到的就是这个） */
+/**
+ * ★ **入站操控**（2026-10-12 主人定：并入统一能力包）。
+ *
+ * 为什么单独成组、而且是**可选**的：这几项只有在"手上有一条正在进站的消息"时才有意义 ——
+ * 也就是**入站扩展**（第五套，挂点 onInbound / onDecide）手里。其余四套（工具/命令/
+ * 卡片/钩子）大多在"消息早就进完了"的时候才跑，给它们一个空壳只会误导。
+ *
+ * 于是契约写成：**一套包，五套扩展**；包的公共部分人人都有，
+ * 这一组"有值就说明你现在正握着一条消息的处置权"。
+ *
+ * ⚠️ 三条语义（与入站扩展文档一致，改动前先读 `examples/ext-inbound/README.md`）：
+ *   ① annihilate = **不调 next()**：这条不进群历史、不进上下文、不占冷却；
+ *   ② rewrite 在早挂点会**连群历史一起改**；
+ *   ③ silentInto = 内容**静默进上下文**（不唤醒），与 annihilate 是"消失"vs"安静留下"的区别。
+ */
+export interface ExtInboundCaps {
+    /** 消灭这条消息（早挂点；晚挂点会被拒绝 + 告警） */
+    annihilate(opts?: {
+        reason?: string;
+    }): boolean;
+    /** 改写正文（早挂点连群历史一起改） */
+    rewrite(opts?: {
+        text?: string;
+        reason?: string;
+    }): boolean;
+    /** 强制入站：跳过 @门控 / 价值评分 / 群冷却（不等于"她一定会说话"） */
+    forceWake(opts?: {
+        reason?: string;
+    }): boolean;
+    /** 覆盖 @ 判定（晚挂点；早挂点会被拒绝 + 告警） */
+    decide(opts?: {
+        mention?: 'ignore' | 'force';
+        reason?: string;
+    }): boolean;
+    /** 静默进上下文：内容进 AI 上下文、**不唤醒**（走宿主 agent.inject，不拆 tool 配对） */
+    silentInto(text?: string | {
+        text?: string;
+        reason?: string;
+    }): boolean;
+    /** 用户维禁言（名单持久化、带期限、过期惰性清理） */
+    /** 禁言：成功返回名单条目（{id,until,reason,by}；until=0 表示永久），失败返回 false（原因见审计） */
+    muteUser(opts?: {
+        id?: string;
+        minutes?: number;
+        reason?: string;
+        by?: string;
+    }): unknown;
+    unmuteUser(opts?: {
+        id?: string;
+    }): boolean;
+    /** 查禁言：null = 没被禁言；否则返回名单条目（过期项惰性清理） */
+    isMuted(id?: string): unknown;
+    mutedUsers(): unknown[];
+    /** 这条消息的只读视图（读的时候现算，不是快照） */
+    message: {
+        text: string;
+        sender: string;
+        senderName: string;
+        scope: 'group' | 'c2c';
+        groupId: string;
+        isOwner: boolean;
+        mentions: unknown[];
+        quoted: {
+            text: string;
+            id?: string;
+            fromSelf?: boolean;
+        } | undefined;
+        platform: {
+            mentioned: boolean;
+        };
+    };
+    /** 该扩展自己的持久化（与禁言名单同一个文件） */
+    kv: {
+        get(key: string): unknown;
+        set(key: string, value: unknown): boolean;
+    };
+}
 export interface ExtCapabilities {
     appId: string;
     appSecret: string;
@@ -150,6 +229,12 @@ export interface ExtCapabilities {
      *    所以本来就是你的权利 —— 但别把它转手给不信任的代码。
      */
     kernel: unknown;
+    /**
+     * ★ **入站操控**（见 {@link ExtInboundCaps}）：**只有入站扩展（第五套）手里有值** ——
+     * 只有它在"一条消息正在进站"的时刻跑。别的四套拿它会是 undefined，这不是缺失，是语义。
+     * 平铺在 ctx 上的同款动作（ctx.annihilate 等）与这里是**同一份实现**，不是两套。
+     */
+    inbound?: ExtInboundCaps;
     /**
      * 触发宿主自重启（等价于内置的 `/bot-restart`）。
      *

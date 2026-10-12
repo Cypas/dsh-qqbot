@@ -10,6 +10,8 @@
  * ctx.forceWake({ reason })       // 强制入站：跳过价值评分 / @门控 / 冷却等"值不值得回"的判断
  * // ── 消息维（晚挂点 onDecide 用）──
  * ctx.decide({ mention: 'ignore' | 'force', reason })
+ * // ── 消息维（两个挂点都能用）──
+ * ctx.silentInto(text?)           // ★静默进上下文：内容进当前会话的 AI 上下文，**不唤醒**
  * // ── 用户维（两个挂点都能用）──
  * ctx.muteUser({ id?, minutes, reason })   // id 缺省 = 当前发送者；写进持久名单
  * ctx.unmuteUser({ id? })
@@ -21,9 +23,35 @@
  * ctx.kv.get(key) / ctx.kv.set(key, value)
  * ```
  *
+ * ── `silentInto` 为什么必须存在（与 `annihilate` 的分工）────────────────────
+ * `annihilate` 的语义是"**不调 next()**"⇒ 这条消息在链上被彻底拦掉，**后面组装上下文的那一步
+ * 根本看不到它** —— 内容是"消失"，不是"安静地留下"。可有些场景要的恰恰是后者：
+ * "这条别叫醒她，但内容得让她下次跑的时候看得到"（例：群里被引用的子会话转发、只报数的日志流）。
+ * 于是补一个**注入**动作：`silentInto` 把正文塞进当前会话的 AI 上下文，不唤醒、不进群历史、
+ * 不占冷却；她空闲时它就**静静躺在收件箱里**，等下一次真有回合跑起来时自然出现。
+ *
+ * ── 它走哪条通路（**硬要求，别改**）────────────────────────────────────────
+ * 只走宿主的 `agent.inject(...)`（dsh 底层 `send(msg,'next-step',wakeup:false)`）：
+ * 排队到下个 step 组包、**不拆 `tool_calls ↔ tool/result` 配对**、忙闲皆安全。
+ * ⚠️ **绝不用 `session.append` / `caps.appendSilent` 硬写会话** —— 那条路绕过回合边界，
+ * 落在"LLM 已回 tool_calls、工具还在执行"的中途就会把配对拆散 ⇒ 下一轮请求非法 ⇒
+ * QQ 侧「本轮异常结束」。这道雷 `mc_chat` 的 daemon 早先踩过（它源码注释里写着
+ * "tick 一律只走宿主的 agent.inject"），别再踩第二次。
+ * 组消息这件事本身复用插件既有入口：`createUserMessage`（与 `features/group-hub.ts` 的
+ * `safeAppendUserMessage`、`gateway/debounce.ts` 的插话、`commands/inject.ts` 同款形状），
+ * 而不是自己拼一个 `{ role: 'user', … }` 裸对象；正文缺省值也复用 `shared/mention-clean.ts`
+ * 的 `replaceBotMention`（把 `@她` 的 32 位 id 换成短标记 `@bot`，与正常入站的清洗同款）。
+ *
+ * 拿不到 agent（该会话还没建立 / 嵌入方没给解析器）或注入抛错 ⇒ **只告警 + 返回 false**，
+ * 绝不抛到链上；审计里记 `failed-no-agent` / `failed-inject`，一眼能看出"没注进去"。
+ *
  * ── 四条保命纪律（主人点名）───────────────────────────────────────────────
- *  ① **白名单最高优先**：主人/owner（`config.groupAdmin.owners`）**永不可被静默或消灭** ——
+ *  ① **白名单最高优先**：主人/owner（`config.groupAdmin.owners`）**永不可被消灭/禁言** ——
  *     扩展对 owner 调 `annihilate` 会被**拒绝执行**并记一条 warn（消息照常放行）；`muteUser(owner)` 同理。
+ *     ⚠️ **`silentInto` 不受这条限制**（有意为之，别"顺手"加上）：白名单挡的是"主人的消息被吞掉"，
+ *     而静默注入**内容是进上下文的**，不存在"被吞"的风险 —— 只是换了个不叫醒她的入口。
+ *     它仍然要**落审计**（可回看"谁在什么时候塞了什么"）并**计入熔断**（见 ③），
+ *     所以"主人消息被扩展大规模改道"这件事依然看得见、也依然刹得住。
  *  ② **强唤醒优先于静默**：本模块只保证 `forceWake` **不被别的动作抵消**（`annihilate` 除外——
  *     那是"整条不进站"，两者本就互斥，谁先发生谁生效）；**顺序由扩展自己排**，
  *     文档里写明"求助关键词判断要写在黑名单判断之前"。
@@ -38,8 +66,13 @@
  * 不会被 JSON.stringify 抓走（内部命令层就是靠展开 ctx 组 handler 参数的，别去污染它）。
  */
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { Logger } from '../types.js';
 import { lastBotReplyOf } from './bot-reply-memo.js';
+// ★ 统一能力包（2026-10-12 主人定「能力面对齐」）：入站扩展与另外四套共用同一份能力实现，
+//   见 `decorate()` 里那段「★★ 能力面对齐 ★★」；别再给入站侧另造一套平行 API。
+import { makeExtCaps, type ExtInboundCaps } from './ext-capabilities.js';
+import { replaceBotMention, type MentionLike } from '../shared/mention-clean.js';
 import {
   appendAudit,
   checkDestructiveAllowed,
@@ -64,7 +97,51 @@ export interface ExtRunEnv {
   logger: Logger;
   /** 当前 bot 的 appId（`ctx.platform.mentioned` 的内容兜底扫描要用，与 SDK mentionGate 同款判据） */
   appId?: string;
+  /**
+   * ★ `silentInto` 用：把"**这条消息所属会话**的宿主 agent"解析出来。
+   *
+   * 为什么不在这里自己找：agent 在 `SessionManager` 里（挂载点持有它），本模块只拿到 `ctx`。
+   * 挂载点（`gateway/middleware-setup.ts`）用 `manager.findByPeer(scope, peerId)` 实现它 ——
+   * 与 `commands/inject.ts` 取"当前会话 agent"是同一口径（会话 id 由 `scope + peerId` 确定性派生，
+   * 所以"这条消息将去哪"与"解析到的 agent"必然是同一个）。
+   *
+   * 拿不到（会话还没建立 / 嵌入方没传）⇒ 返回 undefined，`silentInto` 只告警、不注入。
+   */
+  resolveAgent?: (ctx: MiddlewareContext) => unknown;
+
+  // ── ★ 2026-10-12 主人定「能力面对齐」：给统一能力包（makeExtCaps）用的输入 ──
+  //    入站扩展必须和另外四套（自定义命令 / 扩展工具 / botplay 卡片 / 启动钩子）
+  //    拿到**同一套**能力包，见 `docs/USER-GUIDE.md` §「统一能力包」。
+  //    这几个字段由挂载点（gateway/middleware-setup.ts）喂进来；缺哪个，对应能力
+  //    就优雅降级（契约写明"拿不到依赖返回 false，不抛"），不会影响入站主链。
+  /** 当前会话的发送器（发消息 / 发富媒体用）。没有 = 发送类能力不可用 */
+  sender?: unknown;
+  /** 当前这条消息的回复目标（被动回复优先，缺了退主动发送） */
+  replyTarget?: unknown;
+  /** bot 密钥（`api()` 自建 token 兜底用；给了 apiCall 就优先用 apiCall） */
+  appSecret?: string;
+  /** 带 token 的官方 API 调用（挂载点从 `manager.groupAdmin.apiCall` 取） */
+  apiCall?: unknown;
+  /** 插件自己的 cordis Context —— 统一能力包里的 `kernel`（"遥控器"） */
+  kernel?: unknown;
 }
+
+/** `silentInto` 的结果码（审计的 `result` 与 `ctx.extState.silentInto` 共用这一套词） */
+export type SilentIntoResult =
+  /** 本次真的注入成功 */
+  | 'ok'
+  /** 之前已经注入过（幂等命中，本次没重复塞） */
+  | 'ok-duplicate'
+  /** 文本空/全空白 ⇒ 不注入（别往上下文里塞空消息） */
+  | 'refused-empty'
+  /** 参数不合法（非字符串、也非 `{ text }`）⇒ 不注入（绝不 `String(未知对象)` 塞进去） */
+  | 'refused-invalid'
+  /** 熔断中：该扩展的破坏性动作被停用（`silentInto` 也算在内） */
+  | 'refused-breaker'
+  /** 拿不到宿主 agent（会话还没建立 / 环境没给解析器） */
+  | 'failed-no-agent'
+  /** `agent.inject` 抛错 */
+  | 'failed-inject';
 
 /** 一条消息、一个中间件 ctx 对应的一份扩展会话（早/晚两个挂点共享同一份） */
 export interface ExtCtxSession {
@@ -90,6 +167,15 @@ export interface ExtCtxSession {
   forceWake?: { reason?: string };
   /** 已覆盖 @ 判定 */
   decide?: { mention: 'ignore' | 'force'; reason?: string };
+  /**
+   * ★ 本消息的静默注入状态（`silentInto`）。
+   *
+   * **幂等**：`injected === true` 之后，本 ctx（= 这**一条**消息）再调多少次 `silentInto` 都不会
+   * 重复塞（早/晚两个挂点共用同一份会话 ⇒ 跨挂点也只塞一次）。
+   * 只有**成功**才置 `injected`：失败（拿不到 agent / 熔断 / 空文本）不留痕 ——
+   * 晚挂点若那时才拿到 agent，仍然可以再试一次。
+   */
+  silentInto?: { injected: boolean; result: SilentIntoResult; chars: number };
   /** 本消息里 rewrite 过几次（诊断） */
   rewriteCount: number;
   /** 本消息里破坏性动作成功过几次（熔断统计看增量） */
@@ -118,10 +204,11 @@ export function ensureExtSession(ctx: MiddlewareContext, env: ExtRunEnv): ExtCtx
     SESSIONS.set(key, s);
     decorate(ctx, s);
   } else {
-    // 同一个 ctx 可能先后经过两个挂点：只补缺的环境字段（appId 可能后到）
+    // 同一个 ctx 可能先后经过两个挂点：只补缺的环境字段（appId / resolveAgent 可能后到）
     if (!s.env.dataRoot && env.dataRoot) s.env.dataRoot = env.dataRoot;
     if (env.appId && !s.env.appId) s.env.appId = env.appId;
     if (!s.env.owners.length && env.owners.length) s.env.owners = env.owners;
+    if (env.resolveAgent && !s.env.resolveAgent) s.env.resolveAgent = env.resolveAgent;
   }
   return s;
 }
@@ -332,6 +419,155 @@ function rewrite(ctx: MiddlewareContext, s: ExtCtxSession, opts?: { text?: strin
   }
 }
 
+// ── ★ silentInto：静默进上下文（2026-10-12 新增；两个挂点都能用）──────────────
+
+/**
+ * 缺省正文 = **当前这条入站消息洗过之后的正文**。
+ *
+ * "洗过"在这里有两层，都是复用插件现成的东西，不另造一套：
+ *   ① `rewrite()` 之后的 `ctx.message.content`（早挂点里扩展自己刚改的那版）；
+ *   ② 再把"@她"的 32 位长 id 换成短标记 `@bot` —— 复用 `shared/mention-clean.ts` 的
+ *      `replaceBotMention`，与"记群历史 / 进上下文"那条正常通路**同一份判据**
+ *      （见 `middleware/media-history.ts` 与 `transport/inbound.ts` 的调用点）。
+ *      不洗的话，群里每条被 @ 的消息都会往上下文里灌一截 32 位 hex（白烧 token）。
+ */
+function defaultSilentText(ctx: MiddlewareContext, s: ExtCtxSession): string {
+  const mentions = (ctx.message as { mentions?: MentionLike[] } | undefined)?.mentions;
+  return replaceBotMention(textOf(ctx), mentions ?? null, platformMentioned(ctx, s.env.appId));
+}
+
+/**
+ * `silentInto` 的参数归一化。三种收法（其余一律拒，避免 `String(未知对象)` 塞进上下文）：
+ *   · 不传 / `null`            → 当前正文（见 {@link defaultSilentText}）
+ *   · `'文本'`                 → 直接用（主人点名的签名就是 `ctx.silentInto(text?)`）
+ *   · `{ text?, reason? }`     → 便捷写法：可以只给 `reason`（正文仍取当前正文）方便审计溯源
+ * 返回 `null` = 形状不合法。
+ */
+function parseSilentArg(
+  ctx: MiddlewareContext,
+  s: ExtCtxSession,
+  arg: unknown,
+): { text: string; reason?: string } | null {
+  if (arg === undefined || arg === null) return { text: defaultSilentText(ctx, s) };
+  if (typeof arg === 'string') return { text: arg };
+  if (typeof arg === 'object' && !Array.isArray(arg)) {
+    const o = arg as { text?: unknown; reason?: unknown };
+    if (o.text !== undefined && typeof o.text !== 'string') return null;   // { text: 123 } 这类不收
+    const reason = typeof o.reason === 'string' && o.reason ? o.reason : undefined;
+    if (o.text === undefined && reason === undefined) return null;          // 空对象 {} 也拒
+    return {
+      text: typeof o.text === 'string' ? o.text : defaultSilentText(ctx, s),
+      ...(reason ? { reason } : {}),
+    };
+  }
+  return null;
+}
+
+/** 问运行环境要 agent（解析器自己抛错也当"拿不到"，绝不外抛） */
+function resolveAgentOf(ctx: MiddlewareContext, s: ExtCtxSession): unknown {
+  const resolve = s.env.resolveAgent;
+  if (typeof resolve !== 'function') return undefined;
+  try {
+    return resolve(ctx);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * ★ `ctx.silentInto(text?)` —— **把这条消息静默放进当前会话的 AI 上下文，不唤醒**。
+ *
+ * 与 `annihilate` 的分工：
+ *   · `annihilate` = "不调 next()" ⇒ 链断在这里，**内容是消失的**（后面组装上下文的那步看不到它）；
+ *   · `silentInto` = 内容**塞进收件箱**（`agent.inject`，`next-step` / `wakeup:false`）⇒
+ *     她空闲时它就静静躺着，**等下一次真有回合跑起来时自然出现**；同时扩展若 `return`（不调 next），
+ *     那条消息本身仍不进群历史 / 不占冷却 / 不过评分 —— "内容留下，但不叫醒"。
+ *
+ * 参数：见 {@link parseSilentArg}。返回值：
+ *   · `true`  = **内容已经在上下文里了**（本次注入成功；或之前已经注入过 —— 幂等命中，没重复塞）；
+ *   · `false` = **没注入成功**（空文本 / 参数不合法 / 熔断 / 拿不到 agent / inject 抛错）——
+ *     具体原因看日志的 warn 与审计里的 `result`（`refused-*` / `failed-*`）。
+ *
+ * ⚠️ **拿不到 agent 时不会"替你把消息放行"**：引擎的兜底放行只认 `annihilate` 被拒与"发送者是主人"。
+ *    所以推荐写法是**自己判返回值**，失败时走正常链路（示例见 `examples/ext-inbound/README.md`）：
+ *    ```js
+ *    if (!ctx.silentInto()) return next();   // 没注进去就别把这条也吞了
+ *    return;                                 // 注进去了：这条到此为止（不叫醒）
+ *    ```
+ *
+ * ⚠️ 白名单：**主人（owners）的消息允许被 `silentInto`**（内容仍进上下文，不存在"被吞"的风险），
+ *    但要**落审计**、并**计入熔断**（见文件头 ① 的说明）。这条不受 `annihilate` 的白名单限制。
+ */
+function silentInto(ctx: MiddlewareContext, s: ExtCtxSession, arg?: unknown): boolean {
+  let body = '';
+  let reason: string | undefined;
+  try {
+    // ① 参数归一化（形状不合法直接拒：绝不把未知对象 String() 之后塞进上下文）
+    const parsed = parseSilentArg(ctx, s, arg);
+    if (parsed === null) {
+      warn(s, 'silentInto 只认 ctx.silentInto() / ctx.silentInto("文本") / ctx.silentInto({ text, reason })；' +
+        '收到别的形状，本次不注入');
+      audit(s, { action: 'silentInto', target: senderOf(ctx), result: 'refused-invalid' });
+      return false;
+    }
+    body = parsed.text.trim();
+    reason = parsed.reason;
+
+    // ② 空文本不注入（别往上下文里塞空消息）
+    if (!body) {
+      warn(s, 'silentInto 拿到空文本（这条没有正文，或者你传了空白）⇒ 不注入');
+      audit(s, { action: 'silentInto', target: senderOf(ctx), reason, result: 'refused-empty' });
+      return false;
+    }
+
+    // ③ 幂等：同一条消息只注入一次（早/晚挂点共用一份会话 ⇒ 跨挂点也只塞一次）
+    if (s.silentInto?.injected) {
+      audit(s, { action: 'silentInto', target: senderOf(ctx), reason, text: body, result: 'ok-duplicate' });
+      return true;   // 内容是**在**上下文里的（先前那次已成功），所以这里算成功
+    }
+
+    // ④ 熔断：silentInto 计入"破坏性动作"（它同样能大规模改变会话内容），超阈值与 annihilate 一起停
+    const gate = checkDestructiveAllowed(s.current?.file ?? '');
+    if (!gate.ok) {
+      warn(s, `熔断中，silentInto 被拒（${gate.reason}）—— 没注入成功；` +
+        '要稳妥请自己判返回值（`if (!ctx.silentInto()) return next()`）');
+      audit(s, { action: 'silentInto', target: senderOf(ctx), reason, text: body, result: 'refused-breaker' });
+      return false;
+    }
+
+    // ⑤ 拿 agent（拿不到只告警：该会话还没建立是常见情形，不算扩展写错）
+    const agent = resolveAgentOf(ctx, s);
+    const inject = (agent as { inject?: unknown } | undefined)?.inject;
+    if (typeof inject !== 'function') {
+      warnOnce(
+        s, 'silent-no-agent',
+        'silentInto 拿不到宿主 agent（该会话还没建立？）或它没有 inject() ⇒ 本条没进上下文。' +
+        '注意：这里**不会**替你放行这条消息 —— 若你接着 return 且不调 next()，它就真的既不进上下文也不进历史了',
+      );
+      audit(s, { action: 'silentInto', target: senderOf(ctx), reason, text: body, result: 'failed-no-agent' });
+      return false;
+    }
+
+    // ⑥ 注入：**只走宿主的 agent.inject**（next-step / wakeup:false，不拆 tool_calls）；
+    //    消息形状复用 createUserMessage（与 group-hub / debounce / commands/inject 同款），
+    //    绝不 session.append / caps.appendSilent 硬写。
+    const msg = createUserMessage({ content: [{ type: 'text', text: body }], source: { kind: 'user' } });
+    (inject as (m: unknown) => void).call(agent, msg);
+
+    s.silentInto = { injected: true, result: 'ok', chars: body.length };
+    s.destructiveCount += 1;                    // 熔断统计认它（与 annihilate/muteUser 同一本账）
+    noteDestructive(s.current?.file ?? '');
+    audit(s, { action: 'silentInto', target: senderOf(ctx), reason, text: body, result: 'ok' });
+    return true;
+  } catch (err) {
+    warn(s, `silentInto 注入失败(已忽略, 未抛到链上): ${err instanceof Error ? err.message : String(err)}`);
+    try {
+      audit(s, { action: 'silentInto', target: senderOf(ctx), reason, text: body, result: 'failed-inject' });
+    } catch { /* audit 自身永不抛，这里只是保险 */ }
+    return false;
+  }
+}
+
 /** 强制入站：写 `ctx.state.qqInboundForceWake` —— 门控/评分/冷却三处都认这个标记 */
 function forceWake(ctx: MiddlewareContext, s: ExtCtxSession, opts?: { reason?: string }): boolean {
   try {
@@ -516,6 +752,41 @@ function def(target: object, key: string, desc: PropertyDescriptor): void {
  * ⚠️ 一律**不可枚举**：middleware-setup 的命令层会 `{...ctx}` 组 handler 参数，
  *    可枚举的话会把这些动作/取值器一起复制过去（还可能覆盖扩展命令自己的 caps）。
  */
+/**
+ * ★ 把「入站操控」这一组**打包**（2026-10-12 主人定：它也要进统一能力包）。
+ *
+ * 和上面那些 def 在 ctx 上的是**同一份实现**（不是两套）：这里只是换个入口交出去，
+ * 好让契约写成「一套包、五套扩展」——包里的 `inbound` 组"有值"就等于"你现在正握着
+ * 一条消息的处置权"。别的四套拿它会是 undefined，那是语义，不是缺失。
+ */
+export function inboundCapsOf(ctx: MiddlewareContext, s: ExtCtxSession): ExtInboundCaps {
+  return {
+    annihilate: (o) => annihilate(ctx, s, o),
+    rewrite: (o) => rewrite(ctx, s, o),
+    forceWake: (o) => forceWake(ctx, s, o),
+    decide: (o) => decide(ctx, s, o),
+    silentInto: (t) => silentInto(ctx, s, t),
+    muteUser: (o) => muteUser(ctx, s, o),
+    unmuteUser: (o) => unmuteUser(ctx, s, o),
+    isMuted: (id) => isMuted(ctx, s, id),
+    mutedUsers: () => mutedUsers(ctx, s),
+    message: {
+      get text() { return textOf(ctx); },
+      get sender() { return senderOf(ctx); },
+      get senderName() { return String((ctx.message as { senderName?: unknown }).senderName ?? ''); },
+      get scope() { return (ctx.message.kind === 'group' ? 'group' : 'c2c') as 'group' | 'c2c'; },
+      get groupId() { return String((ctx.message as { groupOpenid?: unknown }).groupOpenid ?? ''); },
+      get isOwner() { return ownerOf(s, senderOf(ctx)); },
+      get mentions() { return ((ctx.message as { mentions?: unknown }).mentions ?? []) as unknown[]; },
+      get quoted() { return quotedOf(ctx); },
+      get platform() { return { mentioned: platformMentioned(ctx, s.env.appId) }; },
+    },
+    kv: {
+      get: (key) => kvGet(ctx, s, key),
+      set: (key, value) => kvSet(ctx, s, key, value),
+    },
+  };
+}
 function decorate(ctx: MiddlewareContext, s: ExtCtxSession): void {
   const c = ctx as unknown as Record<string, unknown>;
 
@@ -524,6 +795,9 @@ function decorate(ctx: MiddlewareContext, s: ExtCtxSession): void {
   def(c, 'rewrite', { value: (opts?: { text?: string; reason?: string }) => rewrite(ctx, s, opts) });
   def(c, 'forceWake', { value: (opts?: { reason?: string }) => forceWake(ctx, s, opts) });
   def(c, 'decide', { value: (opts?: { mention?: string; reason?: string }) => decide(ctx, s, opts) });
+  // ★ 静默进上下文：`ctx.silentInto()` / `ctx.silentInto('文本')` / `ctx.silentInto({ text, reason })`
+  //   两个挂点都能调；同一条消息只注入一次（幂等，见 silentInto 的注释）
+  def(c, 'silentInto', { value: (text?: unknown) => silentInto(ctx, s, text) });
 
   // ── 动作（用户维）──
   def(c, 'muteUser', { value: (opts?: { id?: string; minutes?: number; reason?: string; by?: string }) => muteUser(ctx, s, opts) });
@@ -549,6 +823,66 @@ function decorate(ctx: MiddlewareContext, s: ExtCtxSession): void {
   });
   def(c, 'logger', { get: () => s.env.logger });
   def(c, 'dataRoot', { get: () => s.env.dataRoot });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ★★ 2026-10-12 主人定：**能力面对齐** ★★
+  //
+  // 入站扩展（第五套）必须和另外四套 —— 自定义命令 / 扩展工具 / botplay 卡片 /
+  // 启动钩子 —— 拿到**同一套**能力包。依据是 `docs/USER-GUIDE.md` 的
+  // §「★ 统一能力包（v1.7.0+）：三套扩展能力面对齐」，原文一句话：
+  // 「写扩展时**不用再自己接生**」。
+  //
+  // 为什么这条对齐是**必须**的（而不是"锦上添花"）：
+  //   · 那套包里本来就有 **`appendSilent`**（= "进上下文（静默）、不唤醒"）——
+  //     入站侧想要的"消灭消息但内容静默进上下文"，**契约里早就有了**；
+  //     没对齐才会以为要另造一个注入动作。**接上它，而不是再造一份。**
+  //   · 还有 `store`（升级不丢的持久化）、`api()`（自带 token 打官方接口）、
+  //     `user/owners/peer`（身份）、`kernel`（遥控器）等等 —— 五套之间不该有"二等公民"。
+  //
+  // 三条纪律（第 ① 条照抄命令层 2026-10-12 那次实测修复的口径）：
+  //   ① **只补不覆盖**：判据是"值为 undefined 才补"，不是"有没有这个键" ——
+  //      中间件 ctx 上不少键**存在但值是 undefined**，只问键名会把好值全跳过；
+  //   ② 一律**不可枚举**（`def` 已保证）：命令层会 `{...ctx}` 组 handler 参数，可枚举会串味；
+  //   ③ 构造失败**只告警一次**，绝不抛：能力包拿不到 = 那几项优雅降级（契约写明不抛），
+  //      不能让入站主链因为"能力包没造出来"而断掉。
+  //
+  // ⚠️ **唯一一处同名冲突（有意为之，别"顺手"改）**：`text`。
+  //    · 其他四套：`env.text('...')` = **发一条纯文本消息**；
+  //    · 入站（这里）：`ctx.text` = **当前这条入站消息的正文**（getter）。
+  //    入站侧这个读法先占了名字，而且改写/判断全靠它，所以**保留入站语义**；
+  //    想在入站扩展里发文本，走命名空间：`ctx.caps.text('...')`。
+  //    其余能力都平铺在 ctx 上（`ctx.markdown` / `ctx.appendSilent` / `ctx.store` …）。
+  // ══════════════════════════════════════════════════════════════════════════
+  try {
+    const mc = ctx.message as { kind?: string; groupOpenid?: string; senderId?: string; senderName?: string };
+    const isGroup = mc?.kind === 'group';
+    const caps = makeExtCaps({
+      dataRoot: s.env.dataRoot,
+      logger: s.env.logger,
+      appId: s.env.appId,
+      appSecret: s.env.appSecret,
+      owners: s.env.owners,
+      sender: s.env.sender as never,
+      replyTarget: s.env.replyTarget,
+      agent: (s.env.resolveAgent ? s.env.resolveAgent(ctx) : undefined) as never,
+      scope: isGroup ? 'group' : 'c2c',
+      peerId: String((isGroup ? mc?.groupOpenid : mc?.senderId) ?? ''),
+      actorOpenid: senderOf(ctx),
+      actorName: String(mc?.senderName ?? ''),
+      apiCall: s.env.apiCall as never,
+      selfName: who(s),
+      kind: 'inbound',
+      kernel: s.env.kernel,
+      inbound: inboundCapsOf(ctx, s),   // ★ 入站操控这一组也进包
+    });
+    def(c, 'caps', { value: caps });   // 命名空间：ctx.caps.text(...) 等
+    for (const [k, v] of Object.entries(caps)) {
+      if (v === undefined) continue;
+      if (!(k in c) || c[k] === undefined) def(c, k, { value: v });
+    }
+  } catch (err) {
+    warnOnce(s, 'caps', '统一能力包未接上（入站专属动作不受影响）：' + (err instanceof Error ? err.message : String(err)));
+  }
 
   // ── 每个扩展自己的持久化（与禁言名单同一个文件）──
   def(c, 'kv', {

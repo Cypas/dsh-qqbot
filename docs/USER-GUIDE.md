@@ -579,10 +579,11 @@ export async function dispose(env) {      // 可选: 插件卸载 / 宿主退出
      `ctx.compaction.compactNow(agent, exec.signal, id)` 压缩上下文、`ctx.get('服务名')` 探测可选服务; `logger` 是对应日志器。
      ⚠️ 权限与内置工具**同级** —— 只适合**你自己写在 dataRoot 里的**扩展, 别把 `ctx` 转手给不可信代码。
    - 工具返回 `{ ok, msg }`(msg 作为工具结果回给 AI); 命令返回纯文本。
-### ★ 统一能力包（v1.7.0+）：三套扩展能力面对齐
+### ★ 统一能力包（v1.7.0+；**v1.9.2 起五套扩展能力面对齐**）
 
-自定义命令 / 扩展工具 / botplay 卡片**三套扩展现在能力面一致** ——
-   写扩展时不用再自己接生。以下成员**平铺在 `env` 上**(命令侧在 handler 的 ctx 上), 也可以走 `env.caps` 命名空间:
+自定义命令 / 扩展工具 / botplay 卡片 / **启动钩子（`hooks/`）** / **入站中间件（`inbound/`）**
+**五套扩展现在能力面一致** —— 写扩展时不用再自己接生。以下成员**平铺在 `env` 上**
+（命令侧在 handler 的 ctx 上；**入站侧在挂点的 `ctx` 上**），也可以走 `env.caps` / `ctx.caps` 命名空间：
 
    | 能力 | 用法 | 说明 |
    |---|---|---|
@@ -609,6 +610,31 @@ export async function dispose(env) {      // 可选: 插件卸载 / 宿主退出
    - ⚠️ 所有能力都**优雅降级**: 拿不到依赖时返回 `false` / 结构化错误, **不会抛错**打断你的扩展。
    - ⚠️ 只有 `env.ctx` 是「全权限」的, 别把 `ctx` 转手给不可信代码; 其余能力都是受控封装。
 4. 卡片正文由**你(AI)直接写 markdown**(标题/加粗/`![说明](url)`/代码块), **本插件没有模板引擎, 不需要也不会用配置型模板**。
+   **★ 入站操控（只有入站扩展拿得到，走 `ctx.caps.inbound`）**
+
+   这几项只有在"手上有一条正在进站的消息"时才有意义 —— 也就是 `inbound/` 那一套。
+   其余四套拿到的 `caps.inbound` 会是 `undefined`，**这不是缺失，是语义**：
+
+   | 能力 | 用法 | 说明 |
+   |---|---|---|
+   | 消灭 | `ctx.caps.inbound.annihilate({reason})` | 不调 `next()`：不进群历史、不进上下文、不占冷却（**只有早挂点能用**） |
+   | 改写 | `ctx.caps.inbound.rewrite({text,reason})` | 早挂点下**连群历史一起改** |
+   | 强制入站 | `ctx.caps.inbound.forceWake({reason})` | 跳过 @门控 / 价值评分 / 群冷却（**不等于"她一定会说话"**） |
+   | 覆盖 @判定 | `ctx.caps.inbound.decide({mention:'ignore'\|'force'})` | 晚挂点专用；早挂点调会被拒 + 告警 |
+   | 静默进上下文 | `ctx.caps.inbound.silentInto(text?)` | 内容进 AI 上下文、**不唤醒**；与"消灭"是"安静留下"vs"消失"的区别 |
+   | 用户维禁言 | `ctx.caps.inbound.muteUser/unmuteUser/isMuted/mutedUsers` | 名单持久化、带期限、过期惰性清理 |
+   | 这条消息 | `ctx.caps.inbound.message.{text,sender,scope,groupId,isOwner,mentions,quoted,platform}` | 只读视图，读的时候现算 |
+   | 自己的持久化 | `ctx.caps.inbound.kv.get/set` | 与禁言名单同一个文件 |
+
+   同一套动作在 `ctx` 上**也平铺了一份**（`ctx.annihilate` / `ctx.silentInto` / `ctx.muteUser` …），
+   两者是同一套内核的两个入口。
+
+   - ⚠️ **唯一一处同名冲突（有意为之）**：`text`。
+     入站侧 `ctx.text` = **当前这条入站消息的正文**（读）；其余四套 `env.text('...')` = **发一条纯文本**。
+     入站侧那个读法先占了名字且判断/改写全靠它，所以**保留入站语义**；
+     想在入站扩展里发文本，走命名空间 `ctx.caps.text('...')`。
+   - ⚠️ **入站是热路径**：这两个挂点**每条消息都跑一遍**。别在这儿发消息、打接口、做长任务
+     （`markdown` 会真发群、`appendWake` 会唤醒一轮 AI、`api()` 走网络）。
 5. 生效方式: 工具发 `/tools-reload` 或调 `tools_reload` —— 新工具即时生效; **同名工具改内容会被工具注册表跳过(`already registered`) → 换名或重启宿主**; 命令一律需重启宿主(`/bot-restart`)。
 6. 能力边界: **扩展工具无法注册"按钮点击回调"** —— 按钮回调只能由 host 侧的 botplay 事件 / dock 卡片编辑器注册。纯扩展方案的交互范式 = "卡片 + 用户回个编号", 由 AI 当状态机再调一次工具。
 7. 示范(点歌): ①工具里 fetch 搜索接口 → ②拼一段 markdown(封面/歌名/歌手/歌词) → ③`sender.sendMarkdown(replyTarget, 卡片)` → ④要试听就 `sender.sendMedia(...)` → ⑤返回 `{ok:true,msg:'已发卡'}`。

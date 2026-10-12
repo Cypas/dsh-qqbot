@@ -163,11 +163,40 @@ export async function setupMiddlewares(
   //   就吞掉入站消息）、next() 幂等且一定被 await、目录缺失/为空完全安静、动作永不抛到链上。
   //   这里挂的是**代理**（现读 inboundExts），所以热重载只换内容、不用重挂中间件（见下方 registerExtInboundReloader）。
   const inboundExts: InboundExtension[] = [];
-  /** 入站扩展的运行环境：状态文件/审计落 dataRoot；owners 用于"白名单最高优先"；appId 给 platform 判定 */
-  const extRunOpts = (): ExtRunOptions => ({
+  /**
+   * 入站扩展的运行环境：状态文件/审计落 dataRoot；owners 用于"白名单最高优先"；appId 给 platform 判定。
+   *
+   * ★ 2026-10-12 主人定「能力面对齐」：这里同时把**统一能力包**（`features/ext-capabilities.ts`）
+   *   要的输入喂进去 —— 入站扩展必须和另外四套（自定义命令 / 扩展工具 / botplay 卡片 / 启动钩子）
+   *   拿到同一套能力（`store` / `api()` / `markdown` / `appendSilent` / `user` / `kernel` …），
+   *   依据见 `docs/USER-GUIDE.md` §「统一能力包」。**发送器与回复目标在 ctx 上**（每个会话不同），
+   *   所以这个工厂收一个可选的 ctx；缺它时发送类能力优雅降级（返回 false），不会影响入站主链。
+   */
+  const extRunOpts = (ctx?: {
+    message?: { kind?: string; groupOpenid?: string; senderId?: string };
+    bot?: unknown;
+    replyTarget?: unknown;
+  }): ExtRunOptions => ({
     dataRoot: dataRootOf(config),
     owners: (config.groupAdmin?.owners ?? []).map(String),
     appId: config.appId,
+    // ── 以下为统一能力包与 silentInto 的输入 ──
+    sender: ctx?.bot,
+    replyTarget: ctx?.replyTarget,
+    appSecret: config.appSecret,
+    apiCall: (manager.groupAdmin as { apiCall?: unknown } | undefined)?.apiCall,
+    kernel: pluginCtx,
+    // 「这条消息所属会话的宿主 agent」：与命令层 / commands/inject.ts **同一口径**
+    // （会话 id 由 scope + peerId 确定性派生 ⇒ "这条消息将去哪" 与 "解析到的 agent" 必然是同一个）
+    resolveAgent: (c: { message?: { kind?: string; groupOpenid?: string; senderId?: string } }) => {
+      try {
+        const mc = c.message as { kind?: string; groupOpenid?: string; senderId?: string } | undefined;
+        const isG = mc?.kind === 'group';
+        const pid = String((isG ? mc?.groupOpenid : mc?.senderId) ?? '');
+        if (!pid) return undefined;
+        return manager.findByPeer((isG ? 'group' : 'c2c') as never, pid)?.agent;
+      } catch { return undefined; }
+    },
   });
   /** 重扫入站扩展目录并原地换掉生效列表；首次启动与热重载走同一条路，避免两套逻辑漂移 */
   const reloadInboundExtensions = async (): Promise<InboundLoadResult> => {
@@ -183,7 +212,7 @@ export async function setupMiddlewares(
     return { count: r.total, names: r.extensions.map((e) => e.name) };
   });
   bot.use(async (ctx, next) => {
-    await runEarlyInboundExtensions(inboundExts, ctx, next, logger, extRunOpts());
+    await runEarlyInboundExtensions(inboundExts, ctx, next, logger, extRunOpts(ctx));
   });
 
   // 3.95. 被引用图片**预取**（2026-10-01 主人要求"尽可能转换成本地路径"）：
@@ -257,7 +286,7 @@ export async function setupMiddlewares(
   //        · 必须在 contentSanitizer / debounce **之前** —— 否则改了不算数：debounce 的窗口条目读的就是
   //          这里改过的 `ctx.state.mention.wasMentioned`，再往后（inbound/评分/唤醒）已经决定完了。
   bot.use(async (ctx, next) => {
-    await runInboundExtensions(inboundExts, ctx, next, logger, extRunOpts());
+    await runInboundExtensions(inboundExts, ctx, next, logger, extRunOpts(ctx));
   });
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）

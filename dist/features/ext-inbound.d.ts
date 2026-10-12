@@ -43,6 +43,18 @@ export interface ExtRunOptions {
     owners?: string[];
     /** bot 的 appId（`ctx.platform.mentioned` 的内容兜底扫描用，与 SDK mentionGate 同款判据） */
     appId?: string;
+    /** 当前会话的发送器（发消息/发富媒体用） */
+    sender?: unknown;
+    /** 当前这条消息的回复目标（被动回复优先） */
+    replyTarget?: unknown;
+    /** bot 密钥（`api()` 自建 token 兜底） */
+    appSecret?: string;
+    /** 带 token 的官方 API 调用（挂载点取 `manager.groupAdmin.apiCall`） */
+    apiCall?: unknown;
+    /** 插件自己的 cordis Context → 能力包里的 `kernel`（"遥控器"） */
+    kernel?: unknown;
+    /** `silentInto` 用：把"这条消息所属会话的宿主 agent"解析出来 */
+    resolveAgent?: (ctx: MiddlewareContext) => unknown;
 }
 /** 入站扩展目录（相对数据根） */
 export declare function inboundExtensionsDir(dataRoot: string): string;

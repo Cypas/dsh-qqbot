@@ -318,6 +318,10 @@ export function makeExtCaps(deps) {
         },
         // ── 内核句柄（遥控器）────────────────────────────────────────────
         kernel: deps.kernel,
+        // ── 入站操控（只有"手上有消息"的那一套会给值）────────────────────
+        //    2026-10-12 主人定：这一组也要进能力包 —— 契约是「一套包、五套扩展」，
+        //    不能只写公共部分、把入站那一块留在包外面。
+        ...(deps.inbound ? { inbound: deps.inbound } : {}),
         // ── 宿主自重启（复用内置 /bot-restart 的实现，别自己 spawn）──────
         restart: (opts) => {
             const requireOwner = opts?.requireOwner !== false; // 默认：仅主人

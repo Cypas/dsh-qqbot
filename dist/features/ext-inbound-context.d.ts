@@ -10,6 +10,8 @@
  * ctx.forceWake({ reason })       // 强制入站：跳过价值评分 / @门控 / 冷却等"值不值得回"的判断
  * // ── 消息维（晚挂点 onDecide 用）──
  * ctx.decide({ mention: 'ignore' | 'force', reason })
+ * // ── 消息维（两个挂点都能用）──
+ * ctx.silentInto(text?)           // ★静默进上下文：内容进当前会话的 AI 上下文，**不唤醒**
  * // ── 用户维（两个挂点都能用）──
  * ctx.muteUser({ id?, minutes, reason })   // id 缺省 = 当前发送者；写进持久名单
  * ctx.unmuteUser({ id? })
@@ -21,9 +23,35 @@
  * ctx.kv.get(key) / ctx.kv.set(key, value)
  * ```
  *
+ * ── `silentInto` 为什么必须存在（与 `annihilate` 的分工）────────────────────
+ * `annihilate` 的语义是"**不调 next()**"⇒ 这条消息在链上被彻底拦掉，**后面组装上下文的那一步
+ * 根本看不到它** —— 内容是"消失"，不是"安静地留下"。可有些场景要的恰恰是后者：
+ * "这条别叫醒她，但内容得让她下次跑的时候看得到"（例：群里被引用的子会话转发、只报数的日志流）。
+ * 于是补一个**注入**动作：`silentInto` 把正文塞进当前会话的 AI 上下文，不唤醒、不进群历史、
+ * 不占冷却；她空闲时它就**静静躺在收件箱里**，等下一次真有回合跑起来时自然出现。
+ *
+ * ── 它走哪条通路（**硬要求，别改**）────────────────────────────────────────
+ * 只走宿主的 `agent.inject(...)`（dsh 底层 `send(msg,'next-step',wakeup:false)`）：
+ * 排队到下个 step 组包、**不拆 `tool_calls ↔ tool/result` 配对**、忙闲皆安全。
+ * ⚠️ **绝不用 `session.append` / `caps.appendSilent` 硬写会话** —— 那条路绕过回合边界，
+ * 落在"LLM 已回 tool_calls、工具还在执行"的中途就会把配对拆散 ⇒ 下一轮请求非法 ⇒
+ * QQ 侧「本轮异常结束」。这道雷 `mc_chat` 的 daemon 早先踩过（它源码注释里写着
+ * "tick 一律只走宿主的 agent.inject"），别再踩第二次。
+ * 组消息这件事本身复用插件既有入口：`createUserMessage`（与 `features/group-hub.ts` 的
+ * `safeAppendUserMessage`、`gateway/debounce.ts` 的插话、`commands/inject.ts` 同款形状），
+ * 而不是自己拼一个 `{ role: 'user', … }` 裸对象；正文缺省值也复用 `shared/mention-clean.ts`
+ * 的 `replaceBotMention`（把 `@她` 的 32 位 id 换成短标记 `@bot`，与正常入站的清洗同款）。
+ *
+ * 拿不到 agent（该会话还没建立 / 嵌入方没给解析器）或注入抛错 ⇒ **只告警 + 返回 false**，
+ * 绝不抛到链上；审计里记 `failed-no-agent` / `failed-inject`，一眼能看出"没注进去"。
+ *
  * ── 四条保命纪律（主人点名）───────────────────────────────────────────────
- *  ① **白名单最高优先**：主人/owner（`config.groupAdmin.owners`）**永不可被静默或消灭** ——
+ *  ① **白名单最高优先**：主人/owner（`config.groupAdmin.owners`）**永不可被消灭/禁言** ——
  *     扩展对 owner 调 `annihilate` 会被**拒绝执行**并记一条 warn（消息照常放行）；`muteUser(owner)` 同理。
+ *     ⚠️ **`silentInto` 不受这条限制**（有意为之，别"顺手"加上）：白名单挡的是"主人的消息被吞掉"，
+ *     而静默注入**内容是进上下文的**，不存在"被吞"的风险 —— 只是换了个不叫醒她的入口。
+ *     它仍然要**落审计**（可回看"谁在什么时候塞了什么"）并**计入熔断**（见 ③），
+ *     所以"主人消息被扩展大规模改道"这件事依然看得见、也依然刹得住。
  *  ② **强唤醒优先于静默**：本模块只保证 `forceWake` **不被别的动作抵消**（`annihilate` 除外——
  *     那是"整条不进站"，两者本就互斥，谁先发生谁生效）；**顺序由扩展自己排**，
  *     文档里写明"求助关键词判断要写在黑名单判断之前"。
@@ -39,6 +67,7 @@
  */
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { Logger } from '../types.js';
+import { type ExtInboundCaps } from './ext-capabilities.js';
 /** 运行环境（由挂载点/运行器传进来） */
 export interface ExtRunEnv {
     /** 数据根：状态文件、审计都落它下面 */
@@ -49,7 +78,44 @@ export interface ExtRunEnv {
     logger: Logger;
     /** 当前 bot 的 appId（`ctx.platform.mentioned` 的内容兜底扫描要用，与 SDK mentionGate 同款判据） */
     appId?: string;
+    /**
+     * ★ `silentInto` 用：把"**这条消息所属会话**的宿主 agent"解析出来。
+     *
+     * 为什么不在这里自己找：agent 在 `SessionManager` 里（挂载点持有它），本模块只拿到 `ctx`。
+     * 挂载点（`gateway/middleware-setup.ts`）用 `manager.findByPeer(scope, peerId)` 实现它 ——
+     * 与 `commands/inject.ts` 取"当前会话 agent"是同一口径（会话 id 由 `scope + peerId` 确定性派生，
+     * 所以"这条消息将去哪"与"解析到的 agent"必然是同一个）。
+     *
+     * 拿不到（会话还没建立 / 嵌入方没传）⇒ 返回 undefined，`silentInto` 只告警、不注入。
+     */
+    resolveAgent?: (ctx: MiddlewareContext) => unknown;
+    /** 当前会话的发送器（发消息 / 发富媒体用）。没有 = 发送类能力不可用 */
+    sender?: unknown;
+    /** 当前这条消息的回复目标（被动回复优先，缺了退主动发送） */
+    replyTarget?: unknown;
+    /** bot 密钥（`api()` 自建 token 兜底用；给了 apiCall 就优先用 apiCall） */
+    appSecret?: string;
+    /** 带 token 的官方 API 调用（挂载点从 `manager.groupAdmin.apiCall` 取） */
+    apiCall?: unknown;
+    /** 插件自己的 cordis Context —— 统一能力包里的 `kernel`（"遥控器"） */
+    kernel?: unknown;
 }
+/** `silentInto` 的结果码（审计的 `result` 与 `ctx.extState.silentInto` 共用这一套词） */
+export type SilentIntoResult = 
+/** 本次真的注入成功 */
+'ok'
+/** 之前已经注入过（幂等命中，本次没重复塞） */
+ | 'ok-duplicate'
+/** 文本空/全空白 ⇒ 不注入（别往上下文里塞空消息） */
+ | 'refused-empty'
+/** 参数不合法（非字符串、也非 `{ text }`）⇒ 不注入（绝不 `String(未知对象)` 塞进去） */
+ | 'refused-invalid'
+/** 熔断中：该扩展的破坏性动作被停用（`silentInto` 也算在内） */
+ | 'refused-breaker'
+/** 拿不到宿主 agent（会话还没建立 / 环境没给解析器） */
+ | 'failed-no-agent'
+/** `agent.inject` 抛错 */
+ | 'failed-inject';
 /** 一条消息、一个中间件 ctx 对应的一份扩展会话（早/晚两个挂点共享同一份） */
 export interface ExtCtxSession {
     env: ExtRunEnv;
@@ -86,6 +152,19 @@ export interface ExtCtxSession {
         mention: 'ignore' | 'force';
         reason?: string;
     };
+    /**
+     * ★ 本消息的静默注入状态（`silentInto`）。
+     *
+     * **幂等**：`injected === true` 之后，本 ctx（= 这**一条**消息）再调多少次 `silentInto` 都不会
+     * 重复塞（早/晚两个挂点共用同一份会话 ⇒ 跨挂点也只塞一次）。
+     * 只有**成功**才置 `injected`：失败（拿不到 agent / 熔断 / 空文本）不留痕 ——
+     * 晚挂点若那时才拿到 agent，仍然可以再试一次。
+     */
+    silentInto?: {
+        injected: boolean;
+        result: SilentIntoResult;
+        chars: number;
+    };
     /** 本消息里 rewrite 过几次（诊断） */
     rewriteCount: number;
     /** 本消息里破坏性动作成功过几次（熔断统计看增量） */
@@ -107,4 +186,17 @@ export declare function enterExtension(ctx: MiddlewareContext, env: ExtRunEnv, e
     file: string;
     name: string;
 }, phase: 'inbound' | 'decide'): ExtCtxSession;
+/**
+ * 把动作 API 挂到 ctx 上（每个 ctx 只挂一次）。
+ * ⚠️ 一律**不可枚举**：middleware-setup 的命令层会 `{...ctx}` 组 handler 参数，
+ *    可枚举的话会把这些动作/取值器一起复制过去（还可能覆盖扩展命令自己的 caps）。
+ */
+/**
+ * ★ 把「入站操控」这一组**打包**（2026-10-12 主人定：它也要进统一能力包）。
+ *
+ * 和上面那些 def 在 ctx 上的是**同一份实现**（不是两套）：这里只是换个入口交出去，
+ * 好让契约写成「一套包、五套扩展」——包里的 `inbound` 组"有值"就等于"你现在正握着
+ * 一条消息的处置权"。别的四套拿它会是 undefined，那是语义，不是缺失。
+ */
+export declare function inboundCapsOf(ctx: MiddlewareContext, s: ExtCtxSession): ExtInboundCaps;
 //# sourceMappingURL=ext-inbound-context.d.ts.map
