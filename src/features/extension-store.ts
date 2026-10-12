@@ -30,6 +30,12 @@ export const EXT_COMMANDS_SUBDIR = join('.qqbot-extensions', 'commands');
 export const EXT_TOOLS_SUBDIR = join('.qqbot-extensions', 'tools');
 /** botplay 自定义事件目录名(相对数据根; 2026-10-05 第三套扩展) */
 export const EXT_BOTPLAY_SUBDIR = join('.qqbot-extensions', 'botplay');
+/**
+ * 启动钩子目录名(相对数据根; 2026-10-12 第四套扩展)。
+ * 与前几套的区别: 钩子**不需要任何人触发** —— 插件启动(apply)时自动跑一次。
+ * 引擎在 features/ext-hooks.ts(本文件只提供目录常量, 免得两边各写一份字符串写歪)。
+ */
+export const EXT_HOOKS_SUBDIR = join('.qqbot-extensions', 'hooks');
 
 /** 扩展文件允许的扩展名 */
 const ALLOWED_EXT = new Set(['.js', '.mjs', '.cjs']);
@@ -377,9 +383,12 @@ export function seedExampleTools(dataRoot: string, logger: Logger): number {
   let n = 0;
   try {
     // 项目里**所有**扩展示例都要送（2026-10-10 主人定）：工具示例 + botplay 卡片示例
+    // 2026-10-12 追加第三套：启动钩子示例（examples/ext-hooks/ → .qqbot-extensions/hooks/）。
+    //   与 seed 同一时机铺设 ⇒ **首次安装当次启动就能跑到示例钩子**（不用重启宿主）。
     const sets: Array<[string, string]> = [
       ['../../examples/ext-tools/', join(dataRoot, EXT_TOOLS_SUBDIR)],
       ['../../examples/botplay/', join(dataRoot, EXT_BOTPLAY_SUBDIR)],
+      ['../../examples/ext-hooks/', join(dataRoot, EXT_HOOKS_SUBDIR)],
     ];
     // 2026-10-12：改成**递归**铺设（原来 readdirSync 只取直接子文件）。
     //   起因：跨会话工具示例（session_create / session_watch）把可变逻辑放在 `lib/*.mjs` 子目录里
@@ -392,7 +401,7 @@ export function seedExampleTools(dataRoot: string, logger: Logger): number {
         n += copyExampleTree(srcDir, dstDir);
       } catch { /* 单套失败继续下一套 */ }
     }
-    if (n > 0) logger.info?.(`[ext-tools] 已自动铺 ${n} 个扩展示例（tools + botplay）`);
+    if (n > 0) logger.info?.(`[ext-tools] 已自动铺 ${n} 个扩展示例（tools + botplay + hooks）`);
   } catch (err) {
     logger.debug?.('[ext-tools] 示例铺设跳过: ' + (err instanceof Error ? err.message : String(err)));
   }

@@ -476,7 +476,8 @@ contextMemoMaxItems: 20   # 备忘条数上限（超出丢最旧，1~500）
 ├── .qqbot/                 # 台账/定时/审批(如 cwd/dshqqbot/.qqbot)
 └── .qqbot-extensions/
     ├── commands/    # 自定义斜杠命令(重启后生效)
-    └── tools/       # 自定义 QQ 通道工具(AI 可调; 写完用 /tools-reload 或让 AI 调 tools_reload 热刷)
+    ├── tools/       # 自定义 QQ 通道工具(AI 可调; 写完用 /tools-reload 或让 AI 调 tools_reload 热刷)
+    └── hooks/       # 启动钩子(插件启动时自动跑一次; 没人调用也跑; v1.8.9+)
 ```
 数据目录 = `dataRoot`(已配置, 例 `D:\my-projects\qqbot-data`)或账号 cwd(未配置时, 向后兼容)。
 
@@ -535,8 +536,38 @@ export default {
   （被动回复：不吃主动消息配额、QQ 也不会吞）；失败（msg_id 过期／被动配额用尽／没有窗口）自动**去掉 msgId 重发**。
   ⚠️ **被动窗口只在"最近有互动"的会话成立** —— 冷群没有窗口，必然走主动。
 - **注册时机 = 插件启动**（不用等 QQ 消息），幂等、失败静默。
-- **新用户白拿示例**：插件启动时把自带的 `examples/ext-tools/*.mjs`、`examples/botplay/*.mjs` 铺进
-  `{dataRoot}/.qqbot-extensions/{tools,botplay}/` —— **只补不存在**的，绝不覆盖你自己写的（因此也不会重复搬）。
+- **新用户白拿示例**：插件启动时把自带的 `examples/ext-tools/*.mjs`、`examples/botplay/*.mjs`、
+  `examples/ext-hooks/*.mjs` 铺进 `{dataRoot}/.qqbot-extensions/{tools,botplay,hooks}/` —— **只补不存在**的，
+  绝不覆盖你自己写的（因此也不会重复搬）。
+
+### 启动钩子: .qqbot-extensions/hooks/xxx.mjs (v1.8.9+)
+
+前三套扩展都要"有人触发"才跑（命令等用户敲、工具等 AI 调、botplay 等人点卡片）。
+有些事**没人触发也得跑**：恢复上次没跑完的长期任务、注册监听、起定时器、预取数据。
+放进 `hooks/` 的模块会在**插件启动（apply）时自动执行一次**：
+
+```js
+export async function run(env) {          // 必需; async 可以
+  env.logger.info(`插件 v${env.pluginVersion} 起来了`);
+  const timer = setInterval(() => { /* 周期任务 */ }, 60_000);
+  timer.unref?.();
+  env.registerDispose(() => clearInterval(timer));   // 卸载时收尾
+}
+
+export async function dispose(env) {      // 可选: 插件卸载 / 宿主退出 / 重建网关时调用
+  env.logger.info('收尾完成');
+}
+```
+
+- 三种写法都认：`export function run(env)` / `export default { name, run, dispose }` / `export default async (env) => {}`。
+- `env` = `{ ctx, logger, dataRoot, config, registerDispose, pluginVersion, hookFile, caps, store }`：
+  `ctx` 是插件 cordis 上下文（`ctx.on()` / `ctx.get()` / `ctx.webServer.register()`…）；
+  `caps`/`store` 与 tools/commands 是**同一套能力包**（启动期没有会话，发送类调用会安静返回 `false`）。
+- **保险丝**（插件侧保证）：单钩子独立 try/catch（抛错绝不影响启动或其它钩子）；单钩子 **30s 超时**
+  （只告警放行，**不会真的杀掉代码** —— 长任务请用定时器/后台异步，别写在 `run()` 里）；
+  `hooks/` 目录缺失或为空**完全安静**；每个钩子的名字与结果（成功/失败/超时）都记日志。
+- 只扫描 `hooks/` 根下的 `*.mjs`（**子目录不扫描**，与 `tools/` 一样，可安全放私有模块）；
+  **没有热重载**，改完重启插件/宿主才生效。示例见 `examples/ext-hooks/`。
 
 ### 给 AI 的要点(让 AI 帮用户写扩展时照此办)
 1. 命令/工具文件都放**账号数据目录**的 `.qqbot-extensions/` 下(dataRoot 优先, 无则 cwd), 别放插件包内。

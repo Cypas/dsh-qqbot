@@ -12,8 +12,12 @@ const __dirname = dirname(__filename);
 const PLUGIN_ROOT = resolve(__dirname, '../..');
 /** 插件包名（从 package.json 读取，随发布名自动对齐） */
 const PLUGIN_NAME = readPluginName();
-/** 插件版本号（从 package.json 读取） */
-const PLUGIN_VERSION = readPluginVersion();
+/**
+ * 插件版本号（从 package.json 读取）。
+ * 2026-10-12 起对外暴露：供**启动钩子**（features/ext-hooks.ts 的 `env.pluginVersion`）等扩展点读取
+ * —— 扩展作者可以按版本做分支，而不是去猜包路径、自己读 package.json。
+ */
+export const PLUGIN_VERSION = readPluginVersion();
 function readPluginName() {
     try {
         const pkg = JSON.parse(readFileSync(resolve(PLUGIN_ROOT, 'package.json'), 'utf8'));

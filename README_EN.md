@@ -378,7 +378,8 @@ Extensions live under the **account workspace** (never inside the plugin package
 ```
 .qqbot-extensions/
 ├── commands/    # custom slash commands (take effect after /bot-restart)
-└── tools/       # custom QQ tools callable by the AI (hot-reload via /tools-reload)
+├── tools/       # custom QQ tools callable by the AI (hot-reload via /tools-reload)
+└── hooks/       # startup hooks — run once automatically when the plugin starts (v1.8.9+)
 ```
 
 **Slash command** (`.qqbot-extensions/commands/hello.mjs`):
@@ -424,7 +425,7 @@ export default {
 - **`env.qq`** = that persona's account pack: `{ preset, appId, appSecret, owners, groups:[{gid,name,lastAt}], c2c:[{openid,name,lastAt}], sender, sendText(scope,id,text), sendMarkdown(...), sendImage(...), apiCall(method,path,body) }`.
 - **Sending is passive-first**: `sendText()` looks up the target conversation's latest inbound `msgId` and replies with it (passive — no active-message quota, and QQ will not drop it); on failure it **retries without the msgId** (active fallback). A passive window only exists in conversations with **recent activity** — a cold group has none and will always go active.
 - Registration happens **at plugin startup** (no need to wait for a QQ message), idempotent and fail-soft.
-- **New users get examples for free**: at startup the plugin copies `examples/ext-tools/**` and `examples/botplay/*.mjs` into `{dataRoot}/.qqbot-extensions/{tools,botplay}/` — **only missing files**, never overwriting what you wrote. (`examples/ext-tools/lib/` is copied along too: subdirectories are **not** scanned as tools, which makes them the safe place for a tool's private helper modules.)
+- **New users get examples for free**: at startup the plugin copies `examples/ext-tools/**`, `examples/botplay/*.mjs` and `examples/ext-hooks/*.mjs` into `{dataRoot}/.qqbot-extensions/{tools,botplay,hooks}/` — **only missing files**, never overwriting what you wrote. (`examples/ext-tools/lib/` is copied along too: subdirectories are **not** scanned as tools, which makes them the safe place for a tool's private helper modules.)
 - **Cross-session toolchain (shipped as working examples)**: `examples/ext-tools/` contains four tools that let one session **create another session, hand it a task, and receive the result back**:
 
   | Tool | What it does |
@@ -445,6 +446,45 @@ export default {
 - Limitation: extensions **cannot register button callbacks** — those require a botplay event or the dock card editor. Extension-only flows are "card + user replies a number", with the AI acting as the state machine.
 - Example (song request): fetch a search API → build a markdown card (cover / title / artist / lyrics) → `sender.sendMarkdown(replyTarget, card)` → optionally `sender.sendMedia(...)` for a preview → return `{ ok: true, msg: 'card sent' }`.
 - API reference: when a field/event/error code is unclear, read the official QQ bot api-v2 docs <https://bot.q.qq.com/wiki/develop/api-v2/> instead of guessing (button `action.type` 0=link / 1=callback / 2=command, keyboard 5-row limit, error codes…).
+
+## 🪝 Startup hooks: nobody has to call them (v1.8.9+)
+
+Every extension above needs a **trigger**: `commands/` waits for a user to type a slash command, `tools/` waits for the LLM to call it, `botplay/` waits for a button click. Some work has no trigger — restoring a long-running job that was interrupted, subscribing to host events, starting a timer, prefetching data. Drop a `.mjs` into `{dataRoot}/.qqbot-extensions/hooks/` and it runs **once, automatically, when the plugin starts (`apply`)**:
+
+```js
+// {dataRoot}/.qqbot-extensions/hooks/my-hook.mjs
+export async function run(env) {
+  env.logger.info(`plugin v${env.pluginVersion} booted; dataRoot = ${env.dataRoot}`);
+  const timer = setInterval(() => { /* periodic work */ }, 60_000);
+  timer.unref?.();
+  env.registerDispose(() => clearInterval(timer));   // clean up on unload
+}
+
+export async function dispose(env) {                 // optional: called on unload / host exit
+  env.logger.info('torn down');
+}
+```
+
+All three shapes work: `export function run(env)`, `export default { name, run, dispose }`, `export default async (env) => {}`.
+
+| `env` field | What it gives you |
+|---|---|
+| `ctx` | the plugin's cordis Context (`ctx.on()` / `ctx.get()` / `ctx.webServer.register()`…) |
+| `logger` / `dataRoot` / `config` | logging / the data root / the live instance config (read-only use) |
+| `registerDispose(fn)` | register a cleanup function — called on unload, in **reverse** order, same as an exported `dispose()` |
+| `pluginVersion` | the plugin package version (e.g. `1.8.9`), so you can branch on it |
+| `caps` / `store` | the **same capability pack** as tools/commands; `store.load()/save()` persists to `hooks/data/<file>.json` |
+
+**How it differs from tools/commands**: a hook is **never called by anyone** and never shows up in the tool list (zero token cost for the model). Every `*.mjs` directly under `hooks/` runs, in filename order; **subdirectories are not scanned** (same convention as `tools/` — the safe place for private helper modules).
+
+**What the plugin guarantees:**
+
+- a throwing hook **never breaks plugin startup or the other hooks** (each one gets its own try/catch; failures are logged as warnings and skipped);
+- **30s timeout per hook** — a slow async hook cannot stall startup (note: the timeout does *not* kill the code; run long work in a timer/background task instead of inline in `run()`);
+- a **missing or empty `hooks/` directory is completely silent** (no errors, no log spam); every hook's name and outcome (ok / failed / timed out) is logged.
+
+Examples ship in [`examples/ext-hooks/`](./examples/ext-hooks/README.md) (`hello-hook.mjs` is the minimal one; `session-watch-hook.mjs` shows "subscribe + dispose"), and the plugin copies them into your extension directory at startup.
+⚠️ Hooks run **once at startup only** (no hot reload) — restart the plugin/host to apply an edit.
 
 ## 🔨 Hammer panel: mute / kick (v1.6.3)
 

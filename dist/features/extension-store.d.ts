@@ -7,6 +7,12 @@ export declare const EXT_TOOLS_SUBDIR: string;
 /** botplay 自定义事件目录名(相对数据根; 2026-10-05 第三套扩展) */
 export declare const EXT_BOTPLAY_SUBDIR: string;
 /**
+ * 启动钩子目录名(相对数据根; 2026-10-12 第四套扩展)。
+ * 与前几套的区别: 钩子**不需要任何人触发** —— 插件启动(apply)时自动跑一次。
+ * 引擎在 features/ext-hooks.ts(本文件只提供目录常量, 免得两边各写一份字符串写歪)。
+ */
+export declare const EXT_HOOKS_SUBDIR: string;
+/**
  * 扫描并加载扩展命令目录下的全部命令。
  * fail-soft: 单个文件坏/抛错只记日志, 不影响其它扩展与插件本体。
  */

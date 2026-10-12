@@ -375,9 +375,55 @@ export default {
 - 注册名会带上**人设 id**（如 `qq_send__whale-girl`），归属一眼可见；
   ⚠️ **工具名只能用 `[a-zA-Z0-9_-]`** —— 用 `@` 之类的字符会被 LLM API **整轮拒绝**（会让机器人全面瘫痪）。插件现在会**直接拒绝注册**这类名字，不会再把整条链路带崩。
 - 发送**被动优先、失败转主动**：先拿目标会话最近的 `msgId` 走被动回复（不吃主动配额、也不被 QQ 吞），失败再去掉 `msgId` 重发。冷群没有被动窗口，会直接走主动。
-- **新用户不用自己搬示例**：插件启动时会把自带的 `examples/ext-tools`、`examples/botplay` **只补不覆盖**地铺进你的扩展目录 —— 装上就有能跑的工具（如 `qq_send`）和卡片示例。
+- **新用户不用自己搬示例**：插件启动时会把自带的 `examples/ext-tools`、`examples/botplay`、`examples/ext-hooks` **只补不覆盖**地铺进你的扩展目录 —— 装上就有能跑的工具（如 `qq_send`）、卡片示例和启动钩子示例。
 
 细节见 **[用户手册](./docs/USER-GUIDE.md)** 的「自定义 QQ 工具」一节。
+
+## 🪝 启动钩子：没人调用也自己跑（v1.8.9+）
+
+前面的扩展都要「有人触发」才动：`commands/` 等用户敲命令、`tools/` 等 LLM 调用、`botplay/` 等人点卡片。
+但有些事**没人触发也得跑** —— 恢复上次没跑完的长期任务、注册监听、起定时器、预取数据。
+把 `.mjs` 放进 `{dataRoot}/.qqbot-extensions/hooks/`，它就会在**插件启动（apply）时自动执行一次**：
+
+```js
+// {dataRoot}/.qqbot-extensions/hooks/my-hook.mjs
+export async function run(env) {
+  env.logger.info(`插件 v${env.pluginVersion} 起来了；数据根 = ${env.dataRoot}`);
+  const timer = setInterval(() => { /* 周期任务 */ }, 60_000);
+  timer.unref?.();
+  env.registerDispose(() => clearInterval(timer));   // 卸载时收尾
+}
+
+export async function dispose(env) {                 // 可选：卸载 / 宿主退出时调用
+  env.logger.info('收尾完成');
+}
+```
+
+三种写法都认：`export function run(env)`、`export default { name, run, dispose }`、`export default async (env) => {}`。
+
+| `env` 字段 | 说明 |
+|---|---|
+| `ctx` | 插件 cordis Context（`ctx.on()` / `ctx.get()` / `ctx.webServer.register()`…） |
+| `logger` / `dataRoot` / `config` | 日志 / 数据根 / 当前实例配置（只读用途） |
+| `registerDispose(fn)` | 注册清理函数（与导出的 `dispose()` 一样在卸载时调用，**逆序**执行） |
+| `pluginVersion` | 插件版本号（如 `1.8.9`），可按版本分支 |
+| `caps` / `store` | 与 tools / commands **同一套能力包**；`store.load()/save()` 落 `hooks/data/<文件名>.json` |
+
+**和 tools / commands 的区别**：钩子**不需要任何人调用**，也不出现在工具列表里（不占 AI 的 token）。
+`hooks/` 根下的 `*.mjs` 逐个执行；**子目录不扫描**（与 `tools/` 的既有约定一致，可安全放私有模块）。
+
+**插件侧的硬保证**：
+
+- 单个钩子抛错**绝不影响插件启动、也不影响其它钩子**（逐个独立 try/catch，失败只记警告）；
+- 单钩子超时 **30s**，超时只告警并放行 —— 异步钩子拖不死启动（注意：超时不会真的杀掉代码，
+  长任务请用定时器/后台异步跑，别直接写在 `run()` 里）；
+- `hooks/` 目录**不存在或为空完全安静**（不报错、不刷日志）；每个钩子的名字与结果
+  （成功 / 失败 / 超时）都会写进日志。
+
+示例见 [`examples/ext-hooks/`](./examples/ext-hooks/README.md)（`hello-hook.mjs` 最小可跑；
+`session-watch-hook.mjs` 演示"注册监听 + dispose 清理"）；插件启动时会自动铺一份到你的扩展目录。
+⚠️ 钩子**只在启动时跑一次**（没有热重载），改完要重启插件/宿主才生效。
+
 ## 🔨 锤子面板：禁言 / 踢人（v1.6.3）
 
 dock 面板里的 **🔨 锤子**（原来叫「🔇 禁言」），下面分两页：

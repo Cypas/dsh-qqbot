@@ -1,3 +1,45 @@
+## [1.8.9] - 2026-10-12
+
+> 新增**启动钩子（ext-hooks）扩展点** —— 第四套用户扩展：`hooks/*.mjs` 在插件启动时**自动跑一次**，不需要任何人调用。
+
+### ✨ 新增
+
+- **启动钩子扩展点**（`{dataRoot}/.qqbot-extensions/hooks/*.mjs`）。
+  前三套扩展都要"有人触发"才跑：`commands/` 等用户敲命令、`tools/` 等 LLM 调用、`botplay/` 等人点卡片；
+  但恢复上次没跑完的长期任务、注册监听、起定时器、预取数据这些事**没人触发也得跑**。
+  于是加第四套：插件启动（`apply` 链路）时扫描 `hooks/` 并**逐个执行一次**。
+
+  - **模块契约**（三种写法都认）：
+    ```js
+    export async function run(env) { … }                 // ① 具名导出
+    export default { name, run(env), dispose(env) }      // ② 对象默认导出
+    export default async (env) => { … }                  // ③ 裸函数默认导出
+    ```
+    `run` 必需（async 可以）；`dispose` 可选 —— 插件卸载 / 宿主退出 / 保存连接设置后重建网关时调用。
+  - **`env`** = `{ ctx, logger, dataRoot, config, registerDispose, pluginVersion, hookFile, caps, store }`：
+    `ctx` 是插件 cordis Context；`caps`/`store` 与 tools/commands 是**同一套能力包**
+    （`store` 落 `hooks/data/<文件名>.json`）。
+  - **健壮性（硬要求，实现见 `src/features/ext-hooks.ts`）**：
+    ① 单钩子独立 try/catch —— 抛错**绝不影响插件启动、也不影响其它钩子**，只记警告并继续；
+    ② 单钩子 **30s 超时**保护 —— 异步钩子拖不死启动（超时只告警并放行；**不会真的杀掉代码**，
+       长任务请用定时器/后台异步）；
+    ③ `hooks/` 目录**缺失或为空完全安静**（不报错、不打日志）；
+    ④ 每个钩子的名字与结果（成功 / 失败 / 超时 / 跳过）都记账并写日志。
+  - **扫描约定**与 `tools/` 一致：只看 `hooks/` 根下的 `*.mjs/.js/.cjs`，**子目录不扫描**；
+    cache-bust 用文件 mtime（沿用 `fileVersion` 纪律，别改回时间戳 —— 那会导致 ESM 模块表长跑吃内存）。
+  - **示例**：新增 `examples/ext-hooks/`（`hello-hook.mjs` 最小可跑日志型；
+    `session-watch-hook.mjs` 演示"注册 `ctx.on` 监听 + 定时器 + dispose 清理"，
+    含 run/dispose 竞态的兜底写法）；`seedExampleTools()` 现在**也把示例铺到**
+    `{dataRoot}/.qqbot-extensions/hooks/`（同样**只补不覆盖**；因为铺设在跑钩子之前，
+    **首次安装当次启动**就能跑到示例钩子）。
+  - **清理**：`bootstrapGateway` 的 dispose 链路（插件卸载 / 宿主退出 / 重建网关）会调用钩子登记的
+    `registerDispose(fn)` 与导出的 `dispose()`，**逆序执行**、单个清理失败只告警。
+  - **文档**：`README.md` / `README_EN.md` 各加「启动钩子」一节；`docs/USER-GUIDE.md` 目录结构补
+    `hooks/` 并加契约小节；`docs/botplay-contract.md` 补一句同级的 `tools/`、`hooks/` 归属。
+  - **测试**：新增 `src/features/ext-hooks.test.ts`（15 项：目录安静性、三种导出写法、env 契约、
+    子目录不扫描、抛错隔离、超时放行、dispose 逆序与容错）。
+  - ⚠️ 启动钩子**只在启动时跑一次，没有热重载** —— 改完要重启插件/宿主才生效。
+
 ## [1.8.8] - 2026-10-12
 
 > 修「设置页保存了凭据/预设，却**永远不重连**」—— 只有新建实例那一次会连上。

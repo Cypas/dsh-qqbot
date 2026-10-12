@@ -504,6 +504,30 @@ export async function bootstrapGateway(
       if (n > 0) logger.info(`[im-qqbot] 已自动铺设 ${n} 个扩展示例`);
     } catch { /* 静默 */ }
   })();
+
+  // ── 启动钩子（ext-hooks，第四套扩展；2026-10-12）────────────────────────────
+  //   `{dataRoot}/.qqbot-extensions/hooks/*.mjs` 里的模块在**插件启动时自动跑一次**
+  //   （不需要任何调用方触发）—— 用途：恢复上次没跑完的长期任务、注册监听、起定时器、预取数据。
+  //
+  //   ⚠️ 三条硬纪律（实现都在 features/ext-hooks.ts，这里只负责接线）：
+  //     ① 单钩子独立 try/catch ⇒ 抛错绝不影响插件启动、也不影响其它钩子；
+  //     ② 单钩子 30s 超时 ⇒ 异步钩子不会把启动拖死（超时只告警并放行）；
+  //     ③ 目录缺失/为空完全安静 ⇒ 不报错、不打日志。
+  //   放在 seedExampleTools 之后 ⇒ **首次安装当次启动**就能跑到刚铺进去的示例钩子（不用重启宿主）。
+  //   与 seed 同为 fire-and-forget：不阻塞启动、永不抛出。
+  void (async () => {
+    try {
+      const hooks = await import('../features/ext-hooks.js');
+      const r = await hooks.runStartupHooks({ dataRoot: dataRootOf(config), logger, ctx, config });
+      if (r.total > 0) {
+        logger.info(`[im-qqbot] 启动钩子: ${r.total} 个（成功 ${r.ok} / 失败 ${r.failed} / 超时 ${r.timedOut}）`);
+      }
+    } catch (err) {
+      // 引擎内部已经永不抛出；真走到这里说明连 import 都失败了 —— 仍只告警
+      logger.warn?.(`[im-qqbot] 启动钩子装载异常(已忽略, 不影响插件启动): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  })();
+
   logger.info(`[im-qqbot] QQ 远程审批接线就绪(${config.enableApprovals ? '已启用' : '默认关闭, Web 设置可热开'})`);
 
   // ── QQ 远程提问(按钮卡片版): ask_user_question → QQ 卡片按钮 ──
@@ -816,6 +840,15 @@ export async function bootstrapGateway(
         if (scheduleTicker) { clearInterval(scheduleTicker); scheduleTicker = undefined; }
         clearInterval(botplaySweeper);
         flushStickerGate();
+        // ── 启动钩子（ext-hooks）：卸载 / 宿主退出 / 保存连接设置后重建网关时清理本实例登记项 ──
+        //    钩子可能在启动时注册了监听、定时器、订阅 —— 不清理就会在重建网关时不断累积（历史上踩过这个坑）。
+        //    引擎内部逐个 try/catch + 逆序执行，单个清理失败只告警，绝不阻断其余拆卸步骤。
+        try {
+          const hooks = await import('../features/ext-hooks.js');
+          await hooks.disposeStartupHooks(logger);
+        } catch (err) {
+          logger.warn?.(`[ext-hook] 清理启动钩子异常(已忽略): ${err instanceof Error ? err.message : String(err)}`);
+        }
         await manager.disposeAll();
         bot.stop();
       };
