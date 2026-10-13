@@ -111,7 +111,7 @@ export default {
     };
     sessions.sort((a, b) => timeOf(b) - timeOf(a));
 
-    // 归属：一个会话只归给它 cwd 最长的那个工作区（否则父目录会把子目录工作区的会话一起列走）
+    // 归属：一个会话只归给它 cwd 最长的那个工作区（否则父目录 aiwork 会把子目录鲸鱼娘的会话全列走）
     const owners = new Map();
     for (const s of sessions) {
       const cwd = String(pick(s, ['cwd', 'workdir', 'directory', 'workingDirectory']) ?? '');

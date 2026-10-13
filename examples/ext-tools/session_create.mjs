@@ -47,9 +47,10 @@ export default {
     cwd: { type: 'string', description: '工作目录（可选；等价于指定工作区）' },
     name: { type: 'string', description: '标签/备注（可选，建好后写进会话标题）' },
     preset: { type: 'string', description: '权限预设（默认 danger-full-access 完全权限）' },
-agent_preset: { type: 'string', description: '人设（agent 预设）：收**任何字符** —— 先按预设名（显示名）反查 id，再按 id 匹配（忽略大小写；唯一子串也认）。如「标准模式」/standard（显示名与 id 都认）。不填=继承发起方自己' },
+agent_preset: { type: 'string', description: '人设（agent 预设）：收**任何字符** —— 先按预设名（显示名）反查 id，再按 id 匹配（忽略大小写；唯一子串也认）。如「测试2」/standteste/「温柔鲸鱼娘」/softwhale。不填=继承我自己' },
     wake: { type: 'boolean', description: 'true=建完立刻跑一轮（默认 false=只追加不唤醒，省 token）' },
     watch: { type: 'boolean', description: 'true=挂"回合结束回灌"钩子（默认 true）' },
+    mode: { type: 'string', description: '回灌档位（挂钩子时才用）：1/一档（默认）=末段正文回灌父会话 + 同时转发到父所在的QQ；2/二档=该回合所有正文+报错只转发QQ、不进父会话上下文；3/三档=所有正文+报错进父会话上下文但不唤醒、同时也转发QQ' },
   },
 
   async run(args = {}, env = {}) {
@@ -190,8 +191,25 @@ agent_preset: { type: 'string', description: '人设（agent 预设）：收**�
     if (args?.watch !== false) {
       try {
         const w = await loadWatchLib();
-        watchMsg = await w.register(root, { parentAgentId: me, childSessionId: sid, label }) +
-          '  [lib=' + (w.__LIB_VERSION__ ?? '未知(旧版无版本号)') + ']';
+        // ★ 档位（主人 2026-10-12 定）：1=末段回灌+转QQ / 2=只转QQ不进父 / 3=进父不唤醒+转QQ
+        const mv = String(args?.mode ?? '').trim();
+        const mode = /^(2|二)/.test(mv) ? 2 : (/^(3|三)/.test(mv) ? 3 : 1);
+        watchMsg = await w.register(root, {
+          parentAgentId: me,
+          childSessionId: sid,
+          label,
+          mode,
+          // ★ 归属行三件套（主人 2026-10-12 定：除了短 id，还要写会话名/预设名/工作区）
+          //   顺序有意义：路由键（【子会话 xxxx）在最前，后面这些即使被引用块的 60 字截掉也不影响回流。
+          name: label,
+          preset: agentPreset,
+          workspace: String(wsPath || myCwd || '').split(/[\\/]/).filter(Boolean).pop() ?? '',
+          // ★ QQ 转发用"我自己这个会话"的 sender + replyTarget：
+          //   replyTarget 自带最近 msgId ⇒ 被动优先；插件的 sendMarkdown 自带 markdown→纯文本降级链。
+          sender: env?.sender,
+          replyTarget: env?.replyTarget,
+          peerName: String(env?.replyTarget?.name ?? ''),
+        }) + '  [lib=' + (w.__LIB_VERSION__ ?? '未知(旧版无版本号)') + ']';
       } catch (e) { watchMsg = '未挂（' + String(e?.message ?? e) + '）'; }
     }
     out.push('⑤ 回合结束回灌 → ' + watchMsg);

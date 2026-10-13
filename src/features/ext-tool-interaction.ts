@@ -21,8 +21,23 @@
  *   · ack 统一由 bootstrap 的交互处理器做（本控制器不碰 `PUT /interactions/{id}`）。
  */
 import type { Logger } from '../types.js';
-import { loadExtensionTools } from './extension-store.js';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { loadExtensionTools, loadExtensionCommands } from './extension-store.js';
 import { lookupExtToolCard, parseExtToolButtonData } from './ext-tool-cards.js';
+
+/**
+ * ★ 派发链诊断（2026-10-13 主人要求）：把派发每一步写死到一个文件里。
+ * 目的：主人点按钮后就能直接看出 —— 事件到没到、注册表命中没、找到工具/命令没、钩子调没调。
+ * 只记录、绝不影响派发结果（任何异常都吞掉）。
+ */
+const DISPATCH_DIAG = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/派发-diag.log';
+function dlog(msg: string): void {
+  try {
+    mkdirSync(dirname(DISPATCH_DIAG), { recursive: true });
+    appendFileSync(DISPATCH_DIAG, `${new Date().toISOString()} ${msg}\n`);
+  } catch { /* ignore */ }
+}
 
 /** 点击者身份 */
 export interface ExtToolActor {
@@ -97,22 +112,38 @@ export function createExtToolInteractionController(deps: ExtToolInteractionDeps)
       const hit = lookupExtToolCard(dataRoot, { toolName, cardId, buttonId });
       if (!hit) {
         // 未登记/已过期/按钮不属于该卡 → 不消费（交回原有兜底；最后仍只 ack）
+        dlog(`[miss] 注册表未命中 tool=${toolName} card=${cardId} btn=${buttonId}`);
         logger.debug?.(`[ext-tool-btn] 未命中注册表 tool=${toolName} card=${cardId} btn=${buttonId}`);
         return false;
       }
+      dlog(`[hit] 注册表命中 tool=${toolName} card=${cardId} btn=${buttonId}`);
 
       // ③ 找模块 + 它的 onInteraction
+      //    ★ 2026-10-13：工具里没有这个钩子 → 再找**同名的「扩展命令」**（命令现在也能收按钮回调）。
+      //    于是「一条斜杠命令独立完成 启动→翻页→收尾」不必再额外搭一个 tools/ 模块。
       let mod: Awaited<ReturnType<typeof loadExtensionTools>>[number] | undefined;
+      let handler: ((ctx: never, info: never) => unknown) | undefined;
       try {
         const defs = await loadExtensionTools(dataRoot, logger);
         mod = defs.find((d) => d.name === toolName);
+        handler = mod?.onInteraction;
+        dlog(`[tool] 工具数=${defs.length} 找到=${!!mod} 有钩子=${typeof mod?.onInteraction === 'function'}`);
+        if (typeof handler !== 'function') {
+          const cmds = await loadExtensionCommands(dataRoot, logger);
+          const hitCmd = cmds.find((x) => (Array.isArray(x.name) ? x.name : [x.name]).map(String).includes(toolName));
+          handler = (hitCmd as { onInteraction?: typeof handler } | undefined)?.onInteraction;
+          dlog(`[cmd] 命令数=${cmds.length} 命中=${!!hitCmd} 有钩子=${typeof handler === 'function'} 名字=${cmds.map((c) => (Array.isArray(c.name) ? c.name.join('/') : String(c.name))).join(',')}`);
+        }
       } catch (err) {
-        logger.warn(`[ext-tool-btn] 加载扩展工具失败: ${err instanceof Error ? err.message : String(err)}`);
+        dlog(`[error] 加载扩展工具/命令失败: ${err instanceof Error ? err.stack : String(err)}`);
+        logger.warn(`[ext-tool-btn] 加载扩展工具/命令失败: ${err instanceof Error ? err.message : String(err)}`);
       }
-      if (!mod || typeof mod.onInteraction !== 'function') {
-        logger.warn(`[ext-tool-btn] 工具「${toolName}」不存在或未导出 onInteraction → 不消费`);
+      if (typeof handler !== 'function') {
+        dlog(`[nohandler] 「${toolName}」没有可用钩子 → 不消费`);
+        logger.warn(`[ext-tool-btn] 「${toolName}」既不是导出 onInteraction 的工具、也不是这种扩展命令 → 不消费`);
         return false;
       }
+      dlog(`[call] 即将调用 onInteraction tool=${toolName} btn=${buttonId}`);
 
       // ④ 点击者身份：群聊看 group_member_openid，单聊看 user_openid
       const openid = String(e.group_member_openid ?? e.user_openid ?? '');
@@ -144,7 +175,8 @@ export function createExtToolInteractionController(deps: ExtToolInteractionDeps)
         event,
       };
       try {
-        const out = await mod.onInteraction(ctx, info);
+        const call = handler as unknown as (c: Record<string, unknown>, i: Record<string, unknown>) => unknown;
+        const out = await call(ctx, info);
         const text = typeof out === 'string' ? out.trim() : '';
         if (text) await sendReceipt(replyTarget, text);
         logger.info(`[ext-tool-btn] 已派发 tool=${toolName} card=${cardId} btn=${buttonId} openid=${openid.slice(0, 8)}…`);

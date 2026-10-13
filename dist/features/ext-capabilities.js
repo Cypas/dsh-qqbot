@@ -310,6 +310,8 @@ export function makeExtCaps(deps) {
         },
         owners,
         peer: { scope: String(deps.scope ?? ''), peerId: String(deps.peerId ?? '') },
+        /** ★ 回灌钩子要的「父会话 id」（= `session/event` 的 `session.id`，不是 agent.id） */
+        peerSessionId: String(deps.peerSessionId ?? ''),
         log: (...args) => {
             try {
                 logger?.info?.(`[ext:${self}] ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`);

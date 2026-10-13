@@ -1,3 +1,28 @@
+## [1.10.0] - 2026-10-13
+
+### 新增 · 跨会话工具链：持久化 + 启动自恢复
+
+- **盯梢名单真正落盘**：`{数据根}/.qqbot-extensions/tools/data/session-watch-watching.json`
+  （与 `vote.json` 同一个 data 目录）。此前 `setStateFile()` **全项目无人调用** ⇒ `stateFileOf()` 恒为空
+  ⇒ `persist()` 里 `if (!file) return` 直接空转 ⇒ **名单从来没落过盘**，重启必丢。现已补默认路径兜底。
+- **启动钩子自动恢复**：`examples/ext-hooks/session-watch-hook.mjs` 在启动时调 `rehydrate()` ——
+  读回名单 **+ 重装 `session/event` 监听器**（监听器是内存态、重启必丢，只能靠启动重装）。
+- **命令能力包新增 `peerSessionId`**：命令/回调侧以前**拿不到"本会话的 DSH 会话 id"**，而回灌钩子
+  判"父会话"用的正是 `session/event` 里的 `session.id`（**不是 `agent.id`**）—— 于是 `register()`
+  因缺 `parentAgentId` 直接返回「未挂」。现在 `capsForCmd` 会带上 `manager.sessionIdFor(scope, peerId)`
+  （带派生兜底，总有值）。
+- **新增第五套示例铺设**：`examples/ext-commands/` → `.qqbot-extensions/commands/`
+  （跨会话 `/子会话` 卡片向导；纪律同前：**只补不存在**，绝不覆盖用户改过的同名文件）。
+- **修正富媒体提示词**：原文把"两端加英文方括号"写成括号注释，模型极易漏掉方括号
+  （漏了=富媒体不生效，还会把裸标记当正文发出去）⇒ 改成硬约束 + 带方括号的完整示例。
+
+### 示例更新（只动跨会话那一套）
+
+- `examples/ext-tools/lib/session_watch_lib.mjs`（17KB → 36KB：存档为真源 + `ensureLoaded()` + `rehydrate()`）
+- `examples/ext-tools/` 新增 `session_children.mjs`；同步 `session_create` / `session_watch` /
+  `sessions_list` / `session_send`
+- `examples/ext-hooks/session-watch-hook.mjs` 重写为真正的"启动恢复"钩子
+
 ## [1.9.3] - 2026-10-12
 
 ### 修复 · 新契约文档没进 npm 包

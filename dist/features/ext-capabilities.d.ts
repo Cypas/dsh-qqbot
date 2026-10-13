@@ -45,6 +45,13 @@ export interface ExtCapsDeps {
     /** 当前会话标识 + 称呼（peer / user 展示用） */
     scope?: string;
     peerId?: string;
+    /**
+     * 本会话的 **DSH 会话 id**（= `manager.sessionIdFor(scope, peerId)`）。
+     * ★ 2026-10-13 加：回灌钩子（`session_watch_lib` 的 `parentEntryOf`）匹配的是
+     *   `session/event` 里那个 `session.id`，**不是 `agent.id`**；
+     *   命令侧原先连"会话 id"都拿不到 ⇒ 回灌钩子永远挂不上（现象：建完显示「回灌 → 未挂」）。
+     */
+    peerSessionId?: string;
     /** 触发者（命令的发送者 / 工具的调用会话所属人） */
     actorOpenid?: string;
     actorName?: string;
@@ -205,6 +212,8 @@ export interface ExtCapabilities {
         scope: string;
         peerId: string;
     };
+    /** ★ 回灌钩子要的「父会话 id」（= `session/event` 的 `session.id`，不是 agent.id） */
+    peerSessionId: string;
     log(...args: unknown[]): void;
     /**
      * ★ **内核句柄（"遥控器"）**= 本插件自己的 cordis Context（`ctx`）。

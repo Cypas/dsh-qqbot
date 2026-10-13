@@ -367,6 +367,12 @@ export async function setupMiddlewares(
           sender: (ctx as { bot?: unknown }).bot as never,
           replyTarget: (ctx as { replyTarget?: unknown }).replyTarget,
           agent: (rec as { agent?: unknown } | undefined)?.agent as never,
+          // ★ 2026-10-13 加：**本会话的 DSH 会话 id** —— 回灌钩子要的正是它。
+          //   钩子（.qqbot-extensions/tools/lib/session_watch_lib.mjs:563）的匹配口径是
+          //   `session.id`（session/event 里那个 session 的 id），**不是 agent.id**；
+          //   而命令侧原本连"会话 id"都拿不到 ⇒ 回灌钩子永远挂不上（现象：建完显示「回灌 → 未挂」）。
+          //   sessionIdFor() 自带派生兜底，所以这里总有值。
+          peerSessionId: pid ? manager.sessionIdFor(sc as never, pid) : '',
           scope: sc,
           peerId: pid,
           actorOpenid: String(mc?.senderId ?? ''),

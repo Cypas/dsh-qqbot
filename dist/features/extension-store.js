@@ -72,6 +72,8 @@ function normalizeModule(mod, file, logger) {
             logger.warn(`[ext] ${file}: 缺 name 或 handler, 跳过`);
             return null;
         }
+        // 官方 SDK 的 SlashCommand 没有 onInteraction 字段 ⇒ 用**交叉类型**挂上去（不改第三方）。
+        // 这样「扩展命令」也能像「扩展工具」那样收 `ext:<名字>:<卡id>:<按钮id>` 按钮回调。
         const cmd = {
             name: finalNames.length > 1 ? finalNames : finalNames[0],
             description: String(obj.description ?? '自定义扩展命令'),
@@ -81,6 +83,8 @@ function normalizeModule(mod, file, logger) {
             cmd.usage = obj.usage;
         if (typeof obj.authorized === 'function')
             cmd.authorized = obj.authorized;
+        if (typeof obj.onInteraction === 'function')
+            cmd.onInteraction = obj.onInteraction;
         return cmd;
     }
     catch (err) {
@@ -298,6 +302,10 @@ export function seedExampleTools(dataRoot, logger) {
             ['../../examples/ext-tools/', join(dataRoot, EXT_TOOLS_SUBDIR)],
             ['../../examples/botplay/', join(dataRoot, EXT_BOTPLAY_SUBDIR)],
             ['../../examples/ext-hooks/', join(dataRoot, EXT_HOOKS_SUBDIR)],
+            // 2026-10-13 追加：跨会话**命令**示例（`/子会话` 卡片向导）。
+            //   纪律同前：copyExampleTree **只补不存在**，绝不覆盖用户改过的同名命令。
+            //   它 import `../tools/session_create.mjs`（同批铺进 tools/），所以两者必须一起发版。
+            ['../../examples/ext-commands/', join(dataRoot, EXT_COMMANDS_SUBDIR)],
             //   只铺这一个：它只在"引用一条子会话转发消息"时改一下 @ 判定，不改内容、不写状态、不动手。
             ['../../examples/ext-inbound/', join(dataRoot, EXT_INBOUND_SUBDIR), ['no-wake-on-child-quote.mjs']],
         ];
