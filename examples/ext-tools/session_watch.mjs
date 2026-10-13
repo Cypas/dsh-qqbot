@@ -69,6 +69,12 @@ export default {
 
     const lib = await loadWatchLib();
 
+    // ★ 2026-10-13：把本次 env 的 sender/replyTarget 交给回灌库。
+    //   工具 env **一定有**这两样（{cwd, manager, sender, replyTarget, exec, ctx, logger}），
+    //   而插件根 ctx（handler 的 root）上实测拿不到 ⇒ 记住它，回灌库才能在"父会话发言"时
+    //   把重启后丢失的 QQ 转发能力补回来。
+    const fwdOk = lib.rememberFwd?.(env?.sender, env?.replyTarget) ?? false;
+
     const action = String(args?.action ?? 'list').toLowerCase();
     const p = (n) => String(n).padStart(2, '0');
     const fmt = (t) => {
@@ -76,6 +82,24 @@ export default {
       const d = new Date(t);
       return Number.isNaN(d.getTime()) ? '—' : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
     };
+
+    // ★ 2026-10-13 加：**不重启也能让最新 lib 接管**。
+    //   背景：`tools/lib/*.mjs` 是按 mtime 版本化加载的，改完只有"监听器真正用的那份 handler"
+    //   才是新代码；而 handler 指针靠 `installHook()` 更新。`rehydrate()` 同时做两件事：
+    //   ① 读回落盘名单；② installHook（把 globalThis 上的 handler 换成最新实例）。
+    //   ⇒ 改完 lib 跑一次本动作即可生效，**不必重启宿主**。
+    if (action === 'rehydrate' || action === '重载' || action === '刷新') {
+      const root = env?.kernel ?? env?.ctx ?? null;
+      if (!root || typeof root.on !== 'function') {
+        return { ok: false, msg: 'rehydrate 需要宿主根 ctx（env.kernel），当前拿不到' };
+      }
+      const r = await lib.rehydrate(root);
+      return {
+        ok: true,
+        msg: `已重载：读回 ${r?.restored ?? 0} 条盯梢，回灌监听器${r?.hooked ? '已装' : '未装'}` +
+          `（新代码已接管；QQ 转发能力会在父会话下一次发言时自动补回）`,
+      };
+    }
 
     if (action === 'attach' || action === '补挂') {
       const child = String(args?.child_session_id ?? '').trim();

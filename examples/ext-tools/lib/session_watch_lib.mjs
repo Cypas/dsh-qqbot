@@ -73,6 +73,28 @@ const { fileURLToPath } = await import('node:url');
  * 改一次 lib 就把已登记的盯梢对象全丢了。放 globalThis 上跨实例共享。
  */
 const WATCHING_KEY = Symbol.for('dsh-qqbot.session-watch.watching');
+/**
+ * ★ 2026-10-13：**扩展工具侧注入的 sender/replyTarget**（跨模块实例共享）。
+ *   工具 env 里**一定有**这两样（扩展工具 env = `{cwd, manager, sender, replyTarget, exec, ctx, logger}`），
+ *   而插件根 ctx（handler 拿到的 root）上实测**拿不到** sender ⇒ 单靠 root 补不回 QQ 转发。
+ *   所以让扩展工具每次被调用时顺手写进来，handler 侧再读它去补 fwd。
+ */
+const FWD_KEY = Symbol.for('dsh-qqbot.session-watch.fwd');
+
+/**
+ * 供扩展工具调用：把本次 env 的 sender/replyTarget 交给回灌库。
+ * 调一次之后，回灌库在"父会话发言"时就能把 QQ 转发能力补回来（重启后尤其需要）。
+ * @returns {boolean} 是否记住
+ */
+export function rememberFwd(sender, replyTarget) {
+  try {
+    if (sender && replyTarget) {
+      globalThis[FWD_KEY] = { sender, replyTarget };
+      return true;
+    }
+    return false;
+  } catch { return false; }
+}
 const watching = (globalThis[WATCHING_KEY] ??= new Map()); // childSessionId -> entry
 
 /**
@@ -135,7 +157,13 @@ export function ensureLoaded() {
 export async function rehydrate(root) {
   const n = ensureLoaded();
   try { installHook(root); } catch { /* 装不上就只恢复名单 */ }
-  return { restored: n, hooked };
+  // ★ 2026-10-13：顺手把 QQ 转发能力也补上 —— 只要 `session_watch` 工具刚把 sender/replyTarget
+  //   注入过（rememberFwd），这里就能立刻补回，**不必等父会话下一次发言**。
+  let fwdFixed = 0;
+  try {
+    for (const [, w] of watching) if (hydrateFwd(w, root, null)) fwdFixed += 1;
+  } catch { /* ignore */ }
+  return { restored: n, hooked, fwdFixed };
 }
 
 /**
@@ -558,6 +586,52 @@ async function routeQuoteBack(root, inboundText) {
   } catch { /* 监听里绝不抛 */ }
 }
 
+/**
+ * ★ 2026-10-13 补：**重启后把 QQ 转发能力补回来**。
+ *
+ * 背景：`fwd`（sender + replyTarget）**不可序列化**（sender 是 live 的 bot 对象），
+ *   所以启动恢复的名单里 `fwd` 只能是 null。现象就是"一个根因、两个症状"：
+ *     · 回灌照常进父会话，但 **不再转发到 QQ**；
+ *     · 群里因此没有那条带「【子会话 xxxx】」行首的转发消息 ⇒ **引用回流也认不到路**（OWNER_RE 匹配不上）。
+ *
+ * 修法：**父会话一发言**（user/message 事件）就把 fwd 补回来 —— sender 取插件的 bot，
+ *   replyTarget 从 session / root 上尽力凑。补上后当场可用；下次重启会再丢，但父会话一说话又补上，
+ *   因此只在"父会话长期静默"时转发会缺，实际影响很小。
+ * @returns {boolean} 是否可用
+ */
+function hydrateFwd(entry, root, session) {
+  try {
+    if (!entry || typeof entry !== 'object') return false;
+    if (entry.fwd?.sender && entry.fwd?.replyTarget) return true;
+    // ★ 2026-10-13：**优先用"扩展工具侧注入"的 sender/replyTarget** —— 工具 env 里一定有这两样
+    //   （`session_watch.mjs` 每次被调用都会把它们挂到 globalThis[FWD_KEY]）。
+    //   实测 `root`（插件根 ctx）上拿不到 sender ⇒ 只靠 root 是补不回来的。
+    const injected = globalThis[FWD_KEY] ?? null;
+    const sender = injected?.sender ?? (root && (root.bot ?? root.sender)) ?? null;
+    const s = session ?? {};
+    const scope = String(s.scope ?? s.peerScope ?? '') || (s.peerId ? 'group' : '');
+    const peerId = String(s.peerId ?? s.peer ?? s.groupOpenid ?? '');
+    const replyTarget =
+      injected?.replyTarget ??
+      s.replyTarget ??
+      (root && (root.replyTarget ?? root.lastReplyTarget)) ??
+      (scope && peerId ? { scope, peerId } : null);
+    if (!sender || !replyTarget) {
+      try {
+        root?.logger?.warn?.(
+          `[ext-hook:session-watch] hydrateFwd 补不上：sender=${!!sender} replyTarget=${!!replyTarget}` +
+          ` injected=${!!injected} rootKeys=[${root ? Object.keys(root).slice(0, 16).join(',') : '-'}]` +
+          ` sessionKeys=[${Object.keys(s).slice(0, 16).join(',')}]`,
+        );
+      } catch { /* ignore */ }
+      return false;
+    }
+    entry.fwd = { sender, replyTarget };
+    try { root?.logger?.info?.('[ext-hook:session-watch] 已补回 QQ 转发能力（sender + replyTarget）'); } catch { /* ignore */ }
+    return true;
+  } catch { return false; }
+}
+
 async function handler(root, session, event) {
   try {
     const sid = String(session?.id ?? session?.sessionId ?? '');
@@ -568,6 +642,9 @@ async function handler(root, session, event) {
     if (type === 'user/message') {
       const pe = parentEntryOf(sid);
       if (pe) {
+        // ★ 2026-10-13：父会话一发言，就把重启后丢失的 QQ 转发能力补回来。
+        //   转发一断，群里就没有带「【子会话 xxxx】」行首的转发消息 ⇒ 引用回流也认不到路。
+        hydrateFwd(pe, root, session);
         const t = textOf(event);
         if (t && OWNER_RE.test(t)) await routeQuoteBack(root, t);
       }

@@ -1,3 +1,29 @@
+## [1.10.2] - 2026-10-13
+
+### 修复 · 重启后「QQ 转发」静默失效（连带引用回流认不到路）
+
+- **根因**：`fwd = { sender, replyTarget }` **不可序列化**（`sender` 是 live 的 bot 对象）⇒ 启动恢复的名单里
+  它只能是 `null` ⇒ `forwardToQq` 首句 `if (!fwd?.sender || !fwd?.replyTarget || !body) return ''` 直接返回。
+  症状是"**一个根因、两个**"：**回灌照常进父会话，但不再转发到 QQ**；而转发一断，群里就没有那条
+  带行首 `【子会话 xxxx】` 的转发消息 ⇒ **引用回流也认不到路**（`OWNER_RE` 匹配不上）。
+- **修法**：① `session_watch` 工具每次被调用时把 `env.sender` / `env.replyTarget` **注入共享位**（`rememberFwd`）
+  —— **工具 env 一定有这两样，而插件根 ctx 上实测拿不到**（这是第一次尝试失败的原因）；
+  ② `hydrateFwd()` **优先读这个共享位**（再退回 root.bot）；③ **`rehydrate()` 顺手对每条盯梢补一次**
+  ⇒ **跑一次 `session_watch action=rehydrate` 就全恢复**（不必重启，也不用等父会话发言）。
+
+### 新增 · `session_watch action=rehydrate`
+
+- 调用它 = **读回落盘名单 + 重装回灌监听器（`installHook`）**，顺带补回 QQ 转发能力。
+- 意义：`tools/lib/*.mjs` 是按 mtime 版本化加载的，**新代码只有在 `installHook()` 被调用时才接管运行中的
+  监听器** —— 此前改完 lib 必须重启宿主才生效，现在 `tools_reload` 后跑一次它即可。
+- 也认 `重载` / `刷新`。
+
+### 文档
+
+- `docs/USER-GUIDE.md`：新增 **「引用回流」** 一节 —— 怎么用（引用那条转发消息即可）、它收到什么载荷、
+  **忙→插话 / 闲→唤醒** 两种处理、只认行首归属短 id 且**当场解析不依赖台账**、
+  **前提是子会话必须活着**（没活着静默跳过），以及用 `session_watch list` 的 `最近被引用` 验证。
+
 ## [1.10.1] - 2026-10-13
 
 ### 文档 · 把 v1.10.0 的能力补进契约与用户手册（v1.10.0 发得急，文档没跟上）
