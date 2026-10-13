@@ -64,6 +64,7 @@
 | **进上下文（静默）** | `await env.appendSilent('...')` | **只落上下文、不唤醒**（详见 §4 安全红线） |
 | 进上下文（唤醒） | `await env.appendWake('...')` | 走正常回合唤醒一轮 AI（耗 token） |
 | 身份 | `env.user.openid/name/isOwner`、`env.owners`、`env.peer.scope/peerId` | |
+| **本会话 id** | `env.peerSessionId` | 本 QQ 会话对应的 **DSH 会话 id**（= `session/event` 里那个 `session.id`）。⚠️ **不是 `agent.id`** —— 跨会话回灌/引用回流判"父会话"用的正是它。v1.10.0 起提供；命令与按钮回调侧都能拿到（回调侧字面同值，直接读即可） |
 | 日志 | `env.log(...)` | 落插件 logger |
 | 内核句柄 | `env.kernel`（工具侧也叫 `env.ctx`） | **全权限"遥控器"**：`ctx.get('服务名')` / `ctx.on(...)` / `ctx.webServer.register(...)`。⚠️ 形状跟随 dsh 版本；`register` 返回的 disposer 要自己收尾 |
 | 宿主自重启 | `await env.restart()` | 复用内置 `/bot-restart`（自动识别启动命令、强补 `--no-open`）。默认**仅主人**可触发；要放开写 `env.restart({ requireOwner: false })` |
