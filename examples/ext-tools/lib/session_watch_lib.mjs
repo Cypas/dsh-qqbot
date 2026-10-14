@@ -56,13 +56,13 @@
  * 版本标记：供调用方打印，用来确认**热刷后加载到的到底是哪一版**。
  * 改动本文件时顺手把这个号 +1（或换日期），排查"改了不生效"时一眼就能看出来。
  */
-export const __LIB_VERSION__ = 'lib-v12-20261012-归属行带会话名/预设/工作区';
+export const __LIB_VERSION__ = 'lib-v13-20261014-通用路由([s:短id] / 【会话 id】)+扫盘解析+会话列表';
 
 // ── ★ 2026-10-13 持久化改造（主人指示：**以本地存档为准，别只靠内存**）──────────────
 //   本文件的风格是"用到时动态 import"；这里用**顶层 await** 一次性取到同步版 fs，
 //   后面的 ensureLoaded()（同步读存档）才能被同步函数（如 listWatching）直接调用。
-const { readFileSync, writeFileSync, mkdirSync } = await import('node:fs');
-const { dirname } = await import('node:path');
+const { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } = await import('node:fs');
+const { dirname, join } = await import('node:path');
 const { fileURLToPath } = await import('node:url');
 
 /**
@@ -297,6 +297,102 @@ export function parseOwner(text) {
  * 短 id → 完整会话 id。**当场查**，不依赖任何持久台账（主人 2026-10-12 明确口径）。
  * 会话注册表的 API 形状随版本变，这里逐种试，全部失败就返回 ''。
  */
+// ── ★ 2026-10-14 主人需求：**通用路由**（正文里带会话 id ⇒ 投递到那个会话）─────────────
+/**
+ * 认两种写法（**不要求行首**，写在句子中间也认）：
+ *   `[s:xxxxxxxx]`       ← 推荐；短 id（uuid 前 8 位）或完整 uuid 都行
+ *   `【会话 xxxxxxxx】`   ← 兼容"直接复制模板再改"
+ *
+ * 与 `routeQuoteBack`（引用回流）的分工：
+ *   · `routeQuoteBack` 只认 `【子会话 xxxx】`，且**必须是已盯梢条目的父会话在说话** —— 语义是"回"；
+ *   · 本组函数认**任意 id**、**不需要绑定**、也不用先盯梢 —— 语义是"去"。
+ */
+const ROUTE_RE = /(?:\[s:|【\s*会话\s*)([0-9a-zA-Z][0-9a-zA-Z-]{2,63})\s*\]?】?/;
+
+/** 从正文里抽路由目标 key（返回 '' = 这不是一条路由消息） */
+export function parseRouteKey(text) {
+  const m = ROUTE_RE.exec(String(text ?? ''));
+  return m ? m[1] : '';
+}
+
+/** 剥掉路由标记 —— 送进目标会话的是"去掉标记后的正文" */
+export function stripRouteMark(text) {
+  return String(text ?? '')
+    .replace(new RegExp(ROUTE_RE.source, 'g'), ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+/** `~/.dsh/sessions` 根目录（Windows 用 USERPROFILE，其余用 HOME） */
+function sessionsRootDir() {
+  const home = String(process.env.USERPROFILE || process.env.HOME || '').trim();
+  return home ? join(home, '.dsh', 'sessions') : '';
+}
+
+/**
+ * **扫盘**把短 id 解析成完整会话 id —— **不依赖对方是否 live**（这是"任何已有会话"的关键）。
+ * 目录形状：`~/.dsh/sessions/<工作区转义名>/<uuid>/`。
+ * @returns {{id: string, workspace: string}} 找不到时 id 为 ''
+ */
+export function findSessionOnDisk(key) {
+  const want = String(key ?? '').toLowerCase().trim();
+  if (!want) return { id: '', workspace: '' };
+  // 已经是完整 uuid ⇒ 直接认
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(want)) {
+    return { id: want, workspace: '' };
+  }
+  if (want.length < 4) return { id: '', workspace: '' };
+  const root = sessionsRootDir();
+  if (!root) return { id: '', workspace: '' };
+  try {
+    for (const ws of readdirSync(root)) {
+      let entries = [];
+      try { entries = readdirSync(join(root, ws)); } catch { continue; }
+      for (const d of entries) {
+        const raw = String(d).toLowerCase();
+        // ⚠️ 会话目录名**可能带前缀**（子会话是 `session-<uuid>`）⇒ 两边都过 shortSessionId 再比，
+        //    否则像 `cf871e99` 这种短 id 会解析失败（本轮实测踩到）。
+        const sh = shortSessionId(String(d)).toLowerCase();
+        if (sh.startsWith(want) || raw.startsWith(want)) return { id: String(d), workspace: String(ws) };
+      }
+    }
+  } catch { /* ignore */ }
+  return { id: '', workspace: '' };
+}
+
+/**
+ * 列会话目录（按 mtime 从新到旧）—— 给「/会话列表」命令用。
+ * @param {string} [workspaceDir] 传了就只列该工作区；不传列全部
+ */
+export function listSessionDirs(workspaceDir) {
+  const root = sessionsRootDir();
+  if (!root) return [];
+  const out = [];
+  const pushWs = (ws) => {
+    const wsDir = join(root, ws);
+    let entries = [];
+    try { entries = readdirSync(wsDir); } catch { return; }
+    for (const d of entries) {
+      const dir = join(wsDir, d);
+      let mtime = 0;
+      try { mtime = statSync(dir).mtimeMs; } catch { /* ignore */ }
+      out.push({ id: String(d), short: shortSessionId(String(d)), workspace: String(ws), mtime });
+    }
+  };
+  try {
+    if (workspaceDir) pushWs(workspaceDir);
+    else for (const ws of readdirSync(root)) pushWs(ws);
+  } catch { /* ignore */ }
+  return out.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+}
+
+/** 列出 `~/.dsh/sessions` 下的工作区转义目录名（给向导第一步用） */
+export function listWorkspaceDirs() {
+  const root = sessionsRootDir();
+  if (!root) return [];
+  try { return readdirSync(root).filter((d) => !String(d).startsWith('.')); } catch { return []; }
+}
+
 export function resolveShortId(root, short) {
   const want = String(short ?? '').toLowerCase();
   if (!want) return '';
@@ -558,6 +654,108 @@ function parentEntryOf(sid) {
  * 主人 2026-10-12 口径：**只靠行首的会话信息判断，不依赖台账**。
  * 短 id → 完整 id 用 resolveShortId 当场查；查不到就静默放弃（绝不猜）。
  */
+/**
+ * ★ 2026-10-14 主人需求：**通用路由** —— 把群里这条消息投递给"正文里点名的那个会话"。
+ *
+ * 流程：解析 key → 找会话（**先 live、后扫盘**）→ 投递（忙 `inject` 插话 / 闲 `followup` 唤醒）。
+ * 与 `routeQuoteBack` 的区别：**不限"已盯梢"、不限"父会话在说话"、认任意 id**。
+ *
+ * ★ 附件（2026-10-14 补）：QQ 里**引用图片/文件**时，图**不在正文里** —— 它在入站事件的
+ *   `attachments`（`{contentType,url,filename,asrText}`，见插件 `transport/inbound.ts`）。
+ *   只取文本会把图丢掉，所以这里额外把附件 URL/语音转写一并拼进载荷。
+ * @returns {Promise<{ok: boolean, reason: string, id?: string, workspace?: string, atts?: number}>}
+ */
+async function routeToSession(root, text, ev) {
+  try {
+    const key = parseRouteKey(text);
+    if (!key) return { ok: false, reason: 'no-key' };
+    const body = stripRouteMark(text);
+    // ① 先问宿主（快，只认 live）
+    let fullId = resolveShortId(root, key);
+    let workspace = '';
+    // ② live 查不到 ⇒ **扫盘**（"任何已有会话"就靠这一步）
+    if (!fullId) {
+      const disk = findSessionOnDisk(key);
+      fullId = disk.id;
+      workspace = disk.workspace;
+    }
+    if (!fullId) return { ok: false, reason: 'not-found', id: key };
+    const agents = (() => { try { return root?.get?.('agents'); } catch { return null; } })();
+    let target = (() => { try { return agents?.get?.(fullId) ?? null; } catch { return null; } })();
+    // ③ 没活着 ⇒ 试着唤醒（宿主 agents.resume；拿不到就算了，绝不硬造 agent）
+    if (!target && agents && typeof agents.resume === 'function') {
+      try { target = await agents.resume(fullId); } catch { /* ignore */ }
+    }
+    if (!target) return { ok: false, reason: 'not-live', id: fullId, workspace };
+    // ④ 附件（图片/文件的 URL、语音转写）—— 引用图片时图就在这里
+    const atts = attachmentsOf(ev);
+    if (!body && !atts.length) return { ok: false, reason: 'empty-body', id: fullId, workspace };
+    const lines = ['【群里有人把这条消息路由给你】'];
+    if (body) lines.push(body);
+    if (atts.length) {
+      lines.push('');
+      lines.push('（随消息一起来的附件：）');
+      for (const a of atts) {
+        const kind = String(a?.contentType ?? '');
+        const url = String(a?.url ?? '');
+        const name = String(a?.filename ?? '');
+        const asr = String(a?.asrText ?? '');
+        const tag = /image/i.test(kind) ? '图片' : (/video/i.test(kind) ? '视频' : (/audio|voice/i.test(kind) ? '语音' : (/file|application/i.test(kind) ? '文件' : '附件')));
+        let line = `- ${tag}`;
+        if (name) line += `：${name}`;
+        if (url) line += `\n  ${url}`;
+        if (asr) line += `\n  （语音转写）${asr}`;
+        lines.push(line);
+      }
+    }
+    lines.push('（这是跨会话路由，按需回应即可。）');
+    const msg = userText(lines.join('\n'));
+    if (!isInjectableMessage(msg)) return { ok: false, reason: 'bad-shape', id: fullId, workspace };
+    const busy = (() => {
+      try {
+        const st = String(target.status ?? target.phase ?? '');
+        return st !== '' && st !== 'idle';
+      } catch { return false; }
+    })();
+    if (busy) await target.inject(msg);
+    else await target.followup(msg);
+    return { ok: true, reason: busy ? 'inject' : 'followup', id: fullId, workspace, atts: atts.length };
+  } catch (e) {
+    return { ok: false, reason: 'error:' + (e instanceof Error ? e.message : String(e)) };
+  }
+}
+
+/**
+ * 从入站事件里挖附件（多路兜底，形状照插件 `transport/inbound.ts` 的 `RawAttachment`）。
+ * 只保留有 url / asrText 的项，避免塞一堆空对象过去。
+ */
+export function attachmentsOf(ev) {
+  const cands = [
+    ev?.data?.message?.attachments,
+    ev?.data?.attachments,
+    ev?.message?.attachments,
+    ev?.attachments,
+  ];
+  for (const c of cands) {
+    if (!Array.isArray(c) || c.length === 0) continue;
+    const out = [];
+    for (const a of c) {
+      if (!a || typeof a !== 'object') continue;
+      const url = String(a.url ?? a.URL ?? '').trim();
+      const asr = String(a.asrText ?? a.asr_text ?? '').trim();
+      if (!url && !asr) continue;
+      out.push({
+        contentType: String(a.contentType ?? a.content_type ?? ''),
+        url,
+        filename: String(a.filename ?? a.fileName ?? ''),
+        asrText: asr,
+      });
+    }
+    if (out.length) return out;
+  }
+  return [];
+}
+
 async function routeQuoteBack(root, inboundText) {
   const short = parseOwner(inboundText);
   if (!short) return;
@@ -640,12 +838,25 @@ async function handler(root, session, event) {
 
     // ── 引用回流：只关心**入站 user 消息**，且只在"某个盯梢对象的父会话"里认 ──
     if (type === 'user/message') {
+      const t = textOf(event);
+      // ★ 2026-10-14：**通用路由优先** —— 正文里出现会话 id（`[s:xxx]` / `【会话 xxx】`）就直接投给
+      //   那个会话。**不限已盯梢、不限是不是父会话**（主人要的"任何已有会话都能被点名"）。
+      if (t && parseRouteKey(t)) {
+        const r = await routeToSession(root, t, event);
+        try {
+          root?.logger?.info?.(
+            `[ext-hook:session-watch] 路由 ${r.ok ? '✅' : '✗'} ${r.reason}` +
+            (r.id ? ` → ${shortSessionId(r.id)}…${r.workspace ? `(${r.workspace})` : ''}` : '') +
+            (r.atts ? ` 附件${r.atts}个` : ''),
+          );
+        } catch { /* ignore */ }
+        return;
+      }
       const pe = parentEntryOf(sid);
       if (pe) {
         // ★ 2026-10-13：父会话一发言，就把重启后丢失的 QQ 转发能力补回来。
         //   转发一断，群里就没有带「【子会话 xxxx】」行首的转发消息 ⇒ 引用回流也认不到路。
         hydrateFwd(pe, root, session);
-        const t = textOf(event);
         if (t && OWNER_RE.test(t)) await routeQuoteBack(root, t);
       }
       return;

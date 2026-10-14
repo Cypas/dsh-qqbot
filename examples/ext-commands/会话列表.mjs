@@ -1,0 +1,603 @@
+/**
+ * 会话列表.mjs — `/会话列表` 斜杠命令（扩展命令第五套）
+ *
+ * ★ 2026-10-14 主人需求（原话）：
+ *   「再做个 /会话列表 的斜杠命令：先列出工作区选项 → 选了以后再列出会话列表选项（一页不要太多）
+ *     → 再列出回灌模式。选择会话后可以**绑定任何已有会话**，不一定要建立的子会话，能钩子勾住并回灌吗？
+ *     选择成功后，往 qq 发送一条消息模板，该模板的开头包含了会话 id，只要用户复制这条模板、
+ *     修改发送就可以将这段话路由到对应会话 —— 这样就可以引用别的内容发送给路由的会话了（比如图片）」
+ *
+ * 所以本命令干三件事：
+ *   ① 三步向导：**工作区 → 该工作区的会话 → 回灌模式**；
+ *   ② 选完**绑上回灌钩子**（`register()` 的 childSessionId 本就认任意会话，不限"建出来的子会话"）；
+ *   ③ 往 QQ 发一条**可复制的模板**，开头带会话 id ⇒ 复制改内容即可路由到那个会话。
+ *
+ * 路由靠 `tools/lib/session_watch_lib.mjs` 的**通用路由**（正文里出现 `[s:短id]` 或 `【会话 id】` 就投递）。
+ *
+ * ⚠️ 从 `/子会话` 抄来的四条硬经验（都踩过）：
+ *   1. `paint()` 里**必须**做三件事：登记插件卡表、**命令侧自写注册表**、`W.set(cardId, st)`。
+ *      （paint 每次换新 cardId，只在 handler/翻页处登记会漏 ⇒ 选完一屏就报"向导已过期"）
+ *   2. 按钮 id **绝不能带冒号**：插件把 button_data 拆成 `ext:<工具名>:<卡id>:<按钮id>`，
+ *      要求**恰好 3 段**，带冒号会 split 出 4 段被静默丢弃（现象：点了只弹"操作成功"）。
+ *   3. 命令侧 `ctx.caps` 有值、**按钮回调的 ctx 是把能力平铺在自身**（没有 caps 键）
+ *      ⇒ 一律写 `ctx?.caps ?? ctx`。
+ *   4. `keyboardOf` / `regCardSelf` 里的**工具名必须与本文件一致**，否则插件查表查不到。
+ */
+const PAGE = 20;                          // 一页 20 个选项（4 行 × 5 列；第 5 行留给导航）
+const LETTERS = 'ABCDEFGHIJKLMNOPQRST';
+const CARD_EXPIRE_MS = 10 * 60_000;
+const MAX_PAGE_MS = 30 * 60_000;
+const TOOL = '会话列表';                   // ★ 必须与文件名/注册名一致
+
+const STEPS = ['workspace', 'session', 'mode'];
+const STEP_CN = {
+  workspace: '工作区',
+  session: '会话',
+  mode: '回灌模式',
+};
+
+/** 向导状态表（cardId → state） */
+const W = new Map();
+let seq = 0;
+
+/** 字符串兜底 */
+function cn(v) { return v === undefined || v === null ? '' : String(v); }
+function short(s, n) { const t = cn(s).replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n) + '…' : t; }
+
+/** 诊断日志（沿用 /子会话 的做法：写死路径，排查"点了没反应"最有用） */
+const DIAG_FILE = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/会话列表-diag.log';
+async function diag(msg) {
+  try {
+    const { appendFile, mkdir } = await import('node:fs/promises');
+    const { dirname } = await import('node:path');
+    await mkdir(dirname(DIAG_FILE), { recursive: true });
+    await appendFile(DIAG_FILE, `${new Date().toISOString()} ${msg}\n`);
+  } catch { /* 诊断失败绝不影响主流程 */ }
+}
+
+/** 扩展数据根（与 /子会话 同口径） */
+function dataRootOf(ctx) {
+  try {
+    const caps = ctx?.caps ?? ctx ?? {};
+    const p = caps?.paths ?? {};
+    const cand = p.dataRoot ?? caps.dataRoot ?? ctx?.dataRoot ?? '';
+    if (cand) return String(cand);
+  } catch { /* ignore */ }
+  return 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot';
+}
+
+/** 命令侧自写卡表（不依赖插件是否注入 registerInteractionCard） */
+async function regCardSelf(ctx, cardId, buttonIds) {
+  const root = dataRootOf(ctx);
+  if (!root) return false;
+  try {
+    const { readFileSync, writeFileSync, mkdirSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const file = join(root, '.qqbot', 'ext-tool-cards.json');
+    let table = { version: 1, cards: [] };
+    try { table = JSON.parse(readFileSync(file, 'utf8')) ?? table; } catch { /* 首次或坏文件 */ }
+    if (!Array.isArray(table.cards)) table.cards = [];
+    const mc = ctx?.message ?? {};
+    const rt = ctx?.replyTarget ?? {};
+    const pe = ctx?.peer ?? {};
+    const scope = cn(rt.scope || ctx?.scope || pe.scope || mc.kind || ((mc.groupOpenid || pe.groupId || pe.peerId) ? 'group' : 'c2c'));
+    const targetId = cn(mc.groupOpenid || rt.targetId || pe.groupId || pe.groupOpenid || pe.peerId || pe.id || mc.senderId);
+    const now = Date.now();
+    table.cards = table.cards.filter((c) => Number(c?.expireAt ?? 0) > now && !(c?.toolName === TOOL && c?.cardId === cardId));
+    table.cards.push({ toolName: TOOL, cardId, buttonIds, scope, targetId, createdAt: now, expireAt: now + CARD_EXPIRE_MS });
+    if (table.cards.length > 200) table.cards = table.cards.slice(-200);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(table, null, 2));
+    return true;
+  } catch { return false; }
+}
+
+/** 发卡（markdown + 按钮键盘）；四级兜底，与 /子会话 同款 */
+async function sendCard(ctx, text, keyboard) {
+  const caps = ctx?.caps ?? ctx ?? {};
+  const mc = ctx?.message ?? {};
+  const rt = ctx?.replyTarget ?? {};
+  const pe = ctx?.peer ?? {};
+  const scope = cn(rt.scope || ctx?.scope || pe.scope || mc.kind || ((mc.groupOpenid || pe.groupId || pe.peerId) ? 'group' : 'c2c'));
+  const gid = cn(mc.groupOpenid || rt.targetId || rt.openid || rt.id || pe.groupId || pe.groupOpenid || (scope === 'group' ? (pe.peerId || pe.id) : '') || '');
+  const uid = cn(mc.senderId || rt.openid || rt.id || pe.openid || pe.userId || '');
+  const api = caps.api;
+  if (keyboard && typeof api === 'function' && (gid || uid)) {
+    const path = gid ? `/v2/groups/${gid}/messages` : `/v2/users/${uid}/messages`;
+    const body = { msg_type: 2, markdown: { content: text }, keyboard, ...(gid ? {} : { content: text }) };
+    try {
+      const r = await api(path, { method: 'POST', body });
+      void diag(`[sendCard] ①api=${JSON.stringify(r ?? null).slice(0, 140)}`);
+      if (r && r.ok !== false) return true;
+    } catch (e) { void diag(`[sendCard] ①抛错=${short(e?.message ?? e, 140)}`); }
+  }
+  try {
+    if (keyboard && typeof caps.markdownCard === 'function') {
+      const r2 = await caps.markdownCard(text, keyboard);
+      if (r2) return true;
+    }
+  } catch { /* ignore */ }
+  try {
+    if (keyboard && typeof ctx?.sender?.sendMarkdownWithKeyboard === 'function') {
+      await ctx.sender.sendMarkdownWithKeyboard(ctx.replyTarget, text, keyboard);
+      return true;
+    }
+  } catch { /* ignore */ }
+  try { if (typeof caps.markdown === 'function' && (await caps.markdown(text))) return true; } catch { /* ignore */ }
+  return false;
+}
+
+/** 按钮（id 不能带冒号） */
+function btn(id, label, style = 1) {
+  return {
+    id,
+    render_data: { label: short(label, 18), visited_label: short(label, 18), style },
+    action: { type: 1, permission: { type: 2 }, data: id, unsupport_tips: '请升级QQ客户端后重试' },
+  };
+}
+
+/** 拼 QQ inline_keyboard；★ 工具名必须是本命令 */
+function keyboardOf(rows, cardId) {
+  return {
+    content: {
+      rows: rows.map((r) => ({ buttons: r.map((b) => ({ ...b, action: { ...b.action, data: `ext:${TOOL}:${cardId}:${b.id}` } })) })),
+    },
+  };
+}
+
+/** 加载回灌库（按 mtime 版本化，改完 lib 热刷即生效） */
+async function loadLib() {
+  const url = new URL(`../tools/lib/session_watch_lib.mjs?v=${Date.now()}`, import.meta.url);
+  return await import(url.href);
+}
+
+/**
+ * 把工作区转义目录名**还原成真实路径**（主人 2026-10-14 要求「显示真实文件夹名字」）。
+ *
+ * 宿主规则（实测推导，见 `~/.dsh/sessions/`）：
+ *   · 整体被 `--` 包起来，首尾各去掉一层；
+ *   · **`-` = 路径分隔符**（`\`）；
+ *   · **`~XXXX` = 一个 UTF-16 码元**（中文/特殊字符都这么转义）；
+ *   · 开头的**单字母 + `-`** 是盘符（如 `D-` ⇒ `D:`）。
+ * 例：`--D-newwenjianjia-aiwork-~9CB8~9C7C~5A18--` ⇒ `D:\newwenjianjia\aiwork\鲸鱼娘`
+ *
+ * ⚠️ 已知不可逆点：原路径里若本来就有 `-`，会被同样当成分隔符（宿主转义时没有区分手段）。
+ */
+function wsPath(dir) {
+  const t = cn(dir).replace(/^--/, '').replace(/--$/, '');
+  const parts = [];
+  let cur = '';
+  let i = 0;
+  while (i < t.length) {
+    const ch = t[i];
+    if (ch === '-') { parts.push(cur); cur = ''; i += 1; continue; }
+    const m = /^~([0-9A-Fa-f]{4})/.exec(t.slice(i, i + 5));
+    if (m) { cur += String.fromCharCode(parseInt(m[1], 16)); i += 5; continue; }
+    cur += ch;
+    i += 1;
+  }
+  parts.push(cur);
+  const segs = parts.filter((p) => p !== '');
+  if (segs.length && /^[A-Za-z]$/.test(segs[0])) segs[0] = `${segs[0]}:`;
+  return segs.join('\\');
+}
+
+/** 卡片上显示用：太长时保留**尾部**（尾部才是能分辨的那几级） */
+function wsDisplay(dir, max = 52) {
+  const full = wsPath(dir);
+  if (full.length <= max) return full;
+  return '…' + full.slice(-(max - 1));
+}
+
+// ── 候选值：**优先问宿主服务**（工作区=会话的 cwd，会话=sessionPersistence.list()，
+//    标题=sessionTitle.get()），拿不到才回退扫盘。主人 2026-10-14 定：
+//    「一定要解析会话吗？不能从 web 界面里拿吗？就像会话排序一样」。──────
+
+const OPT_CACHE = new Map();
+const OPT_TTL_MS = 60 * 1000;         // 候选缓存：60 秒（新会话能及时冒出来）
+const TTL_CACHE = new Map();          // 标题缓存（带时间戳，5 分钟过期）
+const TITLE_TTL_MS = 5 * 60 * 1000;
+let KERNEL = null;
+const CTX_CACHE = { sender: null, replyTarget: null, agentId: '', sessionId: '' };
+
+/** 取宿主服务容器（cordis ctx）：handler 里缓存过就直接用，否则依次看 caps.kernel / kernel */
+function kernelOf(ctx) {
+  if (KERNEL) return KERNEL;
+  const c = ctx ?? {};
+  for (const v of [c?.caps?.kernel, c?.kernel]) if (v) return v;
+  return null;
+}
+
+/**
+ * 从容器里取服务：`kernel.get(name)` 是主路。
+ *
+ * ⚠️ 踩过的坑（2026-10-14 实测报错 `cannot get property "ctx" without inject`）：
+ *   cordis Context 上的 `ctx` / `caps` 等属性是 **getter**，未 inject 时**读取即抛**。
+ *   所以**绝不能**把它们放进数组字面量里"顺手取一下" —— 必须逐个包 try。
+ */
+function svcOf(ctx, name) {
+  const k = kernelOf(ctx);
+  if (!k) return null;
+  try {
+    if (typeof k.get === 'function') {
+      const v = k.get(name);
+      if (v) return v;
+    }
+  } catch { /* ignore */ }
+  for (const key of ['root', 'ctx', 'caps']) {
+    try {
+      const c = k[key];
+      if (!c) continue;
+      const v = typeof c.get === 'function' ? c.get(name) : c[name];
+      if (v) return v;
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/** 会话 id 归一：宿主持久化里带 `session-` 前缀，实时 agent id 不带 —— 两种都留一手 */
+function bareId(id) { const s = cn(id); return s.startsWith('session-') ? s.slice('session-'.length) : s; }
+function fullId(id) { const s = cn(id); return s.startsWith('session-') ? s : `session-${s}`; }
+
+/**
+ * 宿主里**全部**会话（含已结束的）。返回 [{id, cwd, createdAt, sizeBytes}]；
+ * 拿不到服务时返回 null，调用方回退扫盘。
+ */
+async function listAllSessions(ctx) {
+  const sp = svcOf(ctx, 'sessionPersistence');
+  if (!sp || typeof sp.list !== 'function') {
+    void diag(`[svc] 拿不到 sessionPersistence（kernel=${!!kernelOf(ctx)} sp=${!!sp}）`);
+    return null;
+  }
+  try {
+    const r = await sp.list();
+    const arr = Array.isArray(r) ? r : (r && typeof r === 'object' ? Object.values(r) : []);
+    const out = arr.map((it) => {
+      const h = it?.header ?? {};
+      return {
+        id: cn(h.id ?? it?.sessionId ?? it?.id),
+        cwd: cn(h.cwd ?? it?.cwd),
+        createdAt: Number(h.createdAt ?? it?.createdAt ?? 0) || 0,
+        sizeBytes: Number(it?.sizeBytes ?? 0) || 0,
+      };
+    }).filter((x) => x.id);
+    if (out.length === 0) return null;
+    return out;
+  } catch (e) {
+    void diag(`[svc] sessionPersistence.list 抛错=${short(e?.message ?? e, 160)}`);
+    return null;
+  }
+}
+
+/**
+ * live（正在跑）会话表：bare id → {title, cwd}。
+ *
+ * ★ 标题的唯一可靠来源（2026-10-14 实测定案）：
+ *   `sessions.list()` 每一项的 `log`（内存事件数组）里，**最后一个 `session/title` 事件的
+ *   `data.title`**。实测 14 个 live 会话全部取到标题（"做早饭会话问候""早饭群"…）。
+ *
+ * ⚠️ 两条死路（别再试）：
+ *   ① `sessionTitle.get(id)` 在本版宿主**是坏的** —— 抛 `session.snapshotEvents is not a function`；
+ *   ② `sessionPersistence.list()` 的 `header` 里**根本没有 title 字段**
+ *      （只有 version/id/createdAt/cwd/isSeeded/delegationDepth/agentPreset）。
+ *   ⇒ 已结束（非 live）的会话**拿不到标题**，只能显示短 id + 创建时间。
+ */
+async function liveMap(ctx) {
+  const hit = TTL_CACHE.get('live');
+  if (hit && Date.now() - hit.at < 15 * 1000) return hit.v;
+  const out = new Map();
+  const ss = svcOf(ctx, 'sessions');
+  if (ss && typeof ss.list === 'function') {
+    try {
+      const r = await ss.list();
+      const arr = Array.isArray(r) ? r : (r && typeof r === 'object' ? Object.values(r) : []);
+      for (const o of arr) {
+        const id = bareId(o?.id ?? o?.sessionId ?? '');
+        if (!id) continue;
+        let title = '';
+        const lg = o?.log;
+        if (Array.isArray(lg)) {
+          for (let i = lg.length - 1; i >= 0; i--) {
+            if (String(lg[i]?.type ?? '') === 'session/title') {
+              const t = lg[i]?.data?.title;
+              if (typeof t === 'string' && t) { title = t; break; }
+            }
+          }
+        }
+        out.set(id, { title, cwd: cn(o?.header?.cwd ?? '') });
+      }
+    } catch (e) { void diag(`[svc] sessions.list 抛错=${short(e?.message ?? e, 160)}`); }
+  }
+  TTL_CACHE.set('live', { at: Date.now(), v: out });
+  return out;
+}
+
+/** 会话数 / 工作区数 摘要（卡片顶部显示，让人一眼知道规模） */
+let LAST_SCOPE = '';
+
+async function optionsOf(ctx, step, st) {
+  const key = step === 'session' ? `session::${st.picked.workspace?.value ?? ''}` : step;
+  const hit = OPT_CACHE.get(key);
+  if (hit && Date.now() - hit.at < OPT_TTL_MS) return hit.v;
+  const out = await optionsOfRaw(ctx, step, st);
+  if (Array.isArray(out) && out.length > 0) OPT_CACHE.set(key, { at: Date.now(), v: out });
+  return out;
+}
+
+async function optionsOfRaw(ctx, step, st) {
+  try {
+    const lib = await loadLib();
+    if (step === 'workspace') {
+      const all = await listAllSessions(ctx);
+      if (all) {
+        const cnt = new Map();
+        for (const s of all) if (s.cwd) cnt.set(s.cwd, (cnt.get(s.cwd) ?? 0) + 1);
+        const list = [...cnt.entries()].sort((a, b) => b[1] - a[1]);
+        LAST_SCOPE = `宿主 ${all.length} 个会话 / ${list.length} 个工作区`;
+        void diag(`[opts] workspace 走宿主：${LAST_SCOPE}`);
+        return list.map(([cwd, n]) => ({ value: cwd, label: `${wsDisplay(cwd)}  · ${n} 个` }));
+      }
+      const dirs = lib.listWorkspaceDirs();
+      LAST_SCOPE = `扫盘 ${dirs.length} 个工作区（宿主服务不可用）`;
+      void diag(`[opts] workspace 回退扫盘：${dirs.length} 个`);
+      return dirs.map((d) => ({ value: d, label: wsDisplay(wsPath(d)) }));
+    }
+    if (step === 'session') {
+      const ws = st.picked.workspace?.value ?? '';
+      const live = await liveMap(ctx);
+      const all = await listAllSessions(ctx);
+      if (all) {
+        const seen = new Set();
+        const mine = all.filter((s) => {
+          const b = bareId(s.id);
+          if (seen.has(b)) return false;
+          seen.add(b);
+          return !ws || s.cwd === ws;
+        });
+        // 排序：**能叫出名字的（live 有标题）排最前** → 再按创建时间新在前。
+        // 理由：已结束的会话宿主里没有标题（见 liveMap 注释），只能靠时间认。
+        const score = (s) => (live.get(bareId(s.id))?.title ? 1 : 0);
+        mine.sort((a, b) => (score(b) - score(a)) || (b.createdAt - a.createdAt));
+        const shown = mine.slice(0, 80);
+        const named = mine.filter((s) => live.get(bareId(s.id))?.title).length;
+        LAST_SCOPE = `${mine.length} 个会话（${named} 个在线有名）`;
+        void diag(`[opts] session 走宿主 ws=${ws} 命中 ${mine.length}，有名 ${named}，取前 ${shown.length}`);
+        return shown.map((s) => {
+          const info = live.get(bareId(s.id));
+          const t = info?.title ?? '';
+          const when = s.createdAt
+            ? new Date(s.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+            : '—';
+          const tag = info ? '🟢' : '⚪';
+          const id8 = bareId(s.id).slice(0, 8);
+          const head = t ? short(t, 24) : id8;
+          return { value: s.id, label: `${tag} ${head}${t ? ` · ${id8}` : ''} · ${when}` };
+        });
+      }
+      const dirs = lib.listSessionDirs(ws || undefined);
+      void diag(`[opts] session 回退扫盘 ws=${ws} 得到 ${dirs.length} 个`);
+      return dirs.map((s) => {
+        const when = s.mtime ? new Date(s.mtime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+        const isSub = s.id.startsWith('session-') ? '子会话 ' : '';
+        return { value: s.id, label: `${s.short}  ${isSub}${when}` };
+      });
+    }
+    if (step === 'mode') {
+      return [
+        { value: 1, label: '一档 · 末段回灌 + 转发到 QQ（默认）' },
+        { value: 2, label: '二档 · 全部正文 + 报错 只转 QQ（不进父上下文）' },
+        { value: 3, label: '三档 · 进父上下文但不唤醒 + 转 QQ' },
+      ];
+    }
+  } catch (e) { void diag(`[opts] ${step} 抛错=${short(e?.message ?? e, 160)}`); }
+  return [];
+}
+
+// ── 卡片渲染 ────────────────────────────────────────────────────────────
+
+function cardText(st) {
+  const L = [];
+  L.push(`### 🗂 会话列表 · 第 ${st.stepIdx + 1}/${STEPS.length} 步：${STEP_CN[st.step]}`);
+  L.push('');
+  for (const k of STEPS) {
+    const v = st.picked[k];
+    if (k === 'session') {
+      L.push(`- ${STEP_CN[k]}：${v ? `${short(v.label, 40)}（${short(v.value, 20)}）` : '（待选）'}`);
+    } else {
+      L.push(`- ${STEP_CN[k]}：${v ? v.label : '（待选）'}`);
+    }
+  }
+  L.push('');
+  if (LAST_SCOPE && st.step !== 'mode') L.push(`> ${LAST_SCOPE}`);
+  if (st.step === 'session') L.push('> 🟢=正在跑　⚪=已休眠（都能绑，休眠的会被唤醒）');
+  L.push('');
+  if (st.error) L.push(`⚠️ ${st.error}`, '');
+  const opts = st.options;
+  if (!opts.length) {
+    L.push('这一步没扫到候选 —— 换个工作区试试，或直接说一声让本鲸手工绑。');
+  } else {
+    const total = Math.max(1, Math.ceil(opts.length / PAGE));
+    L.push(`第 ${st.page + 1}/${total} 页（点字母选中）：`);
+    for (let i = 0; i < PAGE; i++) {
+      const idx = st.page * PAGE + i;
+      if (idx >= opts.length) break;
+      L.push(`**${LETTERS[i]}**. ${short(opts[idx].label, 46)}`);
+    }
+  }
+  return L.join('\n');
+}
+
+function cardKeyboard(st) {
+  const rows = [];
+  const opts = st.options;
+  const start = st.page * PAGE;
+  const cur = opts.slice(start, start + PAGE);
+  for (let r = 0; r * 5 < cur.length && r < 4; r++) {
+    const row = [];
+    for (let c = 0; c < 5; c++) {
+      const i = r * 5 + c;
+      if (i >= cur.length) break;
+      row.push(btn(`p${start + i}`, LETTERS[i]));
+    }
+    if (row.length) rows.push(row);
+  }
+  const nav = [];
+  if (st.page > 0) nav.push(btn('prev', '◀ 上一页', 1));
+  if (start + PAGE < opts.length) nav.push(btn('next', '下一页 ▶', 1));
+  rows.push(nav.length ? nav : [btn('noop', '·', 1)]);
+  rows.push([btn('cancel', '取消', 4)]);
+  return keyboardOf(rows, st.cardId);
+}
+
+/** 发/重发当前步骤的卡（★ 三件事全在这里做） */
+async function paint(ctx, st) {
+  st.options = await optionsOf(ctx, st.step, st);
+  if (st.page * PAGE >= st.options.length) st.page = Math.max(0, Math.ceil(st.options.length / PAGE) - 1);
+  st.cardId = `${TOOL}-${++seq}-${Date.now().toString(36)}`;
+  const kb = cardKeyboard(st);
+  const ok = await sendCard(ctx, cardText(st), kb);
+  const caps = ctx?.caps ?? ctx ?? {};
+  const allIds = [...st.options.map((_, i) => `p${i}`), 'prev', 'next', 'cancel', 'noop'];
+  try {
+    if (typeof caps.registerInteractionCard === 'function') {
+      caps.registerInteractionCard({ cardId: st.cardId, buttonIds: allIds, expireAt: Date.now() + CARD_EXPIRE_MS });
+    }
+  } catch { /* ignore */ }
+  try { await regCardSelf(ctx, st.cardId, allIds); } catch { /* ignore */ }
+  W.set(st.cardId, st);
+  if (W.size > 30) {
+    for (const k of [...W.keys()].slice(0, W.size - 30)) if (k !== st.cardId) W.delete(k);
+  }
+  void diag(`[paint] step=${st.step} page=${st.page} 选项=${st.options.length} 发出=${ok ? 'ok' : 'FAIL'} 表=${W.size}`);
+  if (!ok) st.error = '卡片没发出去（当前环境可能不支持富文本卡片）';
+  return ok;
+}
+
+/**
+ * 全部选完 → **绑上回灌钩子** + **发可复制模板**。
+ * 「绑定任何已有会话」这件事本身不需要新能力：`register()` 的 childSessionId 就是"任意会话 id"。
+ */
+async function bindNow(ctx, st) {
+  const lib = await loadLib();
+  const root = KERNEL ?? ctx?.caps?.kernel ?? ctx?.kernel ?? null;
+  const sess = st.picked.session ?? {};
+  const ws = st.picked.workspace?.value ?? '';
+  const mode = Number(st.picked.mode?.value ?? 1);
+  const parentId = CTX_CACHE.agentId || CTX_CACHE.sessionId || '';
+  void diag(`[bind] root=${!!root} parent=${parentId || '-'} child=${short(sess.value, 40)} mode=${mode}`);
+
+  if (!root || typeof root.on !== 'function') {
+    return { text: `⚠️ 拿不到宿主 ctx（需要权限包里的 kernel），这次没绑上。\n会话 id：\`${short(sess.value, 40)}\`` };
+  }
+  let result = '未挂（未知原因）';
+  try {
+    result = await lib.register(root, {
+      parentAgentId: parentId,
+      childSessionId: sess.value,
+      label: short(sess.label, 40),
+      mode,
+      sender: CTX_CACHE.sender,
+      replyTarget: CTX_CACHE.replyTarget,
+      name: short(sess.label, 40),
+      workspace: wsPath(ws),
+    });
+  } catch (e) {
+    result = '绑定抛错：' + short(e?.message ?? e, 120);
+  }
+
+  const sid = sess.value.startsWith('session-') ? sess.value.slice('session-'.length) : sess.value;
+  const key = sid.slice(0, 8);
+  const modeCn = mode === 2 ? '二档' : (mode === 3 ? '三档' : '一档');
+  const L = [];
+  L.push('### ✅ 已选定');
+  L.push('');
+  L.push(`- 会话：\`${short(sess.value, 44)}\``);
+  L.push(`- 工作区：${wsPath(ws)}`);
+  L.push(`- 回灌：**${modeCn}** · ${short(result, 60)}`);
+  L.push('');
+  L.push('**复制下面这行**，把文字改成你要发的内容就能路由给它（图片/引用也可以一起发）：');
+  L.push('');
+  L.push(`\`[s:${key}]\` 在这里写你要发给这个会话的内容`);
+  L.push('');
+  L.push('> 直接发这句就行；本鲸会把标记剥掉、把内容投递进那个会话。');
+  return { text: L.join('\n') };
+}
+
+/** 推进到下一步（或收尾） */
+async function advance(ctx, st) {
+  while (st.stepIdx < STEPS.length && st.picked[STEPS[st.stepIdx]]) st.stepIdx += 1;
+  if (st.stepIdx >= STEPS.length) {
+    W.delete(st.cardId);
+    const r = await bindNow(ctx, st);
+    try { const caps = ctx?.caps ?? ctx ?? {}; if (typeof caps.markdown === 'function') { await caps.markdown(r.text); return ''; } } catch { /* ignore */ }
+    return r.text;
+  }
+  st.step = STEPS[st.stepIdx];
+  st.page = 0;
+  st.error = '';
+  await paint(ctx, st);
+  return '';
+}
+
+export default {
+  name: ['会话列表', 'sessionlist', 'sessions'],  description: '三步向导（工作区 → 该区会话 → 回灌模式）绑定任意已有会话，并给出可复制的路由模板',
+  usage: '/会话列表',
+
+  async handler(ctx) {
+    KERNEL = ctx?.caps?.kernel ?? ctx?.kernel ?? KERNEL;
+    CTX_CACHE.sender = ctx?.sender ?? ctx?.caps?.sender ?? CTX_CACHE.sender;
+    CTX_CACHE.replyTarget = ctx?.replyTarget ?? ctx?.caps?.replyTarget ?? CTX_CACHE.replyTarget;
+    try {
+      const caps = ctx?.caps ?? {};
+      const psid = String(caps.peerSessionId ?? '');
+      if (psid) { CTX_CACHE.agentId = psid; CTX_CACHE.sessionId = psid; }
+      if (!CTX_CACHE.sender) CTX_CACHE.sender = ctx?.bot ?? caps.sender ?? null;
+      void diag(`[handler] kernel=${!!KERNEL} sender=${!!CTX_CACHE.sender} rt=${!!CTX_CACHE.replyTarget} peerSessionId=${psid || '-'}`);
+    } catch { /* ignore */ }
+
+    const st = {
+      picked: {},
+      stepIdx: 0,
+      step: STEPS[0],
+      page: 0,
+      options: [],
+      cardId: '',
+      error: '',
+    };
+    W.set('pending', st);
+    await paint(ctx, st);
+    W.delete('pending');
+    W.set(st.cardId, st);
+    return '';
+  },
+
+  async onInteraction(ctx, info) {
+    const cardId = cn(info?.cardId);
+    const bid = cn(info?.buttonId);
+    const st = W.get(cardId);
+    void diag(`[onInteraction] card=${cardId} btn=${bid} 命中=${!!st} keys=[${[...W.keys()].join(',')}]`);
+    if (!st) return '这个向导已经过期了，重新发一次 /会话列表 吧～';
+    if (st.startedAt && Date.now() - st.startedAt > MAX_PAGE_MS) { W.delete(cardId); return '向导放太久了，重新发一次吧～'; }
+    st.startedAt = st.startedAt ?? Date.now();
+
+    if (bid === 'cancel') { W.delete(cardId); return '已取消，没有绑定任何会话。'; }
+    if (bid === 'noop') return '';
+    if (bid === 'prev' || bid === 'next') {
+      st.page = Math.max(0, st.page + (bid === 'next' ? 1 : -1));
+      const ok = await paint(ctx, st);
+      W.delete(cardId);
+      W.set(st.cardId, st);
+      return ok ? `已翻到第 ${st.page + 1} 页 ✅（新卡片在上面）` : `翻页失败（第 ${st.page + 1} 页）`;
+    }
+    if (/^p\d+$/.test(bid)) {
+      const idx = Number(bid.slice(1));
+      const opt = st.options[idx];
+      if (!opt) return '这个选项没了，翻一页再选～';
+      st.picked[st.step] = opt;
+      st.stepIdx += 1;
+      const done = await advance(ctx, st);
+      return done || '';
+    }
+    return '';
+  },
+};
