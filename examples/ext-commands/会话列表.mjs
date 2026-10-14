@@ -30,8 +30,25 @@
  *      一律走 **`globalThis` 符号槽（`publishShared`/`adoptShared`）+ 磁盘（`saveState`/`loadState`）**，
  *      模块变量只当本地缓存。
  */
-const PAGE = 20;                          // 一页 20 个选项（4 行 × 5 列；第 5 行留给导航）
-const LETTERS = 'ABCDEFGHIJKLMNOPQRST';
+/**
+ * ★★ 一页几个选项 = 由 **QQ 内联键盘的硬上限**倒推出来的，不是随便定的（2026-10-14 真机踩中）
+ *
+ * QQ 官方对内联键盘的限制：**总行数 ≤ 5**、每行 ≤ 5 个按钮。
+ * 超了会被直接拒绝，原话见诊断日志：
+ *   `HTTP 400: {"message":"请求错误，内联键盘行/列超限","code":40034029}`
+ * 更坑的是：tier① 被拒后会**静默退化成纯文本兜底** —— 现象就是主人反馈的
+ * 「文字发出来了，按钮选项消失」。
+ *
+ * 所以布局固定为 **5 行**：
+ *   第 1~3 行 = 选项（**一页最多 15 个**）
+ *   第 4 行   = 翻页（◀ 上一页 / 下一页 ▶），没得翻时放一个占位按钮
+ *   第 5 行   = 取消
+ * （2026-10-14 之前是 PAGE=20 ⇒ 4 行选项 + 2 行尾巴 = **6 行** ⇒ 必然被拒。）
+ */
+const PAGE = 15;
+const OPT_ROWS = 3;                       // 选项最多 3 行（3×5 = 15）
+const MAX_KB_ROWS = 5;                    // QQ 内联键盘总行数硬上限
+const LETTERS = 'ABCDEFGHIJKLMNO';        // 15 个
 const CARD_EXPIRE_MS = 10 * 60_000;
 const MAX_PAGE_MS = 30 * 60_000;
 const TOOL = '会话列表';                   // ★ 必须与文件名/注册名一致
@@ -174,7 +191,11 @@ async function regCardSelf(ctx, cardId, buttonIds) {
   } catch { return false; }
 }
 
-/** 发卡（markdown + 按钮键盘）；四级兜底，与 /子会话 同款 */
+/** 发卡（markdown + 按钮键盘）；四级兜底，与 /子会话 同款。
+ *  ★ 返回值要说实话（2026-10-14 修）：`'kb'`=带按钮发出去了 / `'text'`=**退化成纯文本**（按钮没了）
+ *  / `'fail'`=什么都没发出去。之前只会返回 true/false，**退化被当成成功**，
+ *  于是"文字出来了、按钮消失"这种事故在日志里显示 `发出=ok`，白排查半天。 */
+let LAST_SEND_ERR = '';
 async function sendCard(ctx, text, keyboard) {
   const caps = ctx?.caps ?? ctx ?? {};
   const mc = ctx?.message ?? {};
@@ -189,24 +210,25 @@ async function sendCard(ctx, text, keyboard) {
     const body = { msg_type: 2, markdown: { content: text }, keyboard, ...(gid ? {} : { content: text }) };
     try {
       const r = await api(path, { method: 'POST', body });
-      void diag(`[sendCard] ①api=${JSON.stringify(r ?? null).slice(0, 140)}`);
-      if (r && r.ok !== false) return true;
-    } catch (e) { void diag(`[sendCard] ①抛错=${short(e?.message ?? e, 140)}`); }
+      void diag(`[sendCard] ①api=${JSON.stringify(r ?? null).slice(0, 200)}`);
+      if (r && r.ok !== false) { LAST_SEND_ERR = ''; return 'kb'; }
+      LAST_SEND_ERR = cn(r?.err?.human ?? r?.err?.message ?? r?.err?.code ?? 'ok=false');
+    } catch (e) { LAST_SEND_ERR = cn(e?.message ?? e); void diag(`[sendCard] ①抛错=${short(e?.message ?? e, 200)}`); }
   }
   try {
     if (keyboard && typeof caps.markdownCard === 'function') {
       const r2 = await caps.markdownCard(text, keyboard);
-      if (r2) return true;
+      if (r2) return 'kb';
     }
   } catch { /* ignore */ }
   try {
     if (keyboard && typeof ctx?.sender?.sendMarkdownWithKeyboard === 'function') {
       await ctx.sender.sendMarkdownWithKeyboard(ctx.replyTarget, text, keyboard);
-      return true;
+      return 'kb';
     }
   } catch { /* ignore */ }
-  try { if (typeof caps.markdown === 'function' && (await caps.markdown(text))) return true; } catch { /* ignore */ }
-  return false;
+  try { if (typeof caps.markdown === 'function' && (await caps.markdown(text))) return 'text'; } catch { /* ignore */ }
+  return 'fail';
 }
 
 /** 按钮（id 不能带冒号） */
@@ -514,7 +536,7 @@ function cardKeyboard(st) {
   const opts = st.options;
   const start = st.page * PAGE;
   const cur = opts.slice(start, start + PAGE);
-  for (let r = 0; r * 5 < cur.length && r < 4; r++) {
+  for (let r = 0; r * 5 < cur.length && r < OPT_ROWS; r++) {
     const row = [];
     for (let c = 0; c < 5; c++) {
       const i = r * 5 + c;
@@ -528,6 +550,8 @@ function cardKeyboard(st) {
   if (start + PAGE < opts.length) nav.push(btn('next', '下一页 ▶', 1));
   rows.push(nav.length ? nav : [btn('noop', '·', 1)]);
   rows.push([btn('cancel', '取消', 4)]);
+  // ★ 保底：QQ 只收 ≤5 行；真超了就砍尾巴（正常布局下正好 5 行，走不到这里）
+  while (rows.length > MAX_KB_ROWS) rows.splice(rows.length - 2, 1);
   return keyboardOf(rows, st.cardId);
 }
 
@@ -535,9 +559,11 @@ function cardKeyboard(st) {
 async function paint(ctx, st) {
   st.options = await optionsOf(ctx, st.step, st);
   if (st.page * PAGE >= st.options.length) st.page = Math.max(0, Math.ceil(st.options.length / PAGE) - 1);
+  st.error = '';
   st.cardId = `${TOOL}-${++seq}-${Date.now().toString(36)}`;
   const kb = cardKeyboard(st);
-  const ok = await sendCard(ctx, cardText(st), kb);
+  const mode = await sendCard(ctx, cardText(st), kb);
+  const ok = mode === 'kb';
   const caps = ctx?.caps ?? ctx ?? {};
   const allIds = [...st.options.map((_, i) => `p${i}`), 'prev', 'next', 'cancel', 'noop'];
   try {
@@ -552,8 +578,12 @@ async function paint(ctx, st) {
   }
   publishShared({ dataRoot: dataRootOf(ctx) });
   try { await saveState(ctx, st.cardId, st); } catch { /* ignore */ }   // ★ 落盘：回调侧可能是**另一个模块实例**
-  void diag(`[paint] step=${st.step} page=${st.page} 选项=${st.options.length} 发出=${ok ? 'ok' : 'FAIL'} 表=${W.size}`);
-  if (!ok) st.error = '卡片没发出去（当前环境可能不支持富文本卡片）';
+  void diag(`[paint] step=${st.step} page=${st.page} 选项=${st.options.length} 发出=${mode}${LAST_SEND_ERR ? ' err=' + short(LAST_SEND_ERR, 80) : ''} 表=${W.size}`);
+  if (mode !== 'kb') {
+    st.error = mode === 'text'
+      ? `按钮没发出去（QQ 拒了键盘：${short(LAST_SEND_ERR, 50) || '未知'}），这一步只能纯文本显示`
+      : '卡片完全没发出去（当前环境可能不支持富文本卡片）';
+  }
   return ok;
 }
 

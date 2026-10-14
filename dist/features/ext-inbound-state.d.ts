@@ -85,7 +85,7 @@ export interface ExtAuditEntry {
     reason?: string;
     /** 文本摘要（**截断**） */
     text?: string;
-    /** ok | refused-owner | refused-breaker | refused-invalid ... */
+    /** ok | ok-owner-ack（主人消息经 ownerAck 显式放行被消灭）| refused-owner | refused-breaker | refused-invalid ... */
     result?: string;
 }
 /**

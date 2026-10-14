@@ -518,7 +518,7 @@ const OWNER = 'OWNER_OPENID_0001';
 
 /** 动作 API 的形状（挂在 ctx 上的那些；测试里用窄类型读，避免依赖 SDK 的扩展声明） */
 interface ExtCtx {
-  annihilate(o?: { reason?: string }): boolean;
+  annihilate(o?: { reason?: string; ownerAck?: boolean }): boolean;
   rewrite(o?: { text?: string; reason?: string }): boolean;
   forceWake(o?: { reason?: string }): boolean;
   decide(o?: { mention?: string; reason?: string }): boolean;
@@ -949,6 +949,23 @@ describe('入站扩展·白名单（owner 永不可被消灭）', () => {
     expect((ctx.state as Record<string, unknown>).killOk).toBe(true);
     expect(final).toBe(0);
     expect(hist).toEqual([]);
+  });
+
+  it('★ ownerAck：扩展显式声明"内容已另行处置" ⇒ 允许消灭主人的消息，审计记 ok-owner-ack', async () => {
+    const exts = [asBoth('own-ack.mjs', async (c, n) => {
+      (c.state as Record<string, unknown>).killOk = X(c).annihilate({
+        reason: '二档路由隔绝：已经投递到目标会话',
+        ownerAck: true,
+      });
+      return n();
+    })];
+    const { ctx, final, hist, lines } = await runFullChain(exts, groupMsg({ senderId: OWNER, content: '主人的路由消息' }));
+    expect((ctx.state as Record<string, unknown>).killOk).toBe(true);   // ★ 这次真的消灭了
+    expect(final).toBe(0);              // 链停在这里（不调 next 也到不了终局）
+    expect(hist).toEqual([]);           // ★ 不进群历史
+    expect(lines.some((l) => l.includes('ownerAck 生效'))).toBe(true);  // 有迹可循的告警
+    const audit = readAudit(dataRoot).map((l) => JSON.parse(l) as { action: string; result?: string });
+    expect(audit.some((a) => a.action === 'annihilate' && a.result === 'ok-owner-ack')).toBe(true);
   });
 
   it('主人消息：扩展只调 annihilate、又没调 next() ⇒ **引擎替它放行**（白名单不是纸面承诺）', async () => {

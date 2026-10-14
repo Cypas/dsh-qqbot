@@ -179,6 +179,19 @@ function quotedOf(ctx) {
 function annihilate(ctx, s, opts) {
     try {
         const reason = typeof opts?.reason === 'string' ? opts.reason : undefined;
+        /**
+         * ★ 2026-10-14 新增：**`ownerAck`**（主人定："那就把主人的消息也消灭"）。
+         *
+         * 背景：白名单写着"主人的消息永不可被消灭"，下面第 ② 条会直接 `return false` ——
+         * 这很对，但有一类是**主人自己的意图**：比如"二档路由隔绝"（带 `[s:xxx]` 的消息已经被
+         * 扩展投递到别的会话、明确要求不要再留在本会话上下文里）。那时扩展可传 `ownerAck: true`
+         * 声明"我已经把它送走了"，本函数就放行这一次。
+         *
+         * 三条纪律：① 只在"确实另行投递过"时用，否则主人的话凭空消失；
+         *          ② 用了**一定落审计** `ok-owner-ack`，事后可查；
+         *          ③ 只解开**这一条**的白名单，熔断等其它保护一律照旧。
+         */
+        const ownerAck = opts?.ownerAck === true;
         // ① 挂点检查：晚挂点已经记过群历史了，"消灭=不进历史"在那一步做不到
         if (s.phase !== 'inbound') {
             warn(s, 'annihilate 只在早挂点 onInbound 有效（晚挂点 already 记过群历史；想拦掉这条就直接不调 next()）');
@@ -188,11 +201,16 @@ function annihilate(ctx, s, opts) {
         }
         // ② 白名单最高优先：主人永不可被消灭
         const sender = senderOf(ctx);
-        if (ownerOf(s, sender)) {
+        const senderIsOwner = ownerOf(s, sender);
+        if (senderIsOwner && !ownerAck) {
             warn(s, `拒绝消灭：发送者 ${sender} 在主人口令白名单里（白名单最高优先，本条照常放行）`);
             audit(s, { action: 'annihilate', target: sender, reason, result: 'refused-owner' });
             s.annihilateRefused = { reason: '发送者是主人（白名单最高优先）' };
             return false;
+        }
+        if (senderIsOwner && ownerAck) {
+            warn(s, 'ownerAck 生效：主人的消息被消灭（' + (reason ?? '未给原因')
+                + '）—— 扩展已声明「内容已另行处置」');
         }
         // ③ 熔断
         const gate = checkDestructiveAllowed(s.current?.file ?? '');
@@ -205,7 +223,7 @@ function annihilate(ctx, s, opts) {
         s.annihilate = reason ? { reason } : {};
         s.destructiveCount += 1;
         noteDestructive(s.current?.file ?? '');
-        audit(s, { action: 'annihilate', target: sender, reason, text: textOf(ctx), result: 'ok' });
+        audit(s, { action: 'annihilate', target: sender, reason, text: textOf(ctx), result: ownerAck ? 'ok-owner-ack' : 'ok' });
         return true;
     }
     catch (err) {

@@ -56,7 +56,7 @@
  * 版本标记：供调用方打印，用来确认**热刷后加载到的到底是哪一版**。
  * 改动本文件时顺手把这个号 +1（或换日期），排查"改了不生效"时一眼就能看出来。
  */
-export const __LIB_VERSION__ = 'lib-v13-20261014-通用路由([s:短id] / 【会话 id】)+扫盘解析+会话列表';
+export const __LIB_VERSION__ = 'lib-v14-20261014-通用路由+扫盘解析+会话列表+父会话跟QQ对象走+二档路由隔绝';
 
 // ── ★ 2026-10-13 持久化改造（主人指示：**以本地存档为准，别只靠内存**）──────────────
 //   本文件的风格是"用到时动态 import"；这里用**顶层 await** 一次性取到同步版 fs，
@@ -98,6 +98,68 @@ export function rememberFwd(sender, replyTarget) {
 const watching = (globalThis[WATCHING_KEY] ??= new Map()); // childSessionId -> entry
 
 /**
+ * ★★ 2026-10-14：**父会话跟着「QQ 对象」走**（主人定：绑的应该是 QQ 对象，不是那一刻的会话 id）
+ *
+ * 病根：原来 `parentAgentId` 是绑定时写死的 session id，回灌直接 `agents.get(那个 id)`。
+ *   在 QQ 里发 `/bot-new` 会**新开一个会话**（新 id），名单里那条记录却还指着旧会话
+ *   ⇒ 回灌继续落进旧会话；而"转发到 QQ"那一路用的是 openid、照旧正常 ⇒ 表面上完全看不出错。
+ *
+ * 修法（不需要插件内部 API）：记一张 `peerKey = scope:peerId`（QQ 对象）→ **最近一次为该对象发言的
+ *   会话 id** 的表；回灌前先按 peerKey 取最新会话，取不到才回落到写死的旧 id。
+ *   `/bot-new` 之后该对象的下一条消息必然落到新会话 ⇒ 这张表立刻学到新 id ⇒ 回灌自动跟过去。
+ *
+ * 自愈：老记录（没有 peerKey）在"它的父会话下一次发言"时自动补上 peerKey —— 与 fwd 补回同一套路数。
+ */
+const PEER_KEY = Symbol.for('dsh-qqbot.session-watch.peerLatest');
+const peerLatest = (globalThis[PEER_KEY] ??= new Map()); // peerKey -> sessionId
+
+/** 从**会话对象**里取 QQ 对象键（scope:peerId）。刻意不用 `o.id` —— 那是会话 id，不是 peer */
+function peerKeyOfSession(s) {
+  try {
+    if (!s) return '';
+    const peerId = String(s.peerId ?? s.groupOpenid ?? s.groupId ?? '');
+    if (!peerId) return '';
+    const scope = String(s.scope ?? s.peerScope ?? '') || 'group';
+    return scope + ':' + peerId;
+  } catch { return ''; }
+}
+
+/** 从 **replyTarget / peer 视图**里取 QQ 对象键 */
+function peerKeyOfTarget(rt) {
+  try {
+    if (!rt) return '';
+    const id = String(rt.peerId ?? rt.targetId ?? rt.groupOpenid ?? rt.openid ?? rt.groupId ?? rt.id ?? '');
+    if (!id) return '';
+    const scope = String(rt.scope ?? rt.kind ?? '') || 'group';
+    return scope + ':' + id;
+  } catch { return ''; }
+}
+
+/** 学到"这个 QQ 对象最近在哪个会话里说话"，顺手给老盯梢补 peerKey（自愈） */
+export function notePeerSeen(session, sid) {
+  try {
+    const pk = peerKeyOfSession(session);
+    if (!pk || !sid) return false;
+    let changed = peerLatest.get(pk) !== sid;
+    if (changed) peerLatest.set(pk, sid);
+    for (const w of watching.values()) {
+      if (!w.peerKey && w.parentAgentId === sid) { w.peerKey = pk; changed = true; }
+    }
+    if (changed) void persist();   // 落盘失败静默，不影响监听
+    return changed;
+  } catch { return false; }
+}
+
+/** 回灌该投给谁：优先"该 QQ 对象当前所在的会话"，其次绑定时写死的父会话（老行为） */
+function resolveParentId(w) {
+  try {
+    const pk = String(w?.peerKey ?? '');
+    const latest = pk ? String(peerLatest.get(pk) ?? '') : '';
+    return latest || String(w?.parentAgentId ?? '');
+  } catch { return String(w?.parentAgentId ?? ''); }
+}
+
+/**
  * 默认存档路径：`{dataRoot}/.qqbot-extensions/tools/data/session-watch-watching.json`
  * （**与 `vote.json` 同一个 data 目录** —— 对齐既有约定：扩展各类的存档都放
  *   `{数据根}/.qqbot-extensions/<类型>/data/<名字>.json`）。
@@ -126,6 +188,8 @@ export function ensureLoaded() {
     if (!file) return watching.size;
     const j = JSON.parse(readFileSync(file, 'utf8'));
     const rows = Array.isArray(j?.rows) ? j.rows : [];
+    // ★ 2026-10-14：读回"QQ 对象 → 最近发言会话"表（父会话跟着 QQ 对象走的依据）
+    try { for (const [k, v] of Object.entries(j?.peers ?? {})) if (k && v) peerLatest.set(String(k), String(v)); } catch { /* ignore */ }
     for (const r of rows) {
       const child = String(r?.child ?? '').trim();
       const parent = String(r?.parent ?? '').trim();
@@ -140,6 +204,7 @@ export function ensureLoaded() {
         preset: String(r?.preset ?? ''),
         workspace: String(r?.workspace ?? ''),
         peerName: String(r?.peerName ?? ''),
+        peerKey: String(r?.peerKey ?? ''),
         // ⚠️ 重启后拿不到 sender/replyTarget ⇒ 先恢复"回灌父会话"，
         //    QQ 转发等下次 register（或主人重挂）时补上 ⇒ 这里如实置空、不假装就绪。
         fwd: null,
@@ -199,8 +264,12 @@ async function persist() {
       workspace: w.workspace ?? '',
       mode: w.mode ?? 1,
       peerName: w.peerName ?? '',
+      peerKey: w.peerKey ?? '',
     }));
-    writeFileSync(file, JSON.stringify({ v: 1, at: Date.now(), rows }, null, 2), 'utf8');
+    // ★ 2026-10-14：把"QQ 对象 → 最近发言会话"表一起落盘（父会话跟着 QQ 对象走的依据）
+    const peers = {};
+    for (const [k, v] of peerLatest.entries()) if (k && v) peers[k] = v;
+    writeFileSync(file, JSON.stringify({ v: 1, at: Date.now(), rows, peers }, null, 2), 'utf8');
   } catch { /* ignore */ }
 }
 
@@ -665,7 +734,12 @@ function parentEntryOf(sid) {
  *   只取文本会把图丢掉，所以这里额外把附件 URL/语音转写一并拼进载荷。
  * @returns {Promise<{ok: boolean, reason: string, id?: string, workspace?: string, atts?: number}>}
  */
-async function routeToSession(root, text, ev) {
+/**
+ * ★ 对外导出（2026-10-14）：入站扩展要**在钩子之前**自己投递 —— 因为"二档路由隔绝"会把这条消息
+ * 在早挂点就 annihilate 掉，一旦消灭成功，`session/event` 的 `user/message` 就永远不会发生，
+ * 原来那条投递路径（本文件里的监听器）根本不会跑。所以投递逻辑必须能被扩展直接调。
+ */
+export async function routeToSession(root, text, ev) {
   try {
     const key = parseRouteKey(text);
     if (!key) return { ok: false, reason: 'no-key' };
@@ -838,6 +912,9 @@ async function handler(root, session, event) {
 
     // ── 引用回流：只关心**入站 user 消息**，且只在"某个盯梢对象的父会话"里认 ──
     if (type === 'user/message') {
+      // ★ 2026-10-14：先学"这个 QQ 对象最近在哪个会话说话"（父会话跟着 QQ 对象走的依据）。
+      //   必须放在路由分支**之前** —— 否则主人只发路由消息时，这张表永远学不到东西。
+      notePeerSeen(session, sid);
       const t = textOf(event);
       // ★ 2026-10-14：**通用路由优先** —— 正文里出现会话 id（`[s:xxx]` / `【会话 xxx】`）就直接投给
       //   那个会话。**不限已盯梢、不限是不是父会话**（主人要的"任何已有会话都能被点名"）。
@@ -919,7 +996,10 @@ async function handler(root, session, event) {
     w.lastSent = text;
 
     const agents = root.get('agents');
-    const parent = agents?.get?.(w.parentAgentId) ?? null;
+    // ★ 2026-10-14：**父会话跟着 QQ 对象走** —— 该 QQ 对象当前所在的会话优先（/bot-new 之后自动跟过去），
+    //   没学到才回落到绑定时写死的那个 id（老行为，向后兼容）。
+    const parentId = resolveParentId(w);
+    const parent = agents?.get?.(parentId) ?? null;
     if (!parent) return; // 父不在（不 live）→ 静默跳过，不制造错误
 
     const candidate = buildSettlementNotice({ sessionId: sid, label: w.label, rawReason, text });
@@ -990,6 +1070,9 @@ export async function register(root, opts = {}) {
   if (HOOK_DISABLED) return '未挂（回灌钩子当前被 HOOK_DISABLED 主动关闭，属预期；恢复见 installHook 注释）';
   if (!hooked) return '未挂（root.on 抛错）';
   const fwd = (opts.sender && opts.replyTarget) ? { sender: opts.sender, replyTarget: opts.replyTarget } : null;
+  // ★ 2026-10-14：记下这条盯梢属于哪个 **QQ 对象**（scope:peerId）—— 父会话要跟着它走。
+  //   优先级：调用方显式给的 peerKey ＞ replyTarget 里能抠出来的 ＞ 空（空则退回写死的 parentAgentId）。
+  const pk = String(opts.peerKey ?? '').trim() || peerKeyOfTarget(opts.replyTarget);
   watching.set(childSessionId, {
     parentAgentId,
     label,
@@ -1000,6 +1083,7 @@ export async function register(root, opts = {}) {
     preset: String(opts.preset ?? '').trim(),
     workspace: String(opts.workspace ?? '').trim(),
     peerName: String(opts.peerName ?? ''),
+    peerKey: pk,
     fwd,
     lastText: '',
     texts: [],
@@ -1008,6 +1092,8 @@ export async function register(root, opts = {}) {
     firedAt: 0,
     lastForwarded: '',
   });
+  // 绑定时先按"当时那个会话"给这张表起步；**只在没记录时写**，别把已经学到的新会话覆盖回旧的。
+  if (pk && parentAgentId && !peerLatest.has(pk)) peerLatest.set(pk, parentAgentId);
   await persist();
   const modeText = mode === 2 ? '二档(全部正文+报错→QQ，不进父上下文)'
     : mode === 3 ? '三档(进父上下文但不唤醒 + 全转QQ)'
@@ -1032,13 +1118,47 @@ export async function unregister(childSessionId) {
 }
 
 /** 给别的工具（如 session_watch 状态查询）读当前盯着的清单 */
-export function listWatching() {
-  ensureLoaded();   // ★ 先保证存档已读回内存（重启后第一次调它就能看到完整名单）
+/**
+ * ★ 某个路由短 id 对应的**回灌挡位**（读内存名单；没绑过返回 0）。
+ *
+ * 入站扩展用它判断"这条路由消息要不要在父上下文里彻底消失"：
+ *   挡位 2（二档）= 双向隔绝 —— 子会话的正文只去 QQ、**不进父上下文**（原有语义），
+ *   那么反向也一样：**用户发进群的路由消息也不该落进父上下文**（2026-10-14 主人定）。
+ * 没绑过的（纯通用路由）返回 0 ⇒ **不进隔绝**，保持原样投递 + 照常进上下文。
+ */
+export function modeOfRoute(key) {
+  try {
+    ensureLoaded();
+    const k = String(key ?? '').trim();
+    if (!k) return 0;
+    for (const [sid, w] of watching.entries()) {
+      const short = shortSessionId(sid);           // 例：fc871e99
+      if (short === k || sid === k || sid === `session-${k}`) return Number(w?.mode ?? 1) || 1;
+    }
+  } catch { /* ignore */ }
+  return 0;
+}
+
+/**
+ * 供工具/命令展示：这条盯梢**当前**会把回灌投给谁（= 跟着 QQ 对象动态解析之后的结果）。
+ * 与 `parentAgentId`（绑定时写死的那个）不同：发过 `/bot-new` 之后这两个会不一样。
+ */
+export function effectiveParentOf(childSessionId) {
+  ensureLoaded();
+  const w = watching.get(String(childSessionId ?? ''));
+  return w ? resolveParentId(w) : '';
+}
+
+export function listWatching() {  ensureLoaded();   // ★ 先保证存档已读回内存（重启后第一次调它就能看到完整名单）
   return [...watching.entries()].map(([sid, w]) => ({
     childSessionId: sid,
     shortId: shortSessionId(sid),
     parentAgentId: w.parentAgentId,
     parentShortId: shortSessionId(w.parentAgentId),
+    /** QQ 对象键（scope:peerId）；父会话会跟着它动态解析 */
+    peerKey: w.peerKey ?? '',
+    /** 当前实际会投给的父会话（发过 /bot-new 后会与 parentAgentId 不同） */
+    effectiveParentShortId: shortSessionId(resolveParentId(w)),
     label: w.label,
     mode: w.mode ?? 1,
     /** 归属行三件套（会随转发消息发到 QQ） */
