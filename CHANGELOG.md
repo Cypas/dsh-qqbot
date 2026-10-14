@@ -1,3 +1,29 @@
+## [1.10.6] - 2026-10-15
+
+### 修复
+- **在服务器 / 非桌面环境下装不上插件**：修掉两处依赖声明，pnpm 默认配置下即可一次装成。
+  - `peerDependenciesMeta` 里 5 个 `@deepseek-ai/*` 原本写成 `"optional": false`，语义是
+    **要求 pnpm 必须自动安装**这些 peer；而它们的依赖链里有 `dsh-scope`、`dsh-system-prompt`
+    这类**在公开 npm 上已不存在 `0.1.x` 版本**的内部包（只剩 `0.0.1-rc.1` 与 `0.2.x`），
+    一解析就报 `ERR_PNPM_NO_MATCHING_VERSION`，导致整次安装失败。改为 `optional: true` 后
+    pnpm 不再自动安装它们（运行时有宿主提供），安装恢复正常。
+  - `@huggingface/transformers` 从 `dependencies` 移到 `optionalDependencies`：它的传递依赖
+    `onnxruntime-node` 的安装脚本在部分网络环境下会失败
+    （`Failed to download build list. HTTP status code = 302`），原先**一次失败就让 pnpm
+    退出码 1、整次安装作废**；放进 optional 后语义变成"尽力安装、失败不阻塞"，而代码里本来
+    就只在一处动态 `import`、且带程序兜底（小模型不可用时自动降级）。
+  - 实测（Ubuntu 云服务器 + Node 22.23.2 + pnpm 9.15.9 + 默认 pnpm 配置）：
+    修复前 `NOT_INSTALLED` 且卡死；修复后 **3.5 秒装成、退出码 0**。
+
+### 文档
+- 部署到服务器 / 公网时，另有两条**环境侧**注意事项（不是插件能修的，记录备查）：
+  1. dsh 调用 pnpm 时**不传 `-w`**，而 profile 是 pnpm workspace root ⇒ 会弹出
+     "是否加到 workspace root"的交互询问，而它 stdin 是空设备 ⇒ **静默卡死**
+     （进程 0 CPU、零输出）。部署环境需先执行
+     `pnpm config set ignore-workspace-root-check true`。
+  2. Node 建议用**最新的 22.x**：dsh 0.2.1-alpha.1 在 Node **22.11** 上会零输出、
+     退出码 0 静默退出（`--trace-uncaught` 也抓不到），升到 22.23 立即正常。
+
 ## [1.10.5] - 2026-10-14
 
 ### 新增
