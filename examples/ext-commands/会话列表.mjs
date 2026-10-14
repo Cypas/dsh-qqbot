@@ -22,6 +22,13 @@
  *   3. 命令侧 `ctx.caps` 有值、**按钮回调的 ctx 是把能力平铺在自身**（没有 caps 键）
  *      ⇒ 一律写 `ctx?.caps ?? ctx`。
  *   4. `keyboardOf` / `regCardSelf` 里的**工具名必须与本文件一致**，否则插件查表查不到。
+ *   5. ★★ **别信"handler 与 onInteraction 是同一个模块实例"**（2026-10-14 真机踩中，见文件头
+ *      `SLOT` 注释）：插件对 `ext-commands` 是**两条独立加载路径**，`tools_reload` 只热刷其中一条
+ *      ⇒ 同一个文件被实例化成**两份模块**、各持自己的 `W`。
+ *      现象：发卡正常（命令侧 `表=2/3`），一点按钮就回「这个向导已经过期了」（回调侧 `keys=[]`）。
+ *      对策：回调侧要用的一切（kernel / sender / replyTarget / 父会话 id / 向导状态）
+ *      一律走 **`globalThis` 符号槽（`publishShared`/`adoptShared`）+ 磁盘（`saveState`/`loadState`）**，
+ *      模块变量只当本地缓存。
  */
 const PAGE = 20;                          // 一页 20 个选项（4 行 × 5 列；第 5 行留给导航）
 const LETTERS = 'ABCDEFGHIJKLMNOPQRST';
@@ -64,6 +71,81 @@ function dataRootOf(ctx) {
     if (cand) return String(cand);
   } catch { /* ignore */ }
   return 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot';
+}
+
+/**
+ * ★★ 跨模块实例的共享位 —— 2026-10-14 真机 bug 修复（「选了工作区就报向导已过期」）
+ *
+ * 现象：`/会话列表` 正常发卡、点按钮却回「这个向导已经过期了」，
+ *   诊断日志里 `[onInteraction] card=… 命中=false keys=[]`（状态表是**空**的），
+ *   而同一条日志里 `[paint] … 表=2 / 表=3`（命令侧写进去过）⇒ **两边的 W 不是同一个 Map**。
+ *
+ * 真因：插件对 `ext-commands` 是**两条独立加载路径**（斜杠命令注册 / 卡片回调查表），
+ *   `tools_reload` 只热刷其中一条 ⇒ **同一个文件被实例化成两份模块**，
+ *   各自持有自己的 `W` / `KERNEL` / `CTX_CACHE`：
+ *     · 命令侧实例：paint 写自己的 W（seq 正常递增）—— 看起来一切正常；
+ *     · 回调侧实例：W 永远空 ⇒ 一点就"过期"。
+ *
+ * ⇒ 凡是**回调侧要用**的东西（kernel / sender / replyTarget / 父会话 id / 向导状态）
+ *   **都不能只放模块变量**，必须落到 ① `globalThis` 符号槽（同进程跨实例可见）
+ *   或 ② 磁盘（跨实例、甚至跨重启都可见）。
+ */
+const SLOT = Symbol.for('dsh-qqbot.session-list.shared');
+function shared() {
+  try { return globalThis[SLOT] ?? (globalThis[SLOT] = {}); } catch { return {}; }
+}
+function publishShared(patch) { try { Object.assign(shared(), patch ?? {}); } catch { /* ignore */ } }
+
+/** 向导状态的磁盘副本（回调侧实例用来"认出"命令侧实例发的卡） */
+function stateFileOf(ctx) {
+  const root = cn(shared().dataRoot) || dataRootOf(ctx);
+  return `${root}/.qqbot/session-list-wizard.json`;
+}
+
+async function saveState(ctx, cardId, st) {
+  try {
+    const { readFileSync, writeFileSync, mkdirSync } = await import('node:fs');
+    const { dirname } = await import('node:path');
+    const f = stateFileOf(ctx);
+    let all = {};
+    try { all = JSON.parse(readFileSync(f, 'utf8')) ?? {}; } catch { /* 首次或坏文件 */ }
+    const now = Date.now();
+    for (const k of Object.keys(all)) if (Number(all[k]?.expireAt ?? 0) < now) delete all[k];
+    all[cardId] = { ...st, expireAt: now + CARD_EXPIRE_MS };
+    const keys = Object.keys(all);
+    if (keys.length > 20) for (const k of keys.slice(0, keys.length - 20)) delete all[k];
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, JSON.stringify(all));
+    return true;
+  } catch { return false; }
+}
+
+async function loadState(ctx, cardId) {
+  try {
+    const { readFileSync } = await import('node:fs');
+    const all = JSON.parse(readFileSync(stateFileOf(ctx), 'utf8')) ?? {};
+    const st = all[cardId];
+    if (!st || Number(st.expireAt ?? 0) < Date.now()) return null;
+    return st;
+  } catch { return null; }
+}
+
+async function dropState(ctx, cardId) {
+  try {
+    const { readFileSync, writeFileSync } = await import('node:fs');
+    const all = JSON.parse(readFileSync(stateFileOf(ctx), 'utf8')) ?? {};
+    if (all[cardId]) { delete all[cardId]; writeFileSync(stateFileOf(ctx), JSON.stringify(all)); }
+  } catch { /* ignore */ }
+}
+
+/** 回调侧补齐"命令侧才知道"的上下文（同进程共享位优先，其次回调 ctx 自带的 kernel） */
+function adoptShared(ctx) {
+  const s = shared();
+  KERNEL = KERNEL ?? s.kernel ?? ctx?.kernel ?? ctx?.caps?.kernel ?? null;
+  CTX_CACHE.sender = CTX_CACHE.sender ?? s.sender ?? null;
+  CTX_CACHE.replyTarget = CTX_CACHE.replyTarget ?? s.replyTarget ?? null;
+  CTX_CACHE.agentId = CTX_CACHE.agentId || cn(s.parentId);
+  CTX_CACHE.sessionId = CTX_CACHE.sessionId || cn(s.parentId);
 }
 
 /** 命令侧自写卡表（不依赖插件是否注入 registerInteractionCard） */
@@ -468,6 +550,8 @@ async function paint(ctx, st) {
   if (W.size > 30) {
     for (const k of [...W.keys()].slice(0, W.size - 30)) if (k !== st.cardId) W.delete(k);
   }
+  publishShared({ dataRoot: dataRootOf(ctx) });
+  try { await saveState(ctx, st.cardId, st); } catch { /* ignore */ }   // ★ 落盘：回调侧可能是**另一个模块实例**
   void diag(`[paint] step=${st.step} page=${st.page} 选项=${st.options.length} 发出=${ok ? 'ok' : 'FAIL'} 表=${W.size}`);
   if (!ok) st.error = '卡片没发出去（当前环境可能不支持富文本卡片）';
   return ok;
@@ -478,13 +562,18 @@ async function paint(ctx, st) {
  * 「绑定任何已有会话」这件事本身不需要新能力：`register()` 的 childSessionId 就是"任意会话 id"。
  */
 async function bindNow(ctx, st) {
+  adoptShared(ctx);
   const lib = await loadLib();
-  const root = KERNEL ?? ctx?.caps?.kernel ?? ctx?.kernel ?? null;
+  const root = kernelOf(ctx);
   const sess = st.picked.session ?? {};
   const ws = st.picked.workspace?.value ?? '';
   const mode = Number(st.picked.mode?.value ?? 1);
-  const parentId = CTX_CACHE.agentId || CTX_CACHE.sessionId || '';
-  void diag(`[bind] root=${!!root} parent=${parentId || '-'} child=${short(sess.value, 40)} mode=${mode}`);
+  // ★ 父会话 id 优先取**命令侧存进向导状态**的那份：回调侧可能是另一个模块实例，
+  //   它自己的 CTX_CACHE 是空的（详见文件头 SLOT 注释）。
+  const parentId = cn(st.parentId) || CTX_CACHE.agentId || CTX_CACHE.sessionId || '';
+  const sender = CTX_CACHE.sender ?? shared().sender ?? null;
+  const replyTarget = CTX_CACHE.replyTarget ?? shared().replyTarget ?? null;
+  void diag(`[bind] root=${!!root} parent=${parentId || '-'} child=${short(sess.value, 40)} mode=${mode} fwd=${!!sender && !!replyTarget}`);
 
   if (!root || typeof root.on !== 'function') {
     return { text: `⚠️ 拿不到宿主 ctx（需要权限包里的 kernel），这次没绑上。\n会话 id：\`${short(sess.value, 40)}\`` };
@@ -496,8 +585,8 @@ async function bindNow(ctx, st) {
       childSessionId: sess.value,
       label: short(sess.label, 40),
       mode,
-      sender: CTX_CACHE.sender,
-      replyTarget: CTX_CACHE.replyTarget,
+      sender,
+      replyTarget,
       name: short(sess.label, 40),
       workspace: wsPath(ws),
     });
@@ -528,6 +617,7 @@ async function advance(ctx, st) {
   while (st.stepIdx < STEPS.length && st.picked[STEPS[st.stepIdx]]) st.stepIdx += 1;
   if (st.stepIdx >= STEPS.length) {
     W.delete(st.cardId);
+    void dropState(ctx, st.cardId);
     const r = await bindNow(ctx, st);
     try { const caps = ctx?.caps ?? ctx ?? {}; if (typeof caps.markdown === 'function') { await caps.markdown(r.text); return ''; } } catch { /* ignore */ }
     return r.text;
@@ -540,7 +630,8 @@ async function advance(ctx, st) {
 }
 
 export default {
-  name: ['会话列表', 'sessionlist', 'sessions'],  description: '三步向导（工作区 → 该区会话 → 回灌模式）绑定任意已有会话，并给出可复制的路由模板',
+  name: ['会话列表', 'sessionlist', 'sessions'],
+  description: '三步向导（工作区 → 该区会话 → 回灌模式）绑定任意已有会话，并给出可复制的路由模板',
   usage: '/会话列表',
 
   async handler(ctx) {
@@ -552,6 +643,14 @@ export default {
       const psid = String(caps.peerSessionId ?? '');
       if (psid) { CTX_CACHE.agentId = psid; CTX_CACHE.sessionId = psid; }
       if (!CTX_CACHE.sender) CTX_CACHE.sender = ctx?.bot ?? caps.sender ?? null;
+      // ★ 把回调侧要用的一切**推给共享位**（回调可能是另一个模块实例，见文件头 SLOT 注释）
+      publishShared({
+        kernel: KERNEL,
+        sender: CTX_CACHE.sender,
+        replyTarget: CTX_CACHE.replyTarget,
+        parentId: CTX_CACHE.agentId || CTX_CACHE.sessionId || '',
+        dataRoot: dataRootOf(ctx),
+      });
       void diag(`[handler] kernel=${!!KERNEL} sender=${!!CTX_CACHE.sender} rt=${!!CTX_CACHE.replyTarget} peerSessionId=${psid || '-'}`);
     } catch { /* ignore */ }
 
@@ -563,6 +662,8 @@ export default {
       options: [],
       cardId: '',
       error: '',
+      parentId: CTX_CACHE.agentId || CTX_CACHE.sessionId || '',
+      startedAt: Date.now(),
     };
     W.set('pending', st);
     await paint(ctx, st);
@@ -574,19 +675,26 @@ export default {
   async onInteraction(ctx, info) {
     const cardId = cn(info?.cardId);
     const bid = cn(info?.buttonId);
-    const st = W.get(cardId);
-    void diag(`[onInteraction] card=${cardId} btn=${bid} 命中=${!!st} keys=[${[...W.keys()].join(',')}]`);
+    adoptShared(ctx);
+    let st = W.get(cardId);
+    if (!st) {
+      // ★ 命令侧与回调侧可能是**两个模块实例**（各自的 W 是空的）⇒ 回落到磁盘状态
+      st = await loadState(ctx, cardId);
+      if (st) W.set(cardId, st);
+    }
+    void diag(`[onInteraction] card=${cardId} btn=${bid} 命中=${!!st} keys=[${[...W.keys()].join(',')}] kernel=${!!kernelOf(ctx)}`);
     if (!st) return '这个向导已经过期了，重新发一次 /会话列表 吧～';
-    if (st.startedAt && Date.now() - st.startedAt > MAX_PAGE_MS) { W.delete(cardId); return '向导放太久了，重新发一次吧～'; }
+    if (st.startedAt && Date.now() - st.startedAt > MAX_PAGE_MS) { W.delete(cardId); void dropState(ctx, cardId); return '向导放太久了，重新发一次吧～'; }
     st.startedAt = st.startedAt ?? Date.now();
 
-    if (bid === 'cancel') { W.delete(cardId); return '已取消，没有绑定任何会话。'; }
+    if (bid === 'cancel') { W.delete(cardId); void dropState(ctx, cardId); return '已取消，没有绑定任何会话。'; }
     if (bid === 'noop') return '';
     if (bid === 'prev' || bid === 'next') {
       st.page = Math.max(0, st.page + (bid === 'next' ? 1 : -1));
       const ok = await paint(ctx, st);
       W.delete(cardId);
       W.set(st.cardId, st);
+      void dropState(ctx, cardId);
       return ok ? `已翻到第 ${st.page + 1} 页 ✅（新卡片在上面）` : `翻页失败（第 ${st.page + 1} 页）`;
     }
     if (/^p\d+$/.test(bid)) {
@@ -595,6 +703,7 @@ export default {
       if (!opt) return '这个选项没了，翻一页再选～';
       st.picked[st.step] = opt;
       st.stepIdx += 1;
+      void dropState(ctx, cardId);
       const done = await advance(ctx, st);
       return done || '';
     }
