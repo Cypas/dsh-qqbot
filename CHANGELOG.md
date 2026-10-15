@@ -1,3 +1,35 @@
+## [1.10.7] - 2026-10-15
+
+### 修复
+- **QQ 转发（子会话 → 群）在 msg_id 过期后会静默丢内容**（`examples/ext-tools/lib/session_watch_lib.mjs`）：
+  - 真因：`fwd.replyTarget` 里钉着**绑定那一刻的 msgId**，而 QQ 被动回复的 `msg_id` **会过期**
+    （实测报 `API Error: 回复消息msg_id已过期`），markdown 与纯文本两条降级链**都**因此失败，
+    内容无声丢失；新建盯梢 msgId 新鲜所以看不出问题。
+  - 现在按"适配主动"处理（与 `outbound.ts` 的 `ADAPTIVE_MAX_PASSIVE` 同口径）：
+    ① 每次转发前**刷新** target 为最新注入的 `replyTarget`；
+    ② 同一 msgId **数到 4 条**就主动转主动（摘掉 msgId），不等它失败；
+    ③ 真失败（过期/超限）⇒ **摘掉 msgId 重发**兜底（会耗主动配额，但优于丢消息）。
+- **转发失败不再静默**：新增 `{数据根}/.qqbot-extensions/data/session-watch-diag.log` ——
+  每回合**无条件**记一行 `turn-end mode/texts/errs/textLen/seen`，转发 `ok/skip/fail` 全落盘。
+  此前 `forwardToQq` 三个条件任一不满足就 `return ''`，日志里一个字都没有，真机上无从定位。
+
+### 新增
+- **二档「引用回流」彻底隔绝**（`examples/ext-inbound/no-wake-on-child-quote.mjs`）：
+  只要这条消息**引用的是子会话转发**（`【子会话 xxx】`），就在早挂点**整条消灭**
+  （不进群历史、不进父上下文、不占群冷却），并**自己投递给被引消息所属的子会话**
+  （消息被消灭后，原路径的 `user/message` 钩子永远不会发生，不自己投就等于消息凭空消失）。
+  - 开关：`ANNIHILATE_ANY_CHILD_QUOTE`；带 `[s:xxx]` **路由标记**的消息**让路**给
+    `route-isolate`（由它消灭 + 投递），避免双投。
+  - ⚠️ 消灭必须写成 `ctx.annihilate(...)` **然后照常 `return next()`** ——
+    省掉 next 会触发引擎"扩展既没调 next、又没成功消灭就替它放行"的兜底，等于没消灭。
+
+### 文档
+- 三层热更新的对应关系（踩过才写下的）：
+  - `tools/`、`commands/` 下的文件 → `tools_reload` 即可；
+  - **`tools/lib/*.mjs` → 必须调 `session_watch action=rehydrate`**（`list` 不触发 `installHook`，
+    新代码不会接管）；
+  - `hooks/` 下的钩子 → 启动期加载，**必须重启宿主**。
+
 ## [1.10.6] - 2026-10-15
 
 ### 修复

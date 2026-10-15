@@ -662,21 +662,130 @@ export function buildSettlementNotice(input = {}) {
 async function forwardToQq(entry, text) {
   const fwd = entry?.fwd;
   const body = String(text ?? '').trim();
-  if (!fwd?.sender || !fwd?.replyTarget || !body) return '';
+  // ★ 2026-10-15：**不再静默**。之前三个条件任一不满足就 `return ''`，日志里一个字都没有，
+  //   "重启后那段时间子会话内容悄悄没转发"因此无从定位（主人实测踩到）。
+  if (!fwd?.sender || !fwd?.replyTarget || !body) {
+    void swDiag('forward-skip short=' + String(entry?.shortId ?? '?')
+      + ' fwd=' + (fwd ? 'obj' : String(fwd))
+      + ' sender=' + !!fwd?.sender + ' replyTarget=' + !!fwd?.replyTarget
+      + ' bodyLen=' + body.length);
+    return '';
+  }
   const target = fwd.replyTarget;
-  try {
-    if (typeof fwd.sender.sendMarkdown === 'function') {
-      await fwd.sender.sendMarkdown(target, body);
-      return 'md';
+
+  /**
+   * ★★ 2026-10-15：**摘掉 msgId 的"主动版" target** ★★
+   *   实测真凶：`fwd.replyTarget` 里钉着**绑定那一刻的 msgId**（为走"被动回复"），
+   *   而 QQ 的被动回复 **msg_id 会过期** ⇒ 老盯梢（如 bee798c0）发送时报
+   *   `API Error: 回复消息msg_id已过期`，markdown/纯文本两条降级链**都**因此失败，
+   *   内容静默丢失。新建的盯梢 msgId 新鲜 ⇒ 正常。
+   *   ⇒ 发送失败时摘掉 msgId 再发一次 = 转"主动发送"（会耗主动配额，但总比丢消息好）。
+   */
+  const activeTarget = (() => {
+    try {
+      if (!target || typeof target !== 'object') return null;
+      const t = { ...target };
+      let touched = false;
+      for (const k of ['msgId', 'msg_id', 'messageId', 'referenceMessageId']) {
+        if (k in t) { delete t[k]; touched = true; }
+      }
+      return touched ? t : null;
+    } catch { return null; }
+  })();
+
+  /**
+   * ★ 2026-10-15 主人定：**同一 msgId 用满 4 条就直接转主动**（不等它失败）。
+   *   被动回复有两条硬限制：①同一 msg_id 最多 ~4-5 条；②msg_id 会过期。
+   *   插件的 outbound.ts 对"AI 正文"有 ADAPTIVE_MAX_PASSIVE=5 的同类计数，但**转发这条路没有**，
+   *   所以这里自己数：同一 msgId 发到第 4 条起就摘掉它走主动。
+   */
+  const _midOf = (t) => String(t?.msgId ?? t?.msg_id ?? t?.messageId ?? '');
+  const passiveMid = _midOf(target);
+  const counts = (entry.__fwdPassiveCounts ??= new Map());
+  const used = passiveMid ? (counts.get(passiveMid) ?? 0) : 0;
+  const PASSIVE_LIMIT = 4;
+  const skipPassive = !passiveMid || used >= PASSIVE_LIMIT;
+  if (skipPassive) {
+    void swDiag('forward-passive-skip short=' + String(entry?.shortId ?? '?')
+      + ' mid=' + (passiveMid ? passiveMid.slice(0, 12) : '-') + ' used=' + used);
+  }
+
+  const trySend = async (tg) => {
+    try {
+      if (typeof fwd.sender.sendMarkdown === 'function') {
+        await fwd.sender.sendMarkdown(tg, body);
+        return 'md';
+      }
+    } catch (e) {
+      const em = String(e?.message ?? e);
+      try {
+        if (typeof fwd.sender.sendText === 'function') {
+          await fwd.sender.sendText(tg, body);
+          return 'text';
+        }
+      } catch (e2) { throw new Error(em + ' | text:' + String(e2?.message ?? e2)); }
+      throw new Error(em);
     }
-  } catch { /* markdown 失败 → 退纯文本 */ }
+    try {
+      if (typeof fwd.sender.sendText === 'function') {
+        await fwd.sender.sendText(tg, body);
+        return 'text';
+      }
+    } catch (e) { throw new Error(String(e?.message ?? e)); }
+    return '';
+  };
+
+  // ① 先按原样（被动回复，省主动配额）
   try {
-    if (typeof fwd.sender.sendText === 'function') {
-      await fwd.sender.sendText(target, body);
-      return 'text';
+    // ★ 同一 msgId 用满 4 条 ⇒ 直接跳过被动、走下面的主动分支（不再等它失败）
+    if (skipPassive) throw new Error('skip-passive: mid=' + (passiveMid || '-') + ' used=' + used);
+    const how = await trySend(target);
+    if (how) {
+      if (passiveMid) counts.set(passiveMid, used + 1);
+      void swDiag('forward-ok(' + how + ') short=' + String(entry?.shortId ?? '?') + ' len=' + body.length
+        + ' passive=' + (passiveMid ? passiveMid.slice(0, 12) + '#' + (used + 1) : '-'));
+      return how;
     }
-  } catch { /* ignore */ }
+  } catch (e1) {
+    void swDiag('forward-passive-fail short=' + String(entry?.shortId ?? '?')
+      + ' err=' + String(e1?.message ?? e1));
+    // ② 失败 ⇒ 摘掉 msgId 重发（主动）。这是"msg_id 过期"的正解。
+    if (activeTarget) {
+      try {
+        const how2 = await trySend(activeTarget);
+        if (how2) {
+          void swDiag('forward-ok-active(' + how2 + ') short=' + String(entry?.shortId ?? '?')
+            + ' len=' + body.length + '（被动失败后转主动）');
+          return how2 + '-active';
+        }
+      } catch (e2) {
+        void swDiag('forward-active-fail short=' + String(entry?.shortId ?? '?')
+          + ' err=' + String(e2?.message ?? e2));
+      }
+    } else {
+      void swDiag('forward-active-skip short=' + String(entry?.shortId ?? '?')
+        + '（target 上没有 msgId 可摘，或 target 形状异常）');
+    }
+  }
+  void swDiag('forward-fail short=' + String(entry?.shortId ?? '?') + ' senderKeys='
+    + (fwd?.sender ? Object.keys(fwd.sender).slice(0, 10).join(',') : '-'));
   return '';
+}
+
+/**
+ * ★ 2026-10-15：诊断**落盘**。route-isolate 文件头留过教训：
+ *   "一开始只往 logger 写，而**从来没人注入过 logger** ⇒ 真机上完全静默、无法定位。"
+ *   本库涉及"转发到 QQ"，静默一次就是一条内容永久丢失，必须能事后追。
+ */
+const SW_DIAG_FILE = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/session-watch-diag.log';
+
+async function swDiag(line) {
+  try {
+    const { appendFile, mkdir } = await import('node:fs/promises');
+    const { dirname } = await import('node:path');
+    await mkdir(dirname(SW_DIAG_FILE), { recursive: true });
+    await appendFile(SW_DIAG_FILE, new Date().toISOString() + ' ' + line + '\n');
+  } catch { /* 诊断失败不影响主链 */ }
 }
 
 /**
@@ -975,11 +1084,40 @@ async function handler(root, session, event) {
     w.errors = [];
     const mode = Number(w.mode) === 2 ? 2 : (Number(w.mode) === 3 ? 3 : 1);
 
+    // ★★ 2026-10-15：**每回合无条件落盘一行** ★★
+    //   实测踩到：bee798c0 重启后"不转发"，而日志里连 forward-skip 都没有 ⇒ 说明它压根没
+    //   走到 forwardToQq（`toForward` 为空、for 循环没进）。要区分"没收到正文事件"和"收到但被过滤"，
+    //   只能在 turn/end 这里把手上有什么如实记下来。
+    void swDiag('turn-end short=' + String(w.shortId ?? '?')
+      + ' mode=' + mode + ' rawMode=' + JSON.stringify(w.mode)
+      + ' texts=' + allTexts.length + ' errs=' + errors.length
+      + ' textLen=' + String(text ?? '').length
+      + ' seen=' + w.seen + ' reason=' + String(rawReason ?? '-'));
+
     // ── 转发到 QQ ──────────────────────────────────────────────
     // 一档：只转末段；二/三档：所有正文 + 报错
     const toForward = mode === 1
       ? (text ? [text] : [])
       : [...allTexts, ...(errors.length ? ['⚠️ 报错：\n' + errors.join('\n')] : [])];
+    // ★★ 2026-10-15 主人定：转发前**先刷新 target + 数被动条数**，别钉死绑定时的 msgId ★★
+    //   被动回复（带 msg_id）有两条硬限制：①同一 msg_id 最多回 ~4-5 条；②msg_id 会过期。
+    //   踩到的实例：老盯梢 bee798c0 的 replyTarget 里钉着很久以前的 msgId ⇒ 发送报
+    //   `回复消息msg_id已过期`，md/文本两条链全挂、内容静默丢失。
+    //   口径（与插件 outbound.ts 的 ADAPTIVE_MAX_PASSIVE=5 对齐）：
+    //     · 每次转发前，把 fwd.replyTarget 刷新成**最新注入**的那份（带最新 msgId）；
+    //     · 同一 msgId 数着用，**到 4 条**就主动转主动（摘掉 msgId），不再等它失败；
+    //     · 真失败（过期/超限/其它）⇒ forwardToQq 里还有一层"摘 msgId 重发"兜底。
+    if (toForward.length > 0) {
+      const injected = globalThis[FWD_KEY] ?? null;
+      if (injected?.sender && injected?.replyTarget) {
+        w.fwd = { sender: injected.sender, replyTarget: injected.replyTarget };
+      } else if (!w.fwd?.sender || !w.fwd?.replyTarget) {
+        const hadFwd = !!w.fwd;
+        const ok = hydrateFwd(w, root, session);
+        void swDiag('pre-forward hydrate short=' + String(w.shortId ?? '?')
+          + ' hadFwd=' + hadFwd + ' ok=' + ok + ' mode=' + mode);
+      }
+    }
     for (const piece of toForward) {
       const body = withOwner(w, piece);
       // 去重：同一条内容不重复转发

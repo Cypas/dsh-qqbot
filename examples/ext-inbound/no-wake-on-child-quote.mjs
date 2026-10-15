@@ -92,6 +92,27 @@ export function isChildSessionForwardQuote(quotedText) {
 const ANNIHILATE_EMPTY_CHILD_FORWARD = false;
 
 /**
+ * ★★ 2026-10-15 主人定：**只要引用了子会话转发消息，整条消灭** ★★
+ *
+ * 为什么比上面那个开关更强：二档的语义是"主人**完全独立地**跟子会话对话" ——
+ * 子会话的内容**一个字都不该进父会话上下文**。而 QQ 的引用会把**被引原文**
+ * 一起带进上下文（`buildQuotePart` 会把它拼成引用块），等于**绕过二档**。
+ * 更要紧的是：QQ 引用**自带 @ 机器人**，所以这种消息还必然触发一次 @ 判定 ——
+ * 与其"剥掉原文/压掉 @"两头补，不如**整条吃掉**（主人原话：懒得删了）。
+ *
+ * ⚠️ 代价（有意接受）：主人在这条消息里**自己写的正文也一起消失** ——
+ *    想跟本尊说话就别引用子会话转发的消息，直接说即可。
+ * ⚠️ 对**所有人**生效（群友引用子会话转发也会被吃）；若只想管主人，
+ *    把 ownerOnly 改成 true（下面消灭分支里已留好位置）。
+ * ⚠️ 消灭 = 不进群历史、不进上下文、不占群冷却（`annihilate` 的语义）。
+ * ⚠️ 主人消息要被吃必须带 `ownerAck: true`（默认白名单保护主人消息，不给就拒绝执行）。
+ */
+const ANNIHILATE_ANY_CHILD_QUOTE = true;
+
+/** 上面那个开关是否只对主人（owner）生效。false = 群里任何人引用都吃 */
+const ANNIHILATE_ANY_CHILD_QUOTE_OWNER_ONLY = false;
+
+/**
  * true = 把正文开头的转发头 `【子会话 xxx】` **改写**掉（群历史里存的就是改后文本）。
  * ⚠️ 默认 **false**：转发头有时是用户自己想要的线索，先看清楚再开。
  */
@@ -106,6 +127,71 @@ function contentWithoutMentions(ctx) {
     .replace(/<@!?[^>]+>/g, '')   // QQ 的 @ 标记：<@openid> / <@!openid>
     .replace(/@bot/g, '')          // 进上下文前后插件会把 @她 换成 @bot（这里只是保险）
     .replace(/\s+/g, '');
+}
+
+/**
+ * ★ 2026-10-15 新增：与 route-isolate 共用同一个会话库。
+ *
+ * 用途只有一个 —— **识别"这条消息带不带路由标记"**（`lib.parseRouteKey`）。
+ * 带路由标记的消息归 `route-isolate.mjs` 管（它负责"先消灭、再自己投递给子会话"），
+ * 本扩展必须**让路**；否则按文件名排序本文件跑在前面，抢先吃掉又 return，
+ * route-isolate 永远不会执行 ⇒ 消息既没进父上下文、也没路由到子会话。
+ *
+ * 引法与 route-isolate 完全一致（带 `?v=mtime` 做 cache-bust，防 ESM 注册表缓存旧模块）。
+ */
+let _lib = null;
+async function loadLib() {
+  if (_lib) return _lib;
+  try {
+    _lib = await import(new URL('../tools/lib/session_watch_lib.mjs?v=' + Date.now(), import.meta.url).href);
+  } catch {
+    _lib = null;
+  }
+  return _lib;
+}
+
+/**
+ * ★★ 2026-10-15：诊断必须**落盘** ★★
+ * route-isolate 文件头留的教训："一开始只往 logger 写，而**从来没人注入过 logger**
+ * ⇒ 真机上完全静默、无法定位。" 本扩展此前一直用 `ctx.logger.debug` ⇒ 等于瞎的，
+ * 导致"引用回流没投递"排查了三轮全靠猜。此后所有关键判定一律 `appendDiag` 落盘。
+ */
+const DIAG_FILE = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/no-wake-diag.log';
+
+async function appendDiag(line) {
+  try {
+    const { appendFile, mkdir } = await import('node:fs/promises');
+    const { dirname } = await import('node:path');
+    await mkdir(dirname(DIAG_FILE), { recursive: true });
+    await appendFile(DIAG_FILE, new Date().toISOString() + ' ' + line + '\n');
+  } catch { /* 诊断失败绝不影响主链 */ }
+}
+
+/**
+ * ★★ 2026-10-15：稳妥读"被引原文" ★★
+ * 契约（`ext-inbound-context.ts` 注释）写的是 `ctx.quoted({ text, fromSelf })`，
+ * 而 316 行又说它是"**可调用 + 带属性的对象**（两种读法都支持）"。
+ * 之前只按 `.text` 读 ⇒ 若它是函数就读到空串 ⇒ 正则永远不命中 ⇒ 整条分支静默跳过。
+ * 这里两种读法都试，并兜到 `ctx.state.quote.text`（晚挂点用的那个）。
+ */
+function readQuotedText(ctx) {
+  const out = { text: '', via: 'none', type: typeof ctx?.quoted };
+  try {
+    const q = ctx?.quoted;
+    if (typeof q === 'function') {
+      const v = q();
+      out.via = 'call';
+      out.text = String(v?.text ?? '');
+    }
+    if (!out.text) {
+      const t = q?.text ?? ctx?.state?.quote?.text ?? '';
+      if (t) out.via = out.via === 'call' ? 'call+prop' : 'prop';
+      out.text = String(t ?? '');
+    }
+  } catch (e) {
+    out.via = 'throw:' + (e?.message ?? e);
+  }
+  return out;
 }
 
 /**
@@ -124,9 +210,83 @@ export async function onInbound(ctx, next) {
     // 这里读不到 ctx.state.mention —— 想看"平台认为这条 @ 了她吗"，用 ctx.platform.mentioned
     // （判据与 SDK 的 mentionGate 完全一致：rawEventType / mentions[].is_you / 正文里的 <@appId>）
     const mentioned = ctx?.platform?.mentioned === true;
-    const quoted = ctx?.quoted?.text ?? '';
+    // ★ 2026-10-15：改用 readQuotedText（两种读法都试），并把读到的东西**落盘**
+    const q = readQuotedText(ctx);
+    const quoted = q.text ?? '';
+    const hit = isChildSessionForwardQuote(quoted);
+    void appendDiag('[enter] text=' + JSON.stringify(String(ctx?.text ?? '').slice(0, 40))
+      + ' quotedType=' + q.type + ' via=' + q.via
+      + ' quoted=' + JSON.stringify(quoted.slice(0, 60))
+      + ' hit=' + hit + ' scope=' + String(ctx?.scope ?? '-'));
 
     if (ctx?.scope === 'group' && isChildSessionForwardQuote(quoted)) {
+      // ── ★ 2026-10-15 主人定：只要引用了子会话转发 ⇒ **整条消灭**（不再区分有没有正文）★ ──
+      //   理由：二档 = 主人完全独立地跟子会话对话，子会话内容一个字都不该进父上下文；
+      //   而 QQ 引用会把被引原文带进上下文（绕过二档），且引用自带 @ 机器人 ⇒ 干脆整条吃掉。
+      if (ANNIHILATE_ANY_CHILD_QUOTE) {
+        // ★★ 2026-10-15 重写（第三版）：语义 = 「引用子会话转发消息」等价于「发给那个子会话」★★
+        //   要做三件事，缺一不可 —— 照 route-isolate.mjs 的姿势抄：
+        //     ① 从**被引原文**里解析出子会话 key（`【子会话 bee798c0】`）；
+        //     ② `annihilate({ ownerAck: true })` 登记消灭；
+        //     ③ **自己投递**（lib.routeToSession）—— 消息被消灭后，原路径的
+        //        `user/message` 钩子永远不会发生，没人投递就等于消息凭空消失；
+        //     ④ 末尾 **`return next()`**（★不是"消灭完就 return"★）。
+        //       引擎兜底只在"没调 next"时替扩展放行；调了 next，annihilate 的置位
+        //       会**直接吃掉那记 next**（链停在这里 + 跳过兜底）⇒ 主人生效且真被消灭。
+        //       上一版写成"消灭后直接 return"，反而触发了兜底放行、还把投递漏了。
+        let routeKey = null;
+        try {
+          const lib0 = await loadLib();
+          routeKey = lib0?.parseRouteKey?.(String(ctx?.text ?? '')) ?? null;
+        } catch { routeKey = null; }
+
+        if (!routeKey) {
+          // 从被引原文解析子会话短 id（宽松：不要求右括号，平台可能按 60 字截断）
+          const m = /【子会话[\s\u3000]*([0-9a-fA-F]{1,32})/.exec(String(quoted));
+          const childKey = m ? m[1] : null;
+          const kernel = ctx?.kernel ?? null;
+          void appendDiag('[branch] routeKey=- childKey=' + (childKey || '-')
+            + ' kernel=' + typeof ctx?.kernel + ' annihilate=' + typeof ctx?.annihilate);
+
+          if (!childKey) {
+            void appendDiag('[skip] 引用的是子会话转发但解析不出 id ⇒ 放行');
+          } else {
+            const acked = ctx?.annihilate?.({
+              reason: '引用子会话转发消息：对父上下文消灭（二档语义），并投递给子会话 ' + childKey,
+              ownerAck: true,   // 主人消息默认受白名单保护，必须显式解除；只解除这一条
+            });
+            void appendDiag('[annihilate] key=' + childKey + ' acked=' + acked);
+
+            if (!acked) {
+              // 消灭被拒（熔断/挂点不允许）⇒ 不自己投，交回原路径，避免"我投一次 + 原路径再投一次"
+              void appendDiag('[skip] annihilate 被拒 key=' + childKey + ' ⇒ 放行');
+            } else {
+              // 已登记消灭 ⇒ 必须自己投递（原路径的 user/message 钩子不会跑了）
+              let r = null;
+              try {
+                const lib = await loadLib();
+                // ★★ 2026-10-15 关键：**必须把 key 补进文本** ★★
+                //   `routeToSession` 内部自己 `parseRouteKey(text)`；引用这条路**没有** `[s:xxx]`
+                //   标记 ⇒ 会直接返回 `no-key` 而不投递（实测 diag：投递=FAIL(no-key)）。
+                //   补上标记后它就能解析到目标；随后 `stripRouteMark(text)` 会把标记剥掉，
+                //   所以**子会话收到的正文里不会留下这个前缀**。
+                const textToRoute = '[s:' + childKey + ']' + String(ctx.text ?? '');
+                r = await lib?.routeToSession?.(kernel, textToRoute, { message: ctx?.message });
+              } catch (e) {
+                r = { ok: false, reason: 'throw:' + (e?.message ?? e) };
+              }
+              void appendDiag('[done] key=' + childKey
+                + ' 已从父上下文消灭；投递=' + (r?.ok ? 'ok(' + r.reason + ')' : 'FAIL(' + r?.reason + ')'));
+            }
+          }
+        } else {
+          // 带路由标记 ⇒ 让路给 route-isolate（它负责消灭 + 投递），本扩展什么都不做
+          void appendDiag('[pass] 带路由标记 key=' + routeKey + ' → 让路给 route-isolate');
+        }
+        // ★★ 末尾必须调 next()：见上面 ④。annihilate 成功时它会吃掉这记 next。★★
+        return next();
+      }
+
       // 只读观测（debug 级，别刷屏）：这一步群历史**还没记** —— 对照晚挂点那条日志的时间序
       ctx?.logger?.debug?.(
         `[ext-inbound:${name}] 早挂点：引用的是子会话转发（平台@=${mentioned}，正文"${String(ctx.text).slice(0, 20)}"）` +
@@ -144,8 +304,10 @@ export async function onInbound(ctx, next) {
       // ── 可选动作 ②：消灭（纯转发空壳：没正文、没附件，只剩一个 @）──
       const atts = Array.isArray(ctx?.message?.attachments) ? ctx.message.attachments : [];
       if (ANNIHILATE_EMPTY_CHILD_FORWARD && atts.length === 0 && contentWithoutMentions(ctx) === '') {
-        ctx.annihilate({ reason: '子会话转发空壳（无正文无附件）' });
-        return;   // ★ 不调 next() = 这条不进历史、不进上下文、不占冷却
+        // ⚠️ 2026-10-15：消灭后必须**继续交给 next()**（不是直接 return）——
+        //    引擎兜底只在"没调 next"时替扩展放行；调了 next，annihilate 会吃掉它。
+        ctx.annihilate({ reason: '子会话转发空壳（无正文无附件）', ownerAck: true });
+        return next();
       }
 
       // ── 可选动作 ③：强制入站（确定要她看到这条时）──
