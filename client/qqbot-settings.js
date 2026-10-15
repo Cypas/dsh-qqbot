@@ -269,7 +269,10 @@ window.__ModuleLoader__.load({
     var FGROUPS = [
       {
         id: 'prompt', icon: '①', title: '群里她要一直记住的守则',
-        desc: '每轮回复都会带上的一段提醒(所有 QQ 群都生效,不碰你的人格设定)。默认是"表情包礼仪";想让她不主动发图,把这里清空即可(留空=没守则,不会自动填回)。',
+        desc: '每轮回复都会带上的一段提醒(所有 QQ 群都生效)。默认是"表情包礼仪"。'
+          + '这里也能直接写人设/性格要求 —— 改完点下方「保存」立刻生效, 不用去改 cordis.patch.yml'
+          + '(想整体换人格仍可在下面「Agent 预设」里换 preset)。'
+          + '想让她不主动发图, 把这里清空即可(留空=没守则, 不会自动填回)。',
         fields: [
           { k: 'groupPrompt', kw: '守则 人设 人格 提示词 提醒 每轮 遵守 规则 prompt', t: 'area', label: '', rows: 5, def: DEFAULT_GROUP_PROMPT },
           {
