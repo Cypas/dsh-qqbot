@@ -156,4 +156,88 @@ describe('dedupeYamlKeys — 判重作用域是"同一个映射"，不是"同一
     ].join('\n');
     expect(dedupeYamlKeys(src)).toBe(src);
   });
+
+  // ─────────── 2026-10-16 追加：issue #11（tyjianxianyu）报的另两种形状 ───────────
+  // 同一次保存还会删掉 subagent-model-selection-settings 的 `model:` 行 ⇒
+  // "subagent model selection requires non-empty provider and model ids" ⇒ 服务不注册
+  // ⇒ **所有会话 resume 失败**。所以下面两条不是"锦上添花"，是拦致命回归。
+
+  it('键名含冒号（include:aaa:）时其子键仍归自己的映射（issue #11 位置 1）', () => {
+    const src = [
+      '- id: mnemon',
+      '  config:',
+      '    entries:',
+      '      include:aaa:',
+      '        config:',
+      '          sourceKeys: [x]',
+      '      include:bbb:',
+      '        config: {}',
+      '',
+    ].join('\n');
+    const out = dedupeYamlKeys(src);
+    expect(droppedLines(src, out)).toEqual([]);
+    expect(out).toBe(src);
+    const parsed = yaml.load(out) as { config: { entries: Record<string, unknown> } }[];
+    // ⚠️ YAML 语义：`include:aaa:` 的**尾冒号是分隔符**，真正的键名是 `include:aaa`
+    //（这正是原实现翻车的点 —— 它按第一个冒号切，把键名当成了 `include`）。
+    expect(Object.keys(parsed[0].config.entries)).toEqual(['include:aaa', 'include:bbb']);
+    expect(parsed[0].config.entries['include:aaa']).toEqual({ config: { sourceKeys: ['x'] } });
+  });
+
+  it('列表项（- provider: …）各自独立，同名子键不许互相顶掉（issue #11 位置 2）', () => {
+    const src = [
+      '- id: subagent-model-selection-settings',
+      '  config:',
+      '    allowedModels:',
+      '      - provider: buddy',
+      '        model: deepseek-v4.1-flash',
+      '      - provider: buddy',
+      '        model: glm-5.3-flash',
+      '',
+    ].join('\n');
+    const out = dedupeYamlKeys(src);
+    expect(droppedLines(src, out)).toEqual([]);
+    expect(out).toBe(src);
+    const parsed = yaml.load(out) as { config: { allowedModels: unknown[] } }[];
+    expect(parsed[0].config.allowedModels).toEqual([
+      { provider: 'buddy', model: 'deepseek-v4.1-flash' },
+      { provider: 'buddy', model: 'glm-5.3-flash' },
+    ]);
+  });
+
+  it('列表项里的真重复键仍然只留最后一次（兜底不因上面两条而退化）', () => {
+    const src = [
+      '- id: demo-list',
+      '  config:',
+      '    allowedModels:',
+      '      - provider: buddy',
+      '        model: A',
+      '        model: B',
+      '',
+    ].join('\n');
+    const out = dedupeYamlKeys(src);
+    expect(out).not.toContain('model: A');
+    expect(out).toContain('model: B');
+    expect(yaml.load(out)).toEqual([{ id: 'demo-list', config: { allowedModels: [{ provider: 'buddy', model: 'B' }] } }]);
+  });
+
+  it('多层嵌套列表项：每层各自独立，不串父级', () => {
+    const src = [
+      '- id: nested',
+      '  config:',
+      '    matrix:',
+      '      - name: a',
+      '        items:',
+      '          - key: k',
+      '            value: 1',
+      '          - key: k',
+      '            value: 2',
+      '      - name: b',
+      '        items:',
+      '          - key: k',
+      '            value: 3',
+      '',
+    ].join('\n');
+    expect(dedupeYamlKeys(src)).toBe(src);
+  });
 });

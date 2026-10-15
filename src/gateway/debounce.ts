@@ -271,17 +271,34 @@ function attachmentNote(atts: unknown, processed: unknown): string {
   if (!Array.isArray(atts) || atts.length === 0) return '';
   const out: string[] = [];
   for (const raw of atts) {
-    const a = raw as { type?: unknown; url?: unknown; filename?: unknown };
-    const t = String(a?.type ?? '');
+    // ★★ 2026-10-15 修：**真实字段是 `content_type`（snake_case）** ★★
+    //   证据：`src/types.ts` 的 `RawAttachment`（注释明写"snake_case 字段，来自 QQ 网关
+    //   C2C_MESSAGE_CREATE"）字段为 `content_type` / `filename` / `url` / `asr_refer_text`。
+    //   这里原来只读 `a.type` ⇒ 恒为空串 ⇒ 所有分支都进不去 ⇒ 插话正文只剩 "(无文字内容)"，
+    //   群里发的图/文件在插话模式下**完全看不到链接**（主人实测踩到）。
+    //   三种命名都读（content_type / contentType / type），向后兼容。
+    const a = raw as {
+      type?: unknown; contentType?: unknown; content_type?: unknown;
+      url?: unknown; filename?: unknown;
+    };
+    const t = String(a?.content_type ?? a?.contentType ?? a?.type ?? '');
     const url = String(a?.url ?? '');
     if (t.includes('image')) {
       const local = url ? lookupImagePath(url) : undefined;
-      out.push(`[图片: ${local ?? url}]`);
-    } else if (t === 'voice' || t === 'audio') {
+      out.push(`[图片: ${local ?? (url || '（无链接）')}]`);
+    } else if (t === 'voice' || t.includes('audio')) {
       const vt = voiceTextOf(processed);
       out.push(vt ? `[语音] ${vt}` : '[语音]');
-    } else if (t === 'video') out.push('[视频]');
-    else if (t === 'file') out.push(`[文件: ${String(a?.filename ?? '') || '未知'}]`);
+    } else if (t.includes('video')) {
+      // ★ 原来只有 "[视频]"、丢了链接 ⇒ 补上
+      out.push(url ? `[视频: ${url}]` : '[视频]');
+    } else if (t.includes('file') || t.includes('application') || t.includes('zip') || t.includes('octet')) {
+      // ★ 原来只有文件名、丢了链接 ⇒ 补上（群友发压缩包时最关键）
+      out.push(`[文件: ${String(a?.filename ?? '') || '未知'}${url ? ' ' + url : ''}]`);
+    } else if (t) {
+      // 兜底：认不出的类型也把原始类型 + 链接带出去，别再静默丢
+      out.push(`[附件(${t}): ${String(a?.filename ?? '') || ''}${url ? ' ' + url : ''}]`.replace(/\s+/g, ' '));
+    }
   }
   return out.join(' ');
 }

@@ -363,6 +363,7 @@ export function dedupeYamlKeys(text) {
   let cur = '';
   const stack = [];           // 打开的父键路径: [{ indent, key }]
   let blockIndent = -1;       // ≥0 = 正在跳过某个块标量的正文
+  let listSeq = 0;            // ★ 列表项序号（issue #11 修①）—— 必须在循环外，循环内会被逐行重置
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     const blank = l.trim() === '';
@@ -375,7 +376,30 @@ export function dedupeYamlKeys(text) {
     if (blank || l.trimStart().startsWith('#')) continue;
     const mId = /^(\s*)-\s*id:\s*(\S+)\s*$/.exec(l);
     if (mId) { cur = mId[2]; seen.clear(); stack.length = 0; continue; }
-    const mK = /^(\s*)(?!-)([^\s:][^:]*?):(\s|$)/.exec(l);
+
+    // ★★ 2026-10-16（issue #11 / tyjianxianyu 报，本机已复现并验证）★★
+    //   修①：**列表项必须压栈**。YAML 里 `- provider: buddy` 的每个 item 都是**独立节点**，
+    //   原来这里把 `-` 开头的行直接放过去、不压栈 ⇒ 它下面的子键（如 `model: A`）会挂到
+    //   **上一个 item 的父级**上 ⇒ 两个 item 的同名子键拿到**同一个签名** ⇒ 前一个被当成
+    //   "重复键"删掉。实测（issue 的最小输入）：`allowedModels` 两项的 `model:` 2 个 → 只剩 1 个。
+    //   线上真实后果：删掉 `subagent-model-selection-settings` 的 `model:` 行 ⇒
+    //   "subagent model selection requires non-empty provider and model ids" ⇒ 该 entry 校验失败
+    //   ⇒ 服务不注册 ⇒ **所有会话 resume 失败**。
+    //   用递增序号标识同层不同 item，保证签名互不相同。
+    //   ⚠️ 序号计数器必须在**循环外**（放循环里每行重置 ⇒ 所有 item 都叫 `-[1]` ⇒ 等于没修）。
+    const mItem = /^(\s*)-\s+\S/.exec(l);
+    if (mItem) {
+      const itemIndent = mItem[1].length;
+      while (stack.length && stack[stack.length - 1].indent >= itemIndent) stack.pop();
+      stack.push({ indent: itemIndent, key: '-[' + (++listSeq) + ']' });
+      continue;
+    }
+
+    //   修②：**键名允许含冒号**。YAML 键名可以带 `:`（如 `include:aaa:`、`include:mnemon-xxx:`），
+    //   原正则 `([^\s:][^:]*?)` 明确禁止冒号 ⇒ 这类行不被识别为键、不压栈 ⇒ 它们下面的子键
+    //   挂错父级 ⇒ 同样被误删（issue 里的"位置 1"，隐蔽、不报错，只是 auto-capture 拿不到数据源）。
+    //   `(?!-)` 保留：行首 `-` 已由上面的列表项分支处理，这里只认真正的键。
+    const mK = /^(\s*)(?!-)(\S.*?):(\s|$)/.exec(l);
     if (!mK) continue;
     const keyIndent = mK[1].length;
     const key = mK[2];

@@ -1,3 +1,30 @@
+## [1.10.8] - 2026-10-16
+
+### 修复
+- **`dedupeYamlKeys` 会误删 profile patch 的键行 ⇒ 所有会话 resume 失败**（`settings-host.js`，issue #11 / @tyjianxianyu 报告，本机已复现）：
+  - **症状**：设置页保存一次账号，`cordis.patch.yml` 被**静默删掉几行**（YAML 仍合法，语义已坏）。
+    删掉 `subagent-model-selection-settings` 的 `model:` 行后，该 entry 校验报
+    `subagent model selection requires non-empty provider and model ids` ⇒ 服务不注册 ⇒
+    **全部会话 resume 失败**。
+  - **根因 1（致命）**：**行首 `-` 的列表项不压栈**。`- provider: buddy` 的每个 item 本是独立节点，
+    原实现直接跳过 ⇒ 其子键（`model: A`）挂到**上一个 item 的父级** ⇒ 两个 item 的同名子键
+    拿到同一签名 ⇒ 前一个被当成"重复键"删掉。实测：`allowedModels` 两项的 `model:` 2 个 → 1 个。
+  - **根因 2（隐蔽）**：**键名正则禁止冒号**。`([^\s:][^:]*?)` 在第一个冒号处就切 ⇒ `include:aaa:`
+    的键被读成 `include` ⇒ 父路径错、子键被误删（不报错，只是 auto-capture 拿不到数据源）。
+  - **修法**：列表项用递增序号压栈（`-[1]`/`-[2]`…，计数器**放在循环外**）；键名正则放开为
+    `(\S.*?):(\s|$)`。新增 4 个单测（键名含冒号 / 列表项 / 列表项内真重复键 / 多层嵌套列表项）。
+  - **验证**：两个最小复现均"一行不删"；**线上真实 `cordis.patch.yml` 2102 行 → 2102 行、逐字节不变**。
+  - 注：PR #9（判重作用域改"父键路径 + 键名"）已合入，本次修的是它之后仍漏的另两种形状。
+- **插话模式下群友发的图/文件看不到链接**（`src/gateway/debounce.ts` 的 `attachmentNote`）：
+  - **症状**：插话注入的入站消息里，群友发的图片只显示 `[愤怒的小鸟] (无文字内容)`，
+    模型完全看不到附件。
+  - **根因**：该函数读的是 `a.type`，而 QQ 网关原始附件字段是 **`content_type`（snake_case）**
+    （见 `src/types.ts` 的 `RawAttachment`，注释明写"snake_case 字段，来自 QQ 网关 C2C_MESSAGE_CREATE"）
+    ⇒ 取到空串 ⇒ 所有类型分支都进不去 ⇒ 附件描述为空 ⇒ 正文回落成 `(无文字内容)`。
+  - **修法**：三读 `content_type ?? contentType ?? type`；并补上本来就丢链接的两处 ——
+    `video` 原来只输出 `[视频]`、`file` 原来只有文件名，现在都带 URL；另加"认不出的类型也把
+    原始类型 + 链接带出去"的兜底，不再静默丢。
+
 ## [1.10.7] - 2026-10-15
 
 ### 修复
