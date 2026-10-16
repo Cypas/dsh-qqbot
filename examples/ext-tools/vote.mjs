@@ -1,3 +1,6 @@
+import { join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+
 /**
  * vote.mjs — 「群投票」扩展工具 v3（2026-10-08）
  *
@@ -31,6 +34,162 @@ const LETTERS = 'ABCDEFGHIJKLMNOPQRST';       // 20 个字母
 const END_BTN = 'e';                          // 结束按钮的 buttonId
 const TOOL = 'vote';
 const SEP = /[|｜,，]/;
+
+/**
+ * ★ 2026-10-16 主人要求：「结束投票」按钮**只有主人能点**，别人点了不生效。
+ * 之前任何群友点一下就结算（主人开的那次被秒结束）。
+ * 白名单写在这里；要加人往数组里加 openid 即可。
+ */
+const END_ALLOWED_OPENIDS = [
+  'B901EA3CE83714B5719E96A5938F6C37',         // 做早饭（群主/主人）
+  'E9020753E73AD84C10A79B6006E96C63',         // 做早饭（旧号，一并放行）
+];
+/** 点击者是否有权结束。空值一律拒绝（fail-closed）。 */
+function canEnd(openid) {
+  const id = String(openid ?? '').trim();
+  return id !== '' && END_ALLOWED_OPENIDS.includes(id);
+}
+
+/**
+ * ★ 2026-10-16 主人要求：投票记录要带**真实用户名**（谁投了什么、谁点的结束）。
+ *
+ * 取名字的优先级（先官方、后兜底），跟插件自己的 botplay/memberName 同源：
+ *   ① `ctx.user.name` —— 插件官方契约（docs/extension-contract.md）：
+ *      身份三件套 `env.user.openid / .name / .isOwner`，按钮回调侧同样可读。
+ *   ② **群成员台账** `{dataRoot}/表情包/group-members.jsonl` ——
+ *      这就是插件 `Botplay.memberName()` 查昵称时读的那份台账（见 dist/features/botplay.js:1016
+ *      「台账(host 侧与 dock 禁言同源: dataDir=表情包目录, 同 group-members.jsonl)」）。
+ *      每行 `{ts, gid, mid, name}`：mid=openid、name=**真实 QQ 昵称**（不是 openid）。
+ *      后写的行覆盖先写的 ⇒ 自然取到最新昵称。
+ *   ③ 回落 `msg-index` 的 openid→昵称表（`{dataRoot}/.qqbot/msg-index/<scope>_<peerId>/refs.json`
+ *      里 `entries[].s`=openid、`n`=昵称）——台账里还没出现的人（从没说过话）用它兜。
+ *   ④ 再不行才显示 openid 前 6 位；全程不抛错（名字只是锦上添花，别拖垮投票）。
+ */
+function dataRootOf(env) {
+  return env?.dataRoot || env?.caps?.dataRoot || process.cwd();
+}
+/** 台账路径：{dataRoot}/表情包/group-members.jsonl */
+function ledgerPath(env) {
+  return join(dataRootOf(env), '表情包', 'group-members.jsonl');
+}
+/** msg-index 目录：{dataRoot}/.qqbot/msg-index */
+function nameIndexPath(env) {
+  return join(dataRootOf(env), '.qqbot', 'msg-index');
+}
+/** 读群成员台账（openid → 真实昵称）。任何异常都返回空表，绝不抛。 */
+function loadMemberLedger(env) {
+  const map = new Map();
+  let raw;
+  try {
+    raw = readFileSync(ledgerPath(env), 'utf8');
+  } catch {
+    return map; // 台账不存在 = 还没攒到成员，正常
+  }
+  for (const line of raw.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    try {
+      const o = JSON.parse(s);
+      const mid = String(o?.mid ?? '').trim();
+      const name = String(o?.name ?? '').trim();
+      if (mid && name) map.set(mid, name);
+    } catch { /* 单行坏了跳过 */ }
+  }
+  return map;
+}
+/** 读一遍 msg-index，拼 openid → 昵称。任何异常都返回空表。 */
+function loadNameMap(env) {
+  const map = new Map();
+  const base = nameIndexPath(env);
+  let scopes;
+  try {
+    scopes = readdirSync(base, { withFileTypes: true }).filter((d) => d.isDirectory());
+  } catch {
+    return map; // 目录不存在 = 没有历史，正常
+  }
+  for (const d of scopes) {
+    try {
+      const raw = readFileSync(join(base, d.name, 'refs.json'), 'utf8');
+      const j = JSON.parse(raw);
+      for (const e of j?.entries ?? []) {
+        const s = String(e?.s ?? '').trim();
+        const n = String(e?.n ?? '').trim();
+        if (s && n) map.set(s, n);
+      }
+    } catch { /* 单个会话文件坏了不影响其它 */ }
+  }
+  return map;
+}
+/** 一次把两张表都读出来（按钮回调里只调一次，别每个人名读一次盘）。 */
+function loadNames(env) {
+  return { ledger: loadMemberLedger(env), index: loadNameMap(env) };
+}
+
+/** 进程内 API 查询缓存：`${gid}|${openid}` → 真名（免得同一人反复打官方接口） */
+const API_NAME_CACHE = new Map();
+
+/**
+ * ★ 2026-10-16 主人（小号）指路：**只要有 openid 就能从 QQ 官方接口拿昵称**。
+ *
+ * 官方接口（插件 `dist/api/group-admin.js:213` 用的就是这条）：
+ *   GET https://api.bot.qq.com/v2/groups/{group_openid}/members/{member_openid}
+ *   返回 data.username = **真实 QQ 昵称**
+ * 扩展契约（docs/extension-contract.md §2）把这条路直接开给了扩展：
+ *   `await env.api(path)` —— 「官方 API，自带 token 与 2h 缓存；返回 {ok,data} 或 {ok:false,err}」。
+ * 所以不需要 appSecret、不需要自己换 token。
+ *
+ * 拿不到 group openid（单聊）或接口没权限时返回空串，由上层继续往下兜。
+ */
+async function fetchNameViaApi(env, openid) {
+  const gid = String(env?.peer?.peerId ?? '').trim();
+  const scope = String(env?.peer?.scope ?? '').trim();
+  const id = String(openid ?? '').trim();
+  if (!id || !gid || (scope && scope !== 'group')) return '';
+  if (typeof env?.api !== 'function') return '';
+  const key = `${gid}|${id}`;
+  if (API_NAME_CACHE.has(key)) return API_NAME_CACHE.get(key);
+  let nm = '';
+  try {
+    const r = await env.api(`/v2/groups/${encodeURIComponent(gid)}/members/${encodeURIComponent(id)}`);
+    if (r?.ok) nm = String(r.data?.username ?? '').trim();
+    else env.log?.(`[vote] 官方接口查昵称未命中 ${id.slice(0, 6)}… code=${r?.err?.code ?? '?'}`);
+  } catch (e) {
+    env.log?.(`[vote] 官方接口查昵称异常(不影响投票): ${e?.message ?? e}`);
+  }
+  API_NAME_CACHE.set(key, nm);
+  if (API_NAME_CACHE.size > 500) API_NAME_CACHE.clear();
+  return nm;
+}
+
+/**
+ * 取点击者真实昵称，优先级：
+ *   ① 插件官方给的 `ctx.user.pureName / .name`
+ *   ② ★ QQ 官方接口 `/v2/groups/{gid}/members/{openid}` → username（只要 openid 就能查到真名）
+ *   ③ 群成员台账 `表情包/group-members.jsonl`（本地、瞬时、覆盖说过话的人）
+ *   ④ msg-index 的 openid→昵称表
+ *   ⑤ 实在没有才显示 openid 前 6 位
+ * 全程不抛错：名字拿不到也绝不能拖垮投票。
+ */
+async function resolveName(env, ctx, openid, names) {
+  const official =
+    String(ctx?.user?.pureName ?? '').trim() ||
+    String(ctx?.user?.name ?? '').trim();
+  if (official) return official;
+  const id = String(openid ?? '').trim();
+  if (!id) return '（未知）';
+  const viaApi = await fetchNameViaApi(env, id);
+  if (viaApi) return viaApi;
+  const hit = names?.ledger?.get(id) || names?.index?.get(id);
+  if (hit) return hit;
+  // ⑤ 最后兜底：**用 @ 代替名字**
+  //    只点按钮、从没在群里说过话的人不会进成员台账，官方接口又没权限 ⇒ 本地查不到。
+  //    但 QQ 自己认得 openid：把 `<@openid>` 放进回执/结算里，客户端会把昵称渲染出来，
+  //    于是照样「看得到是谁」，而不是一串 openid 前六位。
+  try {
+    if (typeof env?.at === 'function') return env.at(id);
+  } catch { /* at 失败就退回前缀 */ }
+  return `${id.slice(0, 6)}…`;
+}
 
 function loadAll(env) {
   const d = env?.store && typeof env.store.load === 'function' ? env.store.load() : undefined;
@@ -85,7 +244,7 @@ function cardBody(v, extra) {
   v.options.forEach((o, i) => lines.push(`**${LETTERS[i] ?? '?'}**. ${o}`));
   lines.push('');
   if (v.closed) lines.push(`⛔ 已结束（共 ${Object.keys(v.votes).length} 人参与）`);
-  else lines.push('可多选：想投几个就点几个；每个按钮每人只能点一次。想收摊就点「✋ 结束投票」。');
+  else lines.push('可多选：想投几个就点几个；每个按钮每人只能点一次。（「✋ 结束投票」只有主人能点）');
   if (extra) lines.push('', extra);
   return lines.join('\n');
 }
@@ -132,12 +291,25 @@ function keyboardOf(voteId, options) {
 
 /** 完整结算块（只在"结束时"用；中途回执不许用它） */
 function tallyBlock(v) {
-  const people = Object.keys(v.votes).length;
-  const lines = [`参与人数：**${people}**（可多选）`];
+  const nameOf = (id) => v.names?.[id] || `${String(id).slice(0, 6)}…`;
+  const entries = Object.entries(v.votes ?? {});
+  const lines = [`参与人数：**${entries.length}**（可多选）`];
   v.options.forEach((o, i) => {
-    const n = Object.values(v.votes).filter((c) => (Array.isArray(c) ? c : [c]).includes(i)).length;
-    lines.push(`· ${LETTERS[i]}. ${o} —— **${n}** 票`);
+    const voters = entries
+      .filter(([, c]) => (Array.isArray(c) ? c : [c]).includes(i))
+      .map(([id]) => nameOf(id));
+    lines.push(`· ${LETTERS[i]}. ${o} —— **${voters.length}** 票${voters.length ? `：${voters.join('、')}` : ''}`);
   });
+  if (entries.length) {
+    lines.push('', '**投票明细**');
+    for (const [id, c] of entries) {
+      const arr = (Array.isArray(c) ? c : [c])
+        .filter((x) => Number.isInteger(x) && v.options[x] !== undefined)
+        .map((x) => `${LETTERS[x]}`);
+      lines.push(`· ${nameOf(id)} → ${arr.join('、') || '（无）'}`);
+    }
+  }
+  if (v.endedBy) lines.push('', `✋ 由 **${nameOf(v.endedBy)}** 结束`);
   return lines.join('\n');
 }
 
@@ -154,28 +326,53 @@ async function sendCard(env, v, extra) {
   return env.markdownCard(cardBody(v, extra), keyboardOf(v.id, v.options));
 }
 
-/** 结束收尾（结束按钮 / action=end 共用）：群里公示 + 通知 AI */
-async function finish(env, v, byWhom) {
+/**
+ * 结束收尾（结束按钮 / action=end 共用）。
+ *
+ * ★ 2026-10-16 主人要求（两轮澄清后的口径）：
+ *   · 「结束投票不报消息」= 不再往**群里**发那张结算表（POLL_GROUP_BROADCAST=false）
+ *   · 但「结束统计的回执本身是要的」= 点结束的人仍收到一句回执（由 onInteraction 的返回值发）
+ *   · appendWake 通知 AI 也一并关掉（AI 自己用 status 就能查）
+ * 想恢复"结束就往群里公示统计"：把下面 POLL_GROUP_BROADCAST 改回 true。
+ */
+const POLL_GROUP_BROADCAST = false;
+/** 结束是否唤醒 AI 通报
+ *  ★ 2026-10-16 主人反馈「按了结束投票，AI 没收到结果」→ 改回 true：
+ *    结束（含私聊里点卡片结束按钮 / action=end）都把结算表 appendWake 进会话。
+ *    群公示仍由上面的 POLL_GROUP_BROADCAST 单独控制。 */
+const POLL_WAKE_AI = true;
+
+async function finish(env, v, byWhom, byName) {
   const first = !v.closed;
   v.closed = true;
   v.endedAt = Date.now();
+  // ★ 记录"谁点的结束"（openid + 昵称），结算表里会写出来
+  if (byWhom) v.endedBy = byWhom;
+  if (byWhom && byName) v.names = { ...(v.names ?? {}), [byWhom]: byName };
   const block = tallyBlock(v);
-  try {
-    await env.markdown([
-      `🗳 **投票结束：${v.topic}**（${v.id}）`,
-      byWhom ? `由 ${byWhom} 点下了结束按钮。` : '',
-      '',
-      block,
-    ].filter(Boolean).join('\n'));
-  } catch { /* 公示失败不影响结算 */ }
-  let woke = false;
-  try {
-    if (typeof env.appendWake === 'function') {
-      // appendWake 返回 false = 没唤醒成功（例如 caps 没拿到该会话的 agent）—— 别嘴上说通知了
-      woke = (await env.appendWake(`[投票结束] ${v.id}「${v.topic}」已结算：\n${block}`)) !== false;
-    }
-  } catch { /* 通知失败不影响结算 */ }
-  return { first, block, woke };
+
+  // 群公示（默认关）：只影响"往群里发那张表"，不影响给点击者的回执
+  if (POLL_GROUP_BROADCAST) {
+    try {
+      await env.markdown([
+        `🗳 **投票结束：${v.topic}**（${v.id}）`,
+        byWhom ? `由 ${byWhom} 点下了结束按钮。` : '',
+        '',
+        block,
+      ].filter(Boolean).join('\n'));
+    } catch { /* 公示失败不影响结算 */ }
+  }
+
+  // 通知 AI（默认关）
+  if (POLL_WAKE_AI) {
+    try {
+      if (typeof env.appendWake === 'function') {
+        await env.appendWake(`[投票结束] ${v.id}「${v.topic}」已结算：\n${block}`);
+      }
+    } catch { /* 通知失败不影响结算 */ }
+  }
+
+  return { first, block, woke: false };
 }
 
 export default {
@@ -273,7 +470,7 @@ export default {
       if (!v) return { ok: false, msg: `没找到投票 ${args?.voteId}` };
       const { first, block } = await finish(env, v, '');
       saveAll(env, all);
-      return { ok: true, msg: `${first ? '已结束并结算' : '该投票此前已结束，重新结算'}：${v.id}「${v.topic}」\n${block}` };
+      return { ok: true, msg: `${first ? '已结束并结算' : '该投票此前已结束，重新结算'}：${v.id}「${v.topic}」\n\n${block}` };
     }
 
     return { ok: false, msg: `未知 action：${action}（可用：start / add / status / end）` };
@@ -287,21 +484,33 @@ export default {
     const v = pick(all, info.cardId);
     if (!v) return '这次投票不存在或已被清理。';
 
-    const who = `${openid.slice(0, 6)}…`;
+    // ★ 2026-10-16：取点击者真实昵称
+    //   官方 ctx.user.name → QQ 官方接口(只要 openid 就能查真名) → 群成员台账 → msg-index → openid 前缀
+    const names = loadNames(ctx);
+    const name = await resolveName(ctx, ctx, openid, names);
+    const who = `${name}(${openid.slice(0, 6)}…)`;
+
+    // ★ 2026-10-16 主人要求：投票一旦结束，任何人再点**都不回执**（静默吞掉）。
+    //   契约：onInteraction 返回空串 = 不发回执（见 ext-tool-interaction.js: `if (text) sendReceipt(...)`）。
+    if (v.closed) {
+      ctx.log?.(`[vote] ${v.id} 已结束，忽略 ${who} 的点击（静默）`);
+      return '';
+    }
 
     // ── 结束按钮 ─────────────────────────────────────────
     if (String(info.buttonId) === END_BTN) {
-      if (v.closed) return '这次投票已经结束啦，结算在上面那条消息里。';
-      const { woke } = await finish(ctx, v, who);
+      // ★ 2026-10-16 主人要求：只有主人的 openid 能结束；别人点了不结算
+      if (!canEnd(openid)) {
+        ctx.log?.(`[vote] ${v.id} 结束按钮被非主人点击：${who}（已拒绝）`);
+        return '这个按钮只有主人能点哦～想结算的话叫一声早饭哥哥。';
+      }
+      const { woke, block } = await finish(ctx, v, openid, name);
       saveAll(ctx, all);
       ctx.log?.(`[vote] ${v.id} 由 ${who} 点结束按钮 woke=${woke}`);
-      // 回执据实：通知失败时别嘴硬（2026-10-08 主人抓到过一次"说通知了其实没通知"）
-      return woke
-        ? '✅ 已结束，结算发到群里了（也把结果通知给 AI 了）。'
-        : '✅ 已结束，结算发到群里了（⚠️ 但通知 AI 没成功，可以让她用 status 自查）。';
+      // ★ 2026-10-16 主人澄清：「结束统计的回执本身是要的」——
+      //   所以这里把结算表**作为回执**发给点击者（只有点的人看得到，不刷群）。
+      return `✅ 已结束，结算如下：\n\n${block}`;
     }
-
-    if (v.closed) return '这次投票已经结束啦，结算在上面那条消息里。';
 
     const idx = Number(String(info.buttonId ?? ''));
     if (!Number.isInteger(idx) || idx < 0 || idx >= v.options.length) return '这个选项不认识…';
@@ -313,11 +522,13 @@ export default {
     const mine = choicesOf(v, openid);
     mine.push(idx);
     v.votes[openid] = mine;
+    // ★ 记下这个人叫什么（结算表里要写"谁投了什么"）
+    v.names = { ...(v.names ?? {}), [openid]: name };
     saveAll(ctx, all);
 
     const cnt = Object.values(v.votes).filter((c) => (Array.isArray(c) ? c : [c]).includes(idx)).length;
     ctx.log?.(`[vote] ${v.id} by=${who} → ${LETTERS[idx]}（该项第 ${cnt} 票）`);
     // ★ 中途回执只报这一票（主人要求：别甩整张表，完整结算只在结束时给）
-    return `✅ 「${LETTERS[idx]}. ${v.options[idx]}」+1 票（当前 ${cnt} 票）`;
+    return `✅ ${name} 「${LETTERS[idx]}. ${v.options[idx]}」+1 票（当前 ${cnt} 票）`;
   },
 };
