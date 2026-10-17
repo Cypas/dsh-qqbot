@@ -51,7 +51,37 @@ chunkTarget?: (i: number, total: number) => ReplyTarget,
  *  配额即重置, 计数必须跟着归零, 否则会误补发(2026-09-10 主人指出)。 */
 onBlockSent?: (text: string, target: ReplyTarget) => void, 
 /** 引用短号查表(2026-09-13 主人定): 传短号(如 0913a) → 完整 msg_id; 台账见 transport/msg-index.ts */
-refLookup?: (index: string) => string | undefined): Promise<void>;
+refLookup?: (index: string) => string | undefined, 
+/**
+ * ★★ 2026-10-16 主人定：**出站扩展链**的上下文（第六套扩展点 `.qqbot-extensions/outbound/`）★★
+ *
+ * 挂在这里的原因：`sendRichOutbound` 是**所有出站**（AI 正文 / 媒体段 / 卡片文本）的必经之路，
+ * 出站扩展才有机会"改正文、消灭这条、额外补发媒体"。
+ *
+ * 缺省（不传）也**照跑链** —— 扩展可能只想按文本/会话判断；`enabled:false` 才是显式关闭
+ * （给内部回环调用用，避免"自己发的又被自己拦"）。
+ */
+extHook?: {
+    enabled?: boolean;
+    /** 本回合 id（同一回合的所有正文块共享） */
+    turnId?: string;
+    /** 本回合内第几个正文块（从 0 起） */
+    chunkIndex?: number;
+    /** 是否本回合最后一个正文块（示范"按正文配表情包"就看它） */
+    isLastChunk?: boolean;
+    /** 这条出站是什么（默认 text） */
+    kind?: 'text' | 'markdown' | 'media' | 'card' | 'forward' | 'other';
+    /** 数据根（扩展的 store 用它） */
+    dataRoot?: string;
+    /** 主人 openid 白名单 */
+    owners?: string[];
+    /** 插件自己的 cordis Context（扩展的 kernel） */
+    kernel?: unknown;
+    /** 带 token 的官方 API 调用 */
+    apiCall?: unknown;
+    /** 插件 logger */
+    logger?: unknown;
+}): Promise<void>;
 export declare class OutboundBuffer {
     private readonly record;
     private readonly bot;

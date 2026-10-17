@@ -169,6 +169,8 @@ export interface ExtInboundCaps {
 export interface ExtCapabilities {
     appId: string;
     appSecret: string;
+    /** ★ 2026-10-16：数据根（扩展之间共享一小份状态时用它拼固定路径；空串=拿不到，别拿它拼相对路径写盘） */
+    dataRoot: string;
     at(id: string): string;
     text(s: string): Promise<boolean>;
     markdown(s: string): Promise<boolean>;

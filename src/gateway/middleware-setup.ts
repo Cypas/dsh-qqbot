@@ -29,6 +29,8 @@ import { stickerCapture } from '../middleware/sticker-capture.js';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.js';
 import { loadExtensionCommands } from '../features/extension-store.js';
 import { registerExtCommandReloader, registerExtInboundReloader, type ExtCommandReloadResult } from '../features/ext-reload.js';
+// ★ 2026-10-16 出站扩展（第六套扩展点）：配置 + 首次装载 + 给其他扩展用的"出站操控器"
+import { configureOutboundExtensions, installOutboundApi, reloadOutboundExtensions } from '../features/ext-outbound.js';
 import {
   loadInboundExtensions,
   runEarlyInboundExtensions,
@@ -211,6 +213,23 @@ export async function setupMiddlewares(
     const r = await reloadInboundExtensions();
     return { count: r.total, names: r.extensions.map((e) => e.name) };
   });
+
+  // ── 出站扩展（第六套扩展点，2026-10-16 主人定）──────────────────────────────
+  //   `{dataRoot}/.qqbot-extensions/outbound/*.mjs` 由 transport/outbound-buffer 的
+  //   `sendRichOutbound` 在**发送前**调 `runOutboundChain` 生效（改正文 / 消灭这条 / 补发媒体）。
+  //   这里只做两件事：① 把 dataRoot+logger 配置进去（之后热刷可直接重扫，不必再注册回调）；
+  //   ② 首次装载 + 装"出站操控器"（`globalThis[Symbol.for('im-qqbot.outbound')]`）供**其他扩展**调用。
+  try {
+    configureOutboundExtensions({ dataRoot: dataRootOf(config), logger });
+    installOutboundApi();
+    const ro = await reloadOutboundExtensions();
+    if (ro.total > 0) {
+      logger.info(`[ext-outbound] 启动装载 ${ro.total} 个出站扩展: ${ro.extensions.map((e) => e.name).join(', ')}`);
+    }
+  } catch (err) {
+    // 出站扩展装载失败**绝不影响出站**：链在没装到扩展时就是直通
+    logger.warn(`[ext-outbound] 启动装载失败(不影响出站): ${err instanceof Error ? err.message : String(err)}`);
+  }
   bot.use(async (ctx, next) => {
     await runEarlyInboundExtensions(inboundExts, ctx, next, logger, extRunOpts(ctx));
   });

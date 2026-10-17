@@ -182,6 +182,8 @@ export interface ExtInboundCaps {
 export interface ExtCapabilities {
   appId: string;
   appSecret: string;
+  /** ★ 2026-10-16：数据根（扩展之间共享一小份状态时用它拼固定路径；空串=拿不到，别拿它拼相对路径写盘） */
+  dataRoot: string;
   at(id: string): string;
   text(s: string): Promise<boolean>;
   markdown(s: string): Promise<boolean>;
@@ -333,6 +335,12 @@ export function makeExtCaps(deps: ExtCapsDeps): ExtCapabilities {
   return {
     appId,
     appSecret,
+    // ★ 2026-10-16：把**数据根**也暴露出来。
+    //   原因：`store` 是"每个扩展自己一份"（storeFile 按 selfName 分），
+    //   而扩展之间要**共享一小份状态**时（例：`sticker_auto` 工具写开关、
+    //   `outbound/sticker-semantic.mjs` 读同一个开关）需要一个**两边都算得出来的固定路径**。
+    //   无 dataRoot 时是空串 —— 扩展自己判空降级，不要拿它拼相对路径写盘。
+    dataRoot: String(deps.dataRoot ?? ''),
 
     // ── @人 ────────────────────────────────────────────────────────
     at: (id: string) => `<@${String(id ?? '')}>`,

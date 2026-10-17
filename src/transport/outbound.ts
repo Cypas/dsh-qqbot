@@ -216,6 +216,29 @@ class OutboundRouter {
     const st = this.turnBlocks.get(sessionKey);
     this.turnBlocks.delete(sessionKey);
     if (!st) return;
+
+    // ══ ★★ 2026-10-16 主人定：**回合结束钩子**（出站扩展的配图挂这里）★★ ══
+    //   为什么是这里：`turn/end` + `buffer.flush()` 之后 = **回合真正结束**；
+    //   而 `st.last` 由 `noteGenerated` 逐块更新 ⇒ **是这一回合权威的最后一块正文**。
+    //   ⚠️ 之前挂在 `sendRichOutbound` 入口是**错的**：一段回复可能有"正文→工具调用→正文"
+    //      多段，每段都走一次入口 ⇒ 第一段就被当成本回合正文拿去判定了（主人实测抓到）。
+    //   丢后台跑（不 await）：正文早就发完了，配图慢一点无所谓，而且绝不能反过来卡住任何发送。
+    void (async () => {
+      try {
+        const { runOutboundTurnEnd } = await import('../features/ext-outbound.js');
+        await runOutboundTurnEnd(st.last, {
+          target: this.resolveTarget(record),
+          sender: this.bot,
+          logger: this.logger,
+          turnId: sessionKey,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `im-qqbot: 回合结束钩子失败(不影响任何发送): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    })();
+
     if ((this.config.outboundMode || 'adaptive') !== 'passive') return;
     if (st.count <= 5 || !st.last.trim()) return;
     void this.bot.sendMarkdown(this.activeTarget(record), st.last).then(
