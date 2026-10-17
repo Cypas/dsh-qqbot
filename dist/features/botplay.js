@@ -473,8 +473,8 @@ export class BotplayController {
             extFile,
             extState,
         });
-        // ★ c2c(私聊)修复: 私聊不认 type=0 指定人按钮 → 键盘用 all(全员可点);
-        //   card.perm 仍存原 perm, 点击回来由 checkPerm 按快照校验。
+        // ★ c2c(私聊)修复: 私聊不认 type=0 指定人按钮(同 optionsKeyboard 的注释) →
+        //   发出去的键盘用 all(全员可点); card.perm 仍存原 perm, 点击回来由 checkPerm 按快照校验。
         const kbPerm = target.scope === 'c2c' ? { type: 'all' } : perm;
         const kb = botplayKeyboard(cardId, buttons, kbPerm, ownerIds, triggererId, perRow);
         // 卡片正文: 自定义模块给的(若模块没给就走事件模板) > 事件自定义模板 > 默认模板

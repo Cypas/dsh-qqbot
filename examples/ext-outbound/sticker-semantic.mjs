@@ -15,9 +15,15 @@
  *   `similarity()` 换成你自己调模型的实现（`ctx.kernel` 能拿到插件 cordis Context）。
  *
  * ── 开关 ──────────────────────────────────────────────────────────────────
- *   由工具 `sticker_auto`（`tools/sticker_auto.mjs`）控制，状态文件：
- *     `{dataRoot}/.qqbot-extensions/data/auto-sticker.json`  →  `{ "enabled": true|false }`
- *   文件不存在 = **默认开**（想默认关就把这里的 DEFAULT_ENABLED 改 false）。
+ *   ★ 两级开关（2026-10-17 主人定，加了隔离）：
+ *   ① **总开关**：工具 `sticker_auto`，状态文件
+ *      `{dataRoot}/.qqbot-extensions/data/auto-sticker.json` → `{ "enabled": true|false }`
+ *      文件不存在 = **默认开**（想默认关就改 DEFAULT_ENABLED）。
+ *   ② **隔离（白名单）**：状态文件
+ *      `{dataRoot}/.qqbot-extensions/data/sticker-semantic-scope.json`
+ *      `{ "mode": "whitelist", "targets": ["group:<群openid>", "c2c:<用户openid>"] }`
+ *      **文件不存在 = whitelist + 空名单 ⇒ 谁都不配图**；只对名单里的群/私聊生效。
+ *      用 `sticker_auto {action:'scope-add', target:'group:xxxx', label:'群名'}` 增删。
  *
  * ── 参数（文件顶部 CONFIG，直接改）────────────────────────────────────────
  */
@@ -87,6 +93,65 @@ function isEnabled(ctx) {
   } catch {
     return CONFIG.DEFAULT_ENABLED;
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★ 隔离设置（2026-10-17 主人定）★★
+//   「你这个自动发送表情包的能力，应该只对单个目标生效啊（就像智能恢复一样，
+//     指定一个群或私聊有效，隔离设置）」
+//
+//   ⇒ 从"全局开"改成**按目标白名单**：
+//      · 配置文件：`{dataRoot}/.qqbot-extensions/data/sticker-semantic-scope.json`
+//        `{ "mode": "whitelist"|"all", "targets": ["group:<群openid>", "c2c:<用户openid>"] }`
+//      · **文件不存在 = whitelist + 空名单 ⇒ 谁都不配图**（要全局开就写 mode:"all"）；
+//      · 匹配用 `<scope>:<targetId>`（同时接受只写裸 openid 的简写，方便手写）；
+//      · 读文件/解析失败也**从"不发"这一侧失败** —— 隔离的东西宁可哑火，不能漏发。
+//   用工具 `sticker_auto` 的 scope-add / scope-remove / scope-list / scope-mode 管理。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 隔离配置路径（与 tools/sticker_auto.mjs 共用） */
+function scopeFile(dataRoot) {
+  return join(String(dataRoot || ''), '.qqbot-extensions', 'data', 'sticker-semantic-scope.json');
+}
+
+const EMPTY_SCOPE = { mode: 'whitelist', targets: [] };
+
+/** 读隔离配置（读不到 / 读坏了 ⇒ 空白名单 = 不发） */
+function readScope(ctx) {
+  try {
+    const f = scopeFile(ctx?.dataRoot);
+    if (!fsp.existsSync(f)) return EMPTY_SCOPE;
+    const j = JSON.parse(fsp.readFileSync(f, 'utf8'));
+    const mode = j?.mode === 'all' ? 'all' : 'whitelist';
+    const targets = (Array.isArray(j?.targets) ? j.targets : [])
+      .map((t) => (typeof t === 'string' ? t : t?.key))
+      .map((s) => String(s || '').trim())
+      .filter(Boolean);
+    return { mode, targets };
+  } catch {
+    return EMPTY_SCOPE;
+  }
+}
+
+/** 本回合目标的可匹配写法：`scope:id` + 裸 `id`（两种写法都认） */
+function targetKeysOf(ctx) {
+  const t = ctx?.target || {};
+  const id = String(t.targetId || t.peerId || '').trim();
+  const scope = String(t.scope || '').trim();
+  const keys = [];
+  if (scope && id) keys.push(`${scope}:${id}`);
+  if (id) keys.push(id);
+  return keys;
+}
+
+/** 本回合目标是否在白名单里 */
+function scopeAllows(ctx) {
+  const s = readScope(ctx);
+  if (s.mode === 'all') return { ok: true, why: 'mode=all' };
+  const keys = targetKeysOf(ctx);
+  if (!keys.length) return { ok: false, why: 'no-target-id', keys };
+  const hit = keys.find((k) => s.targets.includes(k));
+  return hit ? { ok: true, why: `listed:${hit}`, keys } : { ok: false, why: 'not-listed', keys };
 }
 
 // ── 表情包索引（带 mtime 缓存，避免每回合都读盘）──────────────────────────
@@ -273,6 +338,7 @@ async function pickAndSend(ctx, next) {
       segs: Array.isArray(ctx?.segments) ? ctx.segments.length : -1,
       hasSender: !!ctx?.sender,
       hasTarget: !!ctx?.target,
+      target: targetKeysOf(ctx), // ← 隔离排查用：本回合目标的两种写法
     };
 
     // ★★ 诊断分支：无条件发库里第一张（放在最前，连 isLastChunk 都不看）★★
@@ -299,6 +365,15 @@ async function pickAndSend(ctx, next) {
     const enabled = isEnabled(ctx);
     if (!enabled) {
       diag(ctx, 'skip:disabled', probe);
+      return next();
+    }
+
+    // ②b ★【隔离设置】★ 2026-10-17 主人定：**只对点名的群/私聊生效**
+    //     白名单没这条 ⇒ 直接放行（不配图）。文件不存在 = 空名单 = 谁都不配图。
+    //     放在 FORCE 之后：FORCE 只是排障开关，默认 false，不用它做正式判定。
+    const allow = scopeAllows(ctx);
+    if (!allow.ok) {
+      diag(ctx, 'skip:scope', { ...probe, why: allow.why, keys: allow.keys });
       return next();
     }
 

@@ -297,9 +297,7 @@ export async function handleInbound(rawMsg, manager, config, logger, state) {
             catch { /* 算不出 → 不偏移 */ }
         }
         const lmOn = (ovRaw.enabled ?? lmCfg?.enabled) !== false;
-        // ★ c2c(私聊)修复: 原来整块价值评分只在群聊生效(私聊从不评分/不写日志/不拦截, 直落 followup)。
-        //   override key 本来就是 `${scope}:${peerId}`(私聊查 c2c:<openid>); 默认档 gate=log ⇒ 只记分不拦。
-        if ((scope === 'group' || scope === 'c2c') && lmOn && gate !== 'off') {
+        if ((scope === 'group' || scope === 'c2c') && lmOn && gate !== 'off') { // ★ c2c 修复: 私聊原本被整块跳过, 从不评分/不写日志/不拦截
             const mentioned = mwState.mention?.wasMentioned === true;
             // ★ 2026-10-12：**forceWake 是入站扩展的显式覆盖**（`{dataRoot}/.qqbot-extensions/inbound/*.mjs`
             //   里 `ctx.forceWake()` 写的 `ctx.state.qqInboundForceWake`）。

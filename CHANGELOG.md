@@ -1,3 +1,40 @@
+## [1.10.10] - 2026-10-17
+
+### 新增
+- **第六套扩展点「出站扩展」**（`{dataRoot}/.qqbot-extensions/outbound/*.mjs`，`src/features/ext-outbound.ts`）：
+  与**入站扩展**严格对称 —— 入站管"消息**进来**时改它/杀它"，出站管"消息**出去**时改它/杀它/**补发媒体**"。
+  只扫直接子文件、按文件名升序、放宽 `.js/.mjs/.cjs`；失败只 warn 不影响正文；连续 5 次抛错自动熔断
+  （`resetOutboundBreaker()` 复位）。
+  - `ctx.target` = `{ scope, peerId, msgId? }`（被动回复靠它自带的 `msgId`）、`ctx.turnId`/`ctx.chunkIndex`/`ctx.isLastChunk`、
+    `ctx.rewrite()`/`ctx.annihilate()`、`ctx.sendMedia()`/`ctx.send()`（**先被动后主动**）、`ctx.note()`。
+  - **`ctx.phase`**：`'send'` = 正文**发送前**（挂载点在 `sendRichOutbound` 入口，只做改写/消灭）；
+    `'turnEnd'` = **回合真正结束**（挂载点在 `outbound.ts` 的 `turn/end`，`flush()` 之后）——
+    此处 `ctx.text` 就是该回合**权威的最后一块正文**。一段回复会被拆成多个正文块，
+    **配图只放 `'turnEnd'`**，否则第一段根本不是最后一块（真机实测抓到）。
+  - **`ctx.background(fn)`**：重活（选图/算分/发媒体）**丢后台、绝不 await**，正文该多快就多快。
+    出站链与正文**唯一的联系就是"读一眼正文写了什么"**。反面教材：曾在链上同步扫全库 1892 张图
+    ⇒ 打满 `sendRichOutbound` 的 3 秒硬超时 ⇒ **连正文都发不出去**。
+  - 对外 API `globalThis[Symbol.for('im-qqbot.outbound')]`：`send/sendMedia/last/active`（+ `embed/embedAvailable`）。
+  - 示范与文档：`examples/ext-outbound/sticker-semantic.mjs`、**`examples/ext-outbound/README.md`**（新增）。
+- **「自动配表情包」示范**（`examples/ext-outbound/sticker-semantic.mjs`，配工具 `examples/ext-tools/sticker_auto.mjs`）：
+  取**本回合最后一段正文**当查询串，两阶段召回选图 —— 阶段1 随机抽 300 张收集其 `tags`（几百个关键词），
+  用本地小模型 `bge-small-zh`（缺失自动退化字符 bigram）给关键词打分并过**存在性闸门**
+  （`均值 + 1.2*标准差`）+ **绝对地板**（两个 scorer 分数量级差 10 倍 ⇒ `FLOOR_EMBED`/`FLOOR_BIGRAM` 分两套）；
+  阶段2 拿选中关键词**回全库精确搜**（零模型开销）随机取一张，走 `ctx.sendMedia()` 独立通道补发。
+  - ★ **隔离设置**：只对**点名的群/私聊**生效（`.qqbot-extensions/data/sticker-semantic-scope.json`，
+    `whitelist` + 空名单 = **谁都不发**，`mode:"all"` 才全局；读不到/读坏了都从"不发"一侧失败）。
+    工具动作：`sticker_auto {action:'scope-add'|'scope-remove'|'scope-list'|'scope-mode'|'scope-clear'}`。
+  - 自带诊断日志 `.qqbot-extensions/data/sticker-semantic-diag.log`（每步留痕，因为出站扩展的失败全是静默的）。
+
+### 修复
+- **合并 `origin/main` 后 `qq-user-questions.ts` 编译失败（TS2345）**：`record.replyTarget` 的声明处
+  写成 `scope: string`，透传给 `sendMarkdownWithKeyboard` 时报错。改用 `ReplyTarget['scope']`
+  （`scope` 是 `ChatScope` 联合类型，不能退化成 `string`）。
+- **私聊（c2c）相关修复与文档**（PR #13 / `c9f13f6` / `e94e8b1` 等，本次一并发布）：
+  私聊卡片 `type=2`、抢答补发改用带 `msgId` 的 `record.replyTarget`（走被动通道）、
+  私聊不再把 openid 当 `gid` 用、价值评分等群专有链路在 c2c 显式放开、日志路径按 dataRoot 拼。
+  ⚠️ 投票结束要恢复唤醒 AI（`POLL_WAKE_AI` 别设 false）。
+
 ## [1.10.9] - 2026-10-16
 
 ### 文档

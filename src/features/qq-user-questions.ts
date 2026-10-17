@@ -102,7 +102,9 @@ interface PendingGroup {
     turnActive?: boolean;
     lastInboundAt?: number;
     /** 发起提问时的回复目标(带 msgId) —— 抢答补发卡片必须用它走被动回复通道 */
-    replyTarget?: { scope: string; targetId: string; msgId?: string };
+    //  ⚠️ scope 必须是 ReplyTarget['scope']（ChatScope 联合类型），不能写 string：
+    //     673 行会把它直接当 ReplyTarget 传给 sendMarkdownWithKeyboard，写 string 就会 TS2345。
+    replyTarget?: { scope: ReplyTarget['scope']; targetId: string; msgId?: string };
   };
   /** true = 后台档(async): 不 resolve 宿主, 答案改了投递回会话 */
   isAsync?: boolean;

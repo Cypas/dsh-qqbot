@@ -89,6 +89,12 @@ interface PendingGroup {
         agent?: unknown;
         turnActive?: boolean;
         lastInboundAt?: number;
+        /** 发起提问时的回复目标(带 msgId) —— 抢答补发卡片必须用它走被动回复通道 */
+        replyTarget?: {
+            scope: ReplyTarget['scope'];
+            targetId: string;
+            msgId?: string;
+        };
     };
     /** true = 后台档(async): 不 resolve 宿主, 答案改了投递回会话 */
     isAsync?: boolean;
