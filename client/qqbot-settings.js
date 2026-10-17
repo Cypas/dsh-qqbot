@@ -2638,7 +2638,12 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
       // 当前会话命中的 QQ 目标(2026-09-13 主人要求: 评分/操作要跟随"当前会话", 与群管理页一致)
       function curHitGid() {
         var hit = state.detectedHit
-        return (hit && hit.scope === 'group' && hit.peerId) ? hit.peerId : ''
+        if (!hit || !hit.peerId) return ''
+        // ★ 2026-10-16 c2c 修复: 原来私聊一律返回 ''(不带 gid) ⇒ 面板"最近评分"在私聊下变成
+        //   "全局最近 20 条"(全是群里的), 看起来就是"私聊的消息不显示"。
+        //   私聊记录在 value-scores.jsonl 里 gid 记的就是 'c2c'(见 transport/inbound 的注册),
+        //   这里返回 'c2c' 让面板按当前私聊过滤, 口径与写入端对齐。
+        return hit.scope === 'c2c' ? 'c2c' : hit.peerId
       }
       function curHitLabel() {
         var hit = state.detectedHit

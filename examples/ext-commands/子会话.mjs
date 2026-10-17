@@ -57,13 +57,14 @@ function dataRootOf(ctx) {
  * ★ 诊断日志（2026-10-13 主人要求）：写死路径，只为看清"点击到底有没有走到命令"。
  * 每条只记事实：handler 被调 / onInteraction 被调 / 发卡结果 / 状态表里有没有这张卡。
  */
-const DIAG_FILE = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/子会话-diag.log';
+// ★ 2026-10-16 修复: 原来写死 Windows 路径(D:/…) —— 手机(POSIX)上永远写不进去, 排查等于瞎。
+const DIAG_URL = new URL('../data/子会话-diag.log', import.meta.url);
 async function diag(msg) {
   try {
     const { appendFileSync, mkdirSync } = await import('node:fs');
     const { dirname } = await import('node:path');
-    mkdirSync(dirname(DIAG_FILE), { recursive: true });
-    appendFileSync(DIAG_FILE, `${new Date().toISOString()} ${msg}\n`);
+    mkdirSync(new URL('../data/', import.meta.url), { recursive: true });
+    appendFileSync(DIAG_URL, `${new Date().toISOString()} ${msg}\n`);
   } catch { /* 诊断失败绝不影响主流程 */ }
 }
 
@@ -118,7 +119,13 @@ async function sendCard(ctx, text, keyboard) {
   const rt = ctx?.replyTarget ?? {};
   const pe = ctx?.peer ?? {};
   const scope = cn(rt.scope || ctx?.scope || pe.scope || mc.kind || ((mc.groupOpenid || pe.groupId || pe.peerId) ? 'group' : 'c2c'));
-  const gid = cn(mc.groupOpenid || rt.targetId || rt.openid || rt.id || pe.groupId || pe.groupOpenid || (scope === 'group' ? (pe.peerId || pe.id) : '') || '');
+  // ★ 2026-10-16 c2c 修复: 原来 rt.targetId 在私聊里就是**对方 openid**, 会被当成群号 →
+  //   tier① 直连去请求 /v2/groups/<user_openid>/messages 必然被拒(gid 非空时 body 也不带
+  //   c2c 需要的 content 字段) → 一路降级成"文字发出来了、按钮消失"。
+  //   私聊一律 gid='' 走 /v2/users/<openid>/messages。
+  const gid = scope === 'group'
+    ? cn(mc.groupOpenid || rt.targetId || rt.openid || rt.id || pe.groupId || pe.groupOpenid || pe.peerId || pe.id || '')
+    : '';
   const uid = cn(mc.senderId || rt.openid || rt.id || pe.openid || pe.userId || '');
   void diag(`[sendCard] peer=${JSON.stringify(pe ?? null).slice(0, 180)} scope=${scope} gid=${gid} uid=${uid}`);
 
@@ -132,7 +139,11 @@ async function sendCard(ctx, text, keyboard) {
   void diag(`[sendCard] gid=${gid || '-'} uid=${uid || '-'} kb=${hasKb} hasApi=${typeof api === 'function'} hasMdCard=${typeof caps.markdownCard === 'function'} hasSenderKb=${typeof ctx?.sender?.sendMarkdownWithKeyboard === 'function'} hasMd=${typeof caps.markdown === 'function'}`);
   if (keyboard && typeof api === 'function' && (gid || uid)) {
     const path = gid ? `/v2/groups/${gid}/messages` : `/v2/users/${uid}/messages`;
-    const body = { msg_type: 2, markdown: { content: text }, keyboard, ...(gid ? {} : { content: text }) };
+    // ★ 2026-10-16 c2c 修复: 私聊的 markdown+键盘消息带上 msg_id(被动回复锚点),
+    //   否则可能被拒/退化; 群聊保持原样(实测不带 msg_id 也能发)。
+    const replyMsgId = cn(rt.msgId || rt.messageId || mc.msgId || mc.messageId || '');
+    void diag(`[sendCard] ①path=${path} msgId=${replyMsgId || '-'} kbRows=${keyboard?.content?.rows?.length ?? '?'}`);
+    const body = { msg_type: 2, markdown: { content: text }, keyboard, ...(gid ? {} : { content: text, ...(replyMsgId ? { msg_id: replyMsgId } : {}) }) };
     try {
       const r = await api(path, { method: 'POST', body });
       void diag(`[sendCard] ①api 返回=${JSON.stringify(r ?? null).slice(0, 180)}`);
