@@ -1,3 +1,16 @@
+## [未发布]
+
+### 文档 / 脚本
+- **升级 dsh 0.2.1-rc.2 后 `{{cwd}}` 会让整轮直接失败**（`unknown prompt variable "{{cwd}}" ... registered variables: provider, model`）：
+  新版系统提示词走严格插值，只注册 `provider` / `model`，工作目录改由「工作目录服务」以运行时上下文注入。
+  组装阶段就抛错 ⇒ **模型请求根本发不出去**，表现是「本轮运行失败」而不是模型回话失败。
+  - README / README_EN 新增 FAQ 条目：官方内置预设没事，出问题的是**从旧模板复制出来的自建预设** ——
+    `prefix` / `suffix` 里还留着 `当前工作目录 {{cwd}}` 或 `Your working directory is {{cwd}}.`，删掉那半句即可（保留 `{{model}}`）。
+  - 新增 **`scripts/fix-preset-cwd.mjs`**：只清理用户自带 `cordis.patch.yml` 里 `preset-<name>` 块的 persona 明文与模板注释，
+    默认只处理挂 QQ 工具的预设（块含 `im-qqbot`，或名字出现在 im-qqbot 的 `preset:` 配置里）；
+    幂等、`--dry-run`、写前自动备份、`suffix:` 删空补 `''`（避免 YAML 变 null）。
+    用法：`node scripts/fix-preset-cwd.mjs --dry-run` / `--scan` / `--file <path>` / `--all`。
+
 ## [1.10.10] - 2026-10-17
 
 ### 新增

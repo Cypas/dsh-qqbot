@@ -187,6 +187,37 @@ npm install --legacy-peer-deps     # install-time resolution only; runtime behav
 
 > Tracked: once upstream #37 is fixed and version lines converge, this section can be removed.
 
+### After upgrading to dsh 0.2.1-rc.2: every turn fails with `unknown prompt variable "{{cwd}}"`
+
+Starting with **0.2.1-rc.2**, dsh resolves system-prompt variables in **strict mode** and only registers
+`provider` and `model`. `{{cwd}}` is **no longer registered** (the working directory is now injected as
+runtime context by the workspace service), so prompt assembly throws before any model request is sent —
+the symptom is "this turn failed", not a bad model reply:
+
+```
+unknown prompt variable "{{cwd}}" ... registered variables: provider, model
+```
+
+- Presets shipped with dsh already dropped those sentences; **official presets are fine**.
+- What breaks are **custom presets copied from an old template** — their `prefix` / `suffix` text still contains:
+  - `由 {{model}} 驱动……当前工作目录 {{cwd}}`
+  - `Your working directory is {{cwd}}.`
+
+**Fix**: delete the `{{cwd}}` clause (keep `{{model}}`). The working directory is not lost — the framework still
+provides it as runtime context. Presets now live only in the profile's `cordis.patch.yml`, and the bundled script
+cleans them up (it only touches **user-copied preset text**, never built-in templates; by default only presets used
+by the QQ channel):
+
+```powershell
+node scripts/fix-preset-cwd.mjs --dry-run     # preview only
+node scripts/fix-preset-cwd.mjs               # apply (backs up to cordis.patch.yml.bak-cwdfix-<ts>)
+node scripts/fix-preset-cwd.mjs --scan        # every profile
+node scripts/fix-preset-cwd.mjs --file <path> # a specific file
+```
+
+The script is idempotent and rewrites an emptied `suffix:` as `''` so YAML does not turn it into `null`.
+Saving the file hot-reloads the profile; verify with `grep -c '{{cwd}}' ~/.dsh/profiles/web/cordis.yml`.
+
 ### 📱 Deploy on Android — the pocket 24/7 setup
 
 [dsh-mobile-apk](https://github.com/kelai141/dsh-mobile-apk) is a community-built **Android shell APK for dsh**

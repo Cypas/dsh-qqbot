@@ -395,6 +395,40 @@ dsh: disabling profile plugin row "mcp-chrome": Plugin ... is incompatible with 
 
 想强行运行，可用官方提供的**确切版本例外**（`dsh plugin allow-version`，或插件管理页里授予），但官方警告"可能崩溃或数据丢失"，自行权衡。
 
+### 升级 dsh 0.2.1-rc.2 后，发消息直接「本轮运行失败」/ `unknown prompt variable "{{cwd}}"`？
+
+dsh **0.2.1-rc.2** 起系统提示词的变量插值改为**严格模式**：组装阶段只注册 `provider`、`model` 两个变量，
+`{{cwd}}` **不再注册**（当前工作目录改由「工作目录服务」作为运行时上下文注入）。于是组装阶段直接抛错，
+**模型请求根本发不出去** —— 表现是「本轮运行失败」，不是模型回话失败：
+
+```
+unknown prompt variable "{{cwd}}" ... registered variables: provider, model
+```
+
+- 官方内置的预设模板新版已删掉这两句，**用官方预设不受影响**；
+- 会挂的是**从旧模板复制出来的自定义预设** —— 副本里的 `prefix` / `suffix` 明文还留着：
+  - `由 {{model}} 驱动……当前工作目录 {{cwd}}`
+  - `Your working directory is {{cwd}}.`
+
+**修复**：把 `{{cwd}}` 那半句删掉（保留 `{{model}}`）。工作目录不会丢，框架会以运行时上下文照常提供给模型。
+预设现在只存在 profile 的 `cordis.patch.yml` 里，可以直接跑仓库自带脚本批量清（只动**用户复制出来的预设明文**，
+不碰内置模板；默认只处理挂了 QQ 工具的预设）：
+
+```powershell
+# ① 先看会改什么（不写盘）
+node scripts/fix-preset-cwd.mjs --dry-run
+
+# ② 真修（自动备份为 cordis.patch.yml.bak-cwdfix-<时间戳>）
+node scripts/fix-preset-cwd.mjs
+
+# 其它 profile / 指定文件
+node scripts/fix-preset-cwd.mjs --scan
+node scripts/fix-preset-cwd.mjs --file ~/.dsh/profiles/web/cordis.patch.yml
+```
+
+脚本幂等：`suffix:` 删空后会补成 `''`（避免 YAML 解析成 null），重复跑不会二次破坏。
+改完保存即热重载，宿主会重新合并出 `cordis.yml`（可 `grep -c '{{cwd}}'` 确认归零）。
+
 ## 🤖 自定义事件 + 「让 AI 写」（v1.6.7）
 
 普通的互动卡片只能「点按钮 → 回一句固定文本」，能力被编辑器框死。
