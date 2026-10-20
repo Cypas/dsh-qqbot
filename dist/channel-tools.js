@@ -8,8 +8,9 @@
  * 复制进共享 node_modules，也不得在 dependencies 里自带 dsh-tools(避免双包)。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { getStickerStore } from './features/sticker-store.js';
 import { autoTagImage } from './features/sticker-tagger.js';
 import { isStickerGateDenied } from './features/sticker-gate.js';
@@ -2197,6 +2198,87 @@ export async function apply(ctx) {
     /**
      * 批量撤回 + 可选批量禁言（2026-10-20 主人需求）
      */
+    /**
+     * 自动撤回关键词管理（2026-10-20 主人要求：让 AI 自己维护"命中即撤/禁言"的关键词）。
+     * 直接读写当前 profile 的 settings json，改完 live 生效（中间件读的是盘上兜底）。
+     */
+    const recallKeywordsTool = defineTool({
+        name: 'recall_keywords',
+        description: '自动撤回关键词管理(写): 查看/添加/删除「命中即撤回(可顺带禁言)」的关键词。全局规则(不分群)。' +
+            '\naction: list(默认) / add(追加) / remove(删除) / set(整体替换) / clear(清空)' +
+            '\nwords: 关键词, 多个用逗号/顿号/换行分隔' +
+            '\nmuteSeconds/enable: 可选, 一起改「命中后禁言秒数」和「是否启用」；不传就不动' +
+            '\n改完立刻生效(live)，不需要重启。',
+        parameters: {
+            action: { type: 'string', description: 'list / add / remove / set / clear', enum: ['list', 'add', 'remove', 'set', 'clear'] },
+            words: { type: 'string', description: '关键词(多个用逗号/顿号/换行分隔)' },
+            muteSeconds: { type: 'integer', description: '可选: 命中后顺带禁言秒数(0=不禁言); 不传则不改' },
+            enable: { type: 'boolean', description: '可选: 同时开启/关闭自动撤回; 不传则不改' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: { ok: { type: 'boolean' }, msg: { type: 'string' }, keywords: { type: 'array', items: { type: 'string' } } },
+                additionalProperties: false,
+            },
+            render: (_a, v) => [{ type: 'text', text: v.ok ? String(v.msg || '') : `失败: ${String(v.msg || '')}` }],
+        },
+        execute: async (args) => {
+            try {
+                const prof = process.env.DSH_PROFILE || 'web';
+                const base = join(homedir(), '.dsh', 'qqbot-settings', prof);
+                let file = join(base, 'im-qqbot-2.json');
+                if (!existsSync(file)) {
+                    const cands = existsSync(base) ? readdirSync(base).filter((f) => /^im-qqbot-.*\.json$/.test(f)) : [];
+                    if (cands.length === 0)
+                        return { ok: false, msg: '找不到设置文件: ' + base, keywords: [] };
+                    cands.sort((a, b) => statSync(join(base, b)).mtimeMs - statSync(join(base, a)).mtimeMs);
+                    file = join(base, String(cands[0]));
+                }
+                const raw = JSON.parse(readFileSync(file, 'utf8'));
+                const ga = (raw.groupAdmin = (raw.groupAdmin || {}));
+                const ar = (ga.autoRecall = Object.assign({ enabled: false, mode: 'keep', keywords: [], kinds: [], muteSeconds: 0, dryRun: false }, (ga.autoRecall || {})));
+                let list = Array.isArray(ar.keywords) ? ar.keywords.map(String) : [];
+                const action = String(args.action || 'list');
+                const words = String(args.words || '').split(/[,，、\r\n]+/u).map((x) => x.trim()).filter(Boolean);
+                if (action === 'add') {
+                    if (words.length === 0)
+                        return { ok: false, msg: 'add 需要 words', keywords: list };
+                    const set = new Set(list);
+                    for (const w of words)
+                        set.add(w);
+                    list = Array.from(set);
+                }
+                else if (action === 'remove') {
+                    if (words.length === 0)
+                        return { ok: false, msg: 'remove 需要 words', keywords: list };
+                    const rm = new Set(words);
+                    list = list.filter((w) => !rm.has(w));
+                }
+                else if (action === 'set') {
+                    list = words;
+                }
+                else if (action === 'clear') {
+                    list = [];
+                }
+                ar.keywords = list;
+                if (typeof args.muteSeconds === 'number')
+                    ar.muteSeconds = Math.max(0, Math.round(args.muteSeconds));
+                if (typeof args.enable === 'boolean')
+                    ar.enabled = args.enable;
+                writeFileSync(file, JSON.stringify(raw, null, 2), 'utf8');
+                const head = action === 'list' ? '当前关键词' : '已更新';
+                return {
+                    ok: true,
+                    msg: head + '(' + list.length + ' 个, 启用=' + String(ar.enabled === true) + ', 禁言=' + String(ar.muteSeconds || 0) + 's): ' + (list.join(' / ') || '(空)'),
+                    keywords: list,
+                };
+            }
+            catch (e) {
+                return { ok: false, msg: '操作失败: ' + (e instanceof Error ? e.message : String(e)), keywords: [] };
+            }
+        },
+    });
     const recallBatchTool = defineTool({
         name: 'group_recall_batch',
         description: '群管理(写,危险): 批量撤回消息 + 可选批量禁言发送者。'
@@ -2619,6 +2701,7 @@ export async function apply(ctx) {
         { name: 'group_recall', tool: groupRecallTool },
         { name: 'group_msg_search', tool: msgSearchTool },
         { name: 'group_recall_batch', tool: recallBatchTool },
+        { name: 'recall_keywords', tool: recallKeywordsTool },
         { name: 'id_lookup', tool: idLookupTool },
         { name: 'session_list', tool: sessionListTool },
         { name: 'session_wake', tool: sessionWakeTool },

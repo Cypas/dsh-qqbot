@@ -1,3 +1,20 @@
+## [1.10.12] - 2026-10-20
+
+### 新增
+- **`recall_keywords` 工具**：让 AI 自己维护「命中即撤回（可顺带禁言）」的关键词，不用碰面板。
+  `action`: `list` / `add` / `remove` / `set` / `clear`；`words` 多个用逗号/顿号/换行分隔；
+  另可一起改 `muteSeconds`（命中后禁言秒数）与 `enable`（开关自动撤回）。改完立刻生效。
+
+### 修复
+- **入群审批「唤醒普通群 AI」被误包在"群管会话注入成功"分支里**（`src/features/group-join-request.ts`）：
+  `hubR === 'ok'` 才走 `wakeGroup`，一旦 hub 未设/失效（如重新保存群管设置后 `hubSessionId` 指向的会话没了），
+  整条"唤醒申请所在群 AI"的路径就消失 —— 表现是「重新保存群管设置后，入群申请不再进 AI 上下文」、
+  只剩 QQ 里一条静态提醒。已补无 hub 兜底：hub 不成功也 `findByPeer`/`getOrCreate` 申请群会话并唤醒它。
+- **自动撤回的关键词改为"盘上优先"**：`readAutoRecallFromDiskMw(config) ?? config.groupAdmin?.autoRecall`。
+  面板改完立刻生效，不再依赖 settings 热更是否落到闭包里的 config（此前会出现"面板已保存、收消息仍按旧规则"）。
+- 删掉 `handleInbound` 里那份"只撤不拦"的重复自动撤回（它在 debounce 之后，既拦不住也容易与中间件重复发请求）。
+
+
 ## [1.10.11] - 2026-10-20
 
 ### 新增

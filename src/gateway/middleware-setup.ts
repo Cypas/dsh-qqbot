@@ -1,3 +1,14 @@
+/** 从盘上直接读 autoRecall（settings 热更不落到闭包 config 时的兜底，2026-10-20） */
+function readAutoRecallFromDiskMw(cfg: unknown): { enabled?: boolean; mode?: string; keywords?: string[]; muteSeconds?: number; dryRun?: boolean } | undefined {
+  try {
+    const c = cfg as { settingsNs?: string; ns?: string };
+    const prof = process.env.DSH_PROFILE || 'web';
+    const ns = String(c?.settingsNs || c?.ns || 'im-qqbot-2');
+    const f = homedir() + '/.dsh/qqbot-settings/' + prof + '/' + ns + '.json';
+    const j = JSON.parse(readFileSync(f, 'utf8')) as { groupAdmin?: { autoRecall?: { enabled?: boolean; mode?: string; keywords?: string[]; muteSeconds?: number; dryRun?: boolean } } };
+    return j?.groupAdmin?.autoRecall;
+  } catch { return undefined; }
+}
 /**
  * SDK 中间件编排
  *
@@ -5,6 +16,8 @@
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
 import type { QQBot, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import {
   errorHandler,
   messageFilter,
@@ -326,7 +339,7 @@ export async function setupMiddlewares(
   bot.use(async (ctx: MiddlewareContext, next: () => Promise<void>) => {
     try {
       const m = (ctx as { message?: { messageId?: string; groupOpenid?: string; content?: string; senderId?: string } }).message;
-      const ar = (config as { groupAdmin?: { autoRecall?: { enabled?: boolean; mode?: string; keywords?: string[]; muteSeconds?: number; dryRun?: boolean } } })
+      const ar = readAutoRecallFromDiskMw(config) ?? (config as { groupAdmin?: { autoRecall?: { enabled?: boolean; mode?: string; keywords?: string[]; muteSeconds?: number; dryRun?: boolean } } })
         .groupAdmin?.autoRecall;
       if (m && ar?.enabled === true && m.messageId && m.groupOpenid) {
         const kws = (ar.keywords ?? []).map((k) => String(k).trim()).filter(Boolean);

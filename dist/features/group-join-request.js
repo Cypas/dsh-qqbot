@@ -217,6 +217,25 @@ export async function handleGroupJoinRequestEvent(data, opts) {
         }
         return true;
     }
+    // 2026-10-20 修: 「唤醒普通群 AI」在面板上是**独立开关**, 原来被包在 hubR==='ok' 分支里,
+    //   hub 没设/失效时这条能力整个消失(表现为"重新保存群管设置后, 入群申请不再进 AI 上下文")。
+    //   这里补一条: hub 不成功也要唤醒申请所在群的 AI。
+    if (hubR !== 'ok') {
+        const pollOpts0 = config.groupAdmin?.pollJoinRequests;
+        if (pollOpts0?.wakeGroup) {
+            let rec0 = manager.findByPeer('group', gid);
+            if (!rec0) {
+                try {
+                    rec0 = await manager.getOrCreate('group', gid, mid, { scope: 'group', targetId: gid });
+                }
+                catch { /* ignore */ }
+            }
+            if (rec0) {
+                const w0 = await wakeSessionAgent(manager, rec0.sessionId, logger, `${summary}${String.fromCharCode(10)}${String.fromCharCode(10)}可回复我处理(如: 查看入群申请 / 通过 某人 / 拒绝 某人)`);
+                logger.info(`[group-join] 唤醒普通群 AI(无hub兜底): ${w0} gid=${gid.slice(0, 8)}…`);
+            }
+        }
+    }
     // ② 无 hub / 转发未成功 → 原群内提醒(回合安全 append; busy/fail 兜底 QQ 静态卡)
     if (config.groupAdmin?.notifyInGroup !== false) {
         const last = lastGroupNotify.get(gid) ?? 0;

@@ -1,3 +1,19 @@
+/** 从盘上直接读 autoRecall（settings 热更不落到闭包 config 时的兜底，2026-10-20） */
+function readAutoRecallFromDiskMw(cfg) {
+    try {
+        const c = cfg;
+        const prof = process.env.DSH_PROFILE || 'web';
+        const ns = String(c?.settingsNs || c?.ns || 'im-qqbot-2');
+        const f = homedir() + '/.dsh/qqbot-settings/' + prof + '/' + ns + '.json';
+        const j = JSON.parse(readFileSync(f, 'utf8'));
+        return j?.groupAdmin?.autoRecall;
+    }
+    catch {
+        return undefined;
+    }
+}
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { errorHandler, messageFilter, accessPolicy, mentionGate, contentSanitizer, slashCommand, concurrencyGuard, typingIndicator, quoteRef, envelopeFormatter, } from '@tencent-connect/qqbot-nodejs';
 import { dataRootOf, stickerDirOf } from './data-root.js';
 import { buildCommandList } from '../commands/index.js';
@@ -284,7 +300,7 @@ pluginCtx) {
     bot.use(async (ctx, next) => {
         try {
             const m = ctx.message;
-            const ar = config
+            const ar = readAutoRecallFromDiskMw(config) ?? config
                 .groupAdmin?.autoRecall;
             if (m && ar?.enabled === true && m.messageId && m.groupOpenid) {
                 const kws = (ar.keywords ?? []).map((k) => String(k).trim()).filter(Boolean);
