@@ -150,3 +150,33 @@ export function extractTurnError(reason: TurnEndReason): { code: string; message
     message: detail?.message ?? reason.message ?? 'unknown error',
   };
 }
+
+// ── agent/assistant-stream 瞬态流式帧（宿主 v2+；2026-10-20 对齐上游 c8b9158） ──
+//   ⚠️ 背景：老的 durable `assistant/chunk` 在宿主 agent-loop 重构后**不再产生**，
+//   只监听它 ⇒ 流式永远收不到帧，回复只能整块发。
+export type StreamDelta =
+  | { kind: 'attempt-start'; attemptId: string }
+  | { kind: 'text-delta'; attemptId: string; text: string };
+
+/**
+ * 解析宿主 `agent/assistant-stream` 的 payload（{ agent: { id }, frame }）。
+ * 只认 start / chunk(text-delta)，其余帧（reasoning/tool-call/finish/end）一律忽略。
+ */
+export function parseStreamFrame(raw: unknown): { agentId: string; delta: StreamDelta } | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const o = raw as { agent?: { id?: unknown }; frame?: unknown };
+  const agentId = typeof o.agent?.id === 'string' ? o.agent.id : '';
+  if (!agentId) return undefined;
+  const f = o.frame as { type?: unknown; attemptId?: unknown; chunk?: unknown } | null;
+  if (!f || typeof f !== 'object') return undefined;
+  const attemptId = typeof f.attemptId === 'string' ? f.attemptId : '';
+  if (!attemptId) return undefined;
+  if (f.type === 'start') return { agentId, delta: { kind: 'attempt-start', attemptId } };
+  if (f.type === 'chunk') {
+    const ch = f.chunk as { type?: unknown; text?: unknown } | null;
+    if (ch && ch.type === 'text-delta' && typeof ch.text === 'string' && ch.text !== '') {
+      return { agentId, delta: { kind: 'text-delta', attemptId, text: ch.text } };
+    }
+  }
+  return undefined;
+}

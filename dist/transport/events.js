@@ -72,4 +72,31 @@ export function extractTurnError(reason) {
         message: detail?.message ?? reason.message ?? 'unknown error',
     };
 }
+/**
+ * 解析宿主 `agent/assistant-stream` 的 payload（{ agent: { id }, frame }）。
+ * 只认 start / chunk(text-delta)，其余帧（reasoning/tool-call/finish/end）一律忽略。
+ */
+export function parseStreamFrame(raw) {
+    if (typeof raw !== 'object' || raw === null)
+        return undefined;
+    const o = raw;
+    const agentId = typeof o.agent?.id === 'string' ? o.agent.id : '';
+    if (!agentId)
+        return undefined;
+    const f = o.frame;
+    if (!f || typeof f !== 'object')
+        return undefined;
+    const attemptId = typeof f.attemptId === 'string' ? f.attemptId : '';
+    if (!attemptId)
+        return undefined;
+    if (f.type === 'start')
+        return { agentId, delta: { kind: 'attempt-start', attemptId } };
+    if (f.type === 'chunk') {
+        const ch = f.chunk;
+        if (ch && ch.type === 'text-delta' && typeof ch.text === 'string' && ch.text !== '') {
+            return { agentId, delta: { kind: 'text-delta', attemptId, text: ch.text } };
+        }
+    }
+    return undefined;
+}
 //# sourceMappingURL=events.js.map

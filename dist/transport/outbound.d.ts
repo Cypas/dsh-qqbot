@@ -21,7 +21,7 @@ import { type ToolsRegistryLike } from './tool-presenter.js';
  * 所以这里只看参数、不解析结果 —— 闸门一关就把整个回合的工具展示全部静音。
  */
 export declare function isGateSilence(rawArgs: string): boolean;
-import { type RawSessionEvent } from './events.js';
+import { type RawSessionEvent, type StreamDelta } from './events.js';
 export type { QQBotSender } from './outbound-buffer.js';
 export type { ToolsRegistryLike } from './tool-presenter.js';
 /** 出站处理器签名（注册到 ctx.on('session/event')） */
@@ -38,5 +38,13 @@ export interface SessionLike {
  * 返回一个 handler 函数，应注册到 ctx.on('session/event', handler)。
  * toolsRegistry 用于工具结果的结构化展示（参考 dsh-TUI 的 presentResult）。
  */
-export declare function createOutboundHandler(manager: SessionManager, bot: QQBotSender, config: ImQQBotConfig, logger: Logger, toolsRegistry?: ToolsRegistryLike): OutboundHandler;
+/**
+ * 返回一个 handler 函数，应注册到 ctx.on('session/event', handler)。
+ * toolsRegistry 用于工具结果的结构化展示（参考 dsh-TUI 的 presentResult）。
+ *
+ * 额外带 `routeStreamFrame`：把宿主瞬态流式帧（agent/assistant-stream）喂给同一套出站缓冲。
+ */
+export declare function createOutboundHandler(manager: SessionManager, bot: QQBotSender, config: ImQQBotConfig, logger: Logger, toolsRegistry?: ToolsRegistryLike): OutboundHandler & {
+    routeStreamFrame(agentId: string, delta: StreamDelta): void;
+};
 //# sourceMappingURL=outbound.d.ts.map

@@ -22,7 +22,9 @@ const API_BASE = 'https://api.bot.qq.com';
 /** 已知官方未开放(内邀中)的能力门控元数据 —— UI 据此渲染红条/灰态; 开放后删除对应项即可点亮 */
 export const FEATURE_GATES: Record<string, { open: boolean; human: string }> = {
   listMembers: { open: false, human: '获取群成员列表: 官方尚未开放(内邀中), 等待公测后自动可用' },
-  removeMembers: { open: false, human: '踢人: 官方尚未开放(社区 2026-09-05 确认"暂时未开放权限"), 开放后自动可用' },
+  // 2026-10-20 主人实测: QQ 开放平台后台「权限」页已可勾选「移除群成员」，群管理员里也能给机器人开这项。
+  //   → 不再硬关；调用失败会带回平台错误码，按错误信息判断即可。
+  removeMembers: { open: true, human: '踢人: 需要平台勾选「移除群成员」+ 机器人是群管理员' },
   listJoinRequests: { open: true, human: '入群申请列表: 机器人需为群管理员' },
   approveJoinRequest: { open: true, human: '入群申请审批: 机器人需为群管理员' },
   getMemberInfo: { open: false, human: '获取群成员信息(含昵称): 官方标注「内邀接入中」, 申请到白名单后自动可用' },

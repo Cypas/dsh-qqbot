@@ -42,6 +42,32 @@ class OutboundRouter {
     logger;
     toolsRegistry;
     buffers = new Map();
+    /** agentId(sessionId) → 当前正在流的 attemptId（LLM 重试会换 attempt） */
+    streamAttempt = new Map();
+    /**
+     * 消费 `agent/assistant-stream` 的瞬态帧（2026-10-20 对齐上游 c8b9158）。
+     * · attempt-start：新 attempt → 丢掉上一 attempt 已流出的内容（重试不该出第二条）
+     * · text-delta：增量交给该会话的出站缓冲，走 StreamingWriter
+     */
+    routeStreamFrame(agentId, delta) {
+        const buffer = this.buffers.get(agentId);
+        if (!buffer)
+            return; // 不是 QQ 会话 / 本回合还没建缓冲
+        const cur = this.streamAttempt.get(agentId);
+        if (delta.kind === 'attempt-start') {
+            if (cur === delta.attemptId)
+                return;
+            this.streamAttempt.set(agentId, delta.attemptId);
+            const maybeAbort = buffer.abort;
+            if (typeof maybeAbort === 'function')
+                maybeAbort.call(buffer);
+            return;
+        }
+        if (cur !== undefined && cur !== delta.attemptId)
+            return; // 旧 attempt 的尾帧丢弃
+        if (delta.text)
+            buffer.append(delta.text);
+    }
     toolCalls = new Map();
     /** 适配主动状态: sessionKey → 当前入站 msg_id 及已被动回复条数 */
     adaptiveState = new Map();
@@ -509,8 +535,16 @@ function summarizeArgs(rawArgs) {
  * 返回一个 handler 函数，应注册到 ctx.on('session/event', handler)。
  * toolsRegistry 用于工具结果的结构化展示（参考 dsh-TUI 的 presentResult）。
  */
+/**
+ * 返回一个 handler 函数，应注册到 ctx.on('session/event', handler)。
+ * toolsRegistry 用于工具结果的结构化展示（参考 dsh-TUI 的 presentResult）。
+ *
+ * 额外带 `routeStreamFrame`：把宿主瞬态流式帧（agent/assistant-stream）喂给同一套出站缓冲。
+ */
 export function createOutboundHandler(manager, bot, config, logger, toolsRegistry) {
     const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry);
-    return (session, event) => router.route(session, event);
+    const handler = ((session, event) => router.route(session, event));
+    handler.routeStreamFrame = (agentId, delta) => router.routeStreamFrame(agentId, delta);
+    return handler;
 }
 //# sourceMappingURL=outbound.js.map

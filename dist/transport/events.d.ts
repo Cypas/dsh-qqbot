@@ -89,4 +89,20 @@ export declare function extractTurnError(reason: TurnEndReason): {
     code: string;
     message: string;
 } | undefined;
+export type StreamDelta = {
+    kind: 'attempt-start';
+    attemptId: string;
+} | {
+    kind: 'text-delta';
+    attemptId: string;
+    text: string;
+};
+/**
+ * 解析宿主 `agent/assistant-stream` 的 payload（{ agent: { id }, frame }）。
+ * 只认 start / chunk(text-delta)，其余帧（reasoning/tool-call/finish/end）一律忽略。
+ */
+export declare function parseStreamFrame(raw: unknown): {
+    agentId: string;
+    delta: StreamDelta;
+} | undefined;
 //# sourceMappingURL=events.d.ts.map

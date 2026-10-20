@@ -43,6 +43,7 @@ import {
   type ToolResultEvent,
   type TurnEndEvent,
   type RawSessionEvent,
+  type StreamDelta,
 } from './events.js';
 
 export type { QQBotSender } from './outbound-buffer.js';
@@ -75,6 +76,30 @@ const ADAPTIVE_RECENT_MS = 5 * 60_000;
  */
 class OutboundRouter {
   private readonly buffers = new Map<string, OutboundBuffer>();
+
+  /** agentId(sessionId) → 当前正在流的 attemptId（LLM 重试会换 attempt） */
+  private readonly streamAttempt = new Map<string, string>();
+
+  /**
+   * 消费 `agent/assistant-stream` 的瞬态帧（2026-10-20 对齐上游 c8b9158）。
+   * · attempt-start：新 attempt → 丢掉上一 attempt 已流出的内容（重试不该出第二条）
+   * · text-delta：增量交给该会话的出站缓冲，走 StreamingWriter
+   */
+  routeStreamFrame(agentId: string, delta: StreamDelta): void {
+    const buffer = this.buffers.get(agentId);
+    if (!buffer) return; // 不是 QQ 会话 / 本回合还没建缓冲
+    const cur = this.streamAttempt.get(agentId);
+    if (delta.kind === 'attempt-start') {
+      if (cur === delta.attemptId) return;
+      this.streamAttempt.set(agentId, delta.attemptId);
+      const maybeAbort = (buffer as unknown as { abort?: () => void }).abort;
+      if (typeof maybeAbort === 'function') maybeAbort.call(buffer);
+      return;
+    }
+    if (cur !== undefined && cur !== delta.attemptId) return; // 旧 attempt 的尾帧丢弃
+    if (delta.text) buffer.append(delta.text);
+  }
+
   private readonly toolCalls = new Map<string, ToolCallRecord>();
   /** 适配主动状态: sessionKey → 当前入站 msg_id 及已被动回复条数 */
   private readonly adaptiveState = new Map<string, { msgId?: string; passiveCount: number }>();
@@ -597,13 +622,23 @@ function summarizeArgs(rawArgs: string): string {
  * 返回一个 handler 函数，应注册到 ctx.on('session/event', handler)。
  * toolsRegistry 用于工具结果的结构化展示（参考 dsh-TUI 的 presentResult）。
  */
+/**
+ * 返回一个 handler 函数，应注册到 ctx.on('session/event', handler)。
+ * toolsRegistry 用于工具结果的结构化展示（参考 dsh-TUI 的 presentResult）。
+ *
+ * 额外带 `routeStreamFrame`：把宿主瞬态流式帧（agent/assistant-stream）喂给同一套出站缓冲。
+ */
 export function createOutboundHandler(
   manager: SessionManager,
   bot: QQBotSender,
   config: ImQQBotConfig,
   logger: Logger,
   toolsRegistry?: ToolsRegistryLike,
-): OutboundHandler {
+): OutboundHandler & { routeStreamFrame(agentId: string, delta: StreamDelta): void } {
   const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry);
-  return (session, event) => router.route(session, event);
+  const handler = ((session, event) => router.route(session, event)) as OutboundHandler & {
+    routeStreamFrame(agentId: string, delta: StreamDelta): void;
+  };
+  handler.routeStreamFrame = (agentId, delta) => router.routeStreamFrame(agentId, delta);
+  return handler;
 }

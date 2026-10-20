@@ -11,6 +11,7 @@ import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.js';
 import { handleInbound, createOutboundHandler } from '../transport/index.js';
+import { parseStreamFrame } from '../transport/events.js';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.js';
 import type { QQBotSender } from '../transport/outbound-buffer.js';
 import { buildUserAgent } from '../shared/index.js';
@@ -809,6 +810,20 @@ export async function bootstrapGateway(
   const outboundHandler = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void })
     .on('session/event', outboundHandler as (...args: unknown[]) => void);
+
+  // ── 出站流式：agent/assistant-stream（瞬态帧，不落 session log） ──
+  //   2026-10-20 对齐上游 c8b9158：老的 durable `assistant/chunk` 宿主早就不发了，
+  //   只监听它 = 流式永远收不到帧。该事件按 agent 作用域派发，根作用域必须 { global: true }。
+  (ctx as unknown as {
+    on(event: string, handler: (...args: unknown[]) => void, options?: { global?: boolean }): void;
+  }).on(
+    'agent/assistant-stream',
+    (payload: unknown) => {
+      const parsed = parseStreamFrame(payload);
+      if (parsed !== undefined) outboundHandler.routeStreamFrame(parsed.agentId, parsed.delta);
+    },
+    { global: true },
+  );
 
   bot.on('error', (err: unknown) => {
     logger.error(`bot error: ${err instanceof Error ? err.message : String(err)}`);

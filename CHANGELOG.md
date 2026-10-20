@@ -1,3 +1,18 @@
+## [1.10.14] - 2026-10-20
+
+### 新增
+- **出站流式真正可用**（对齐上游 `tencent-connect/dsh-qqbot` commit `c8b9158`）：改为监听宿主**瞬态通道** `agent/assistant-stream`，
+  只消费 `start` / `chunk(text-delta)` 两类帧，其余（reasoning / tool-call / finish / end）一律忽略；用 `attemptId` 跟踪 ——
+  LLM 重试时**改写同一条流式消息**，而不是追加第二条。
+  - 背景（上游原话）：老的 durable `assistant/chunk` 在宿主 agent-loop 重构后**不再产生**，只监听它 = 流式永远收不到帧、
+    回复只能整块发。我们此前同样只监听 `assistant/chunk`，所以 `StreamingWriter` 一直是死代码。
+  - 该事件按 agent 作用域派发，根作用域监听必须带 `{ global: true }`，帧到达后自行按 `agent.id` 路由到对应会话缓冲。
+  - 改动：`transport/events.ts` 新增 `parseStreamFrame`（纯函数、非法输入返回 undefined）；
+    `transport/outbound.ts` 新增 `OutboundRouter.routeStreamFrame`，并由 `createOutboundHandler` 的返回值透出；
+    `gateway/bootstrap.ts` 挂 `ctx.on('agent/assistant-stream', handler, { global: true })`。
+  - 老的 durable `assistant/chunk` 分支保留（现已不会触发），当保险。
+
+
 ## [1.10.13] - 2026-10-20
 
 ### 修复

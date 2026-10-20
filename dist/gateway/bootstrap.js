@@ -3,6 +3,7 @@ import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol';
 import { SessionManager } from '../session/index.js';
 import { handleInbound, createOutboundHandler } from '../transport/index.js';
+import { parseStreamFrame } from '../transport/events.js';
 import { buildUserAgent } from '../shared/index.js';
 import { setupMiddlewares } from './middleware-setup.js';
 import { configureDiag, diagWrite } from '../shared/diag.js';
@@ -785,6 +786,14 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
     const outboundHandler = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
     ctx
         .on('session/event', outboundHandler);
+    // ── 出站流式：agent/assistant-stream（瞬态帧，不落 session log） ──
+    //   2026-10-20 对齐上游 c8b9158：老的 durable `assistant/chunk` 宿主早就不发了，
+    //   只监听它 = 流式永远收不到帧。该事件按 agent 作用域派发，根作用域必须 { global: true }。
+    ctx.on('agent/assistant-stream', (payload) => {
+        const parsed = parseStreamFrame(payload);
+        if (parsed !== undefined)
+            outboundHandler.routeStreamFrame(parsed.agentId, parsed.delta);
+    }, { global: true });
     bot.on('error', (err) => {
         logger.error(`bot error: ${err instanceof Error ? err.message : String(err)}`);
         setBotOnline(myNs, false);

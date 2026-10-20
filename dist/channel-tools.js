@@ -2279,6 +2279,63 @@ export async function apply(ctx) {
             }
         },
     });
+    /** 踢人（2026-10-20：平台已开放「移除群成员」，主人实测授权后加的写工具） */
+    const kickMemberTool = defineTool({
+        name: 'group_kick',
+        description: '群管理(写,危险): 把成员移出群(踢人)，可批量 ≤20。需机器人是群管理员、且平台后台勾选了「移除群成员」。**仅主人明确要求时调用**。不填 gid = 当前会话所在的群。',
+        parameters: {
+            gid: { type: 'string', description: '目标群 openid(可选; 不填=当前会话所在的群)' },
+            member_openids: { type: 'array', items: { type: 'string' }, description: '要移出的成员 openid(≤20 个)' },
+            add_to_blacklist: { type: 'boolean', description: '同时加入成员黑名单(默认 false)' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: { ok: { type: 'boolean' }, msg: { type: 'string' } },
+                additionalProperties: false,
+            },
+            render: (_a, v) => [
+                { type: 'text', text: v.ok ? String(v.msg || '') : '失败: ' + String(v.msg || '') },
+            ],
+        },
+        execute: async (args, exec) => {
+            try {
+                const ga = groupAdminOf(exec);
+                if (!ga)
+                    return { ok: false, msg: '群管理未开启或非群会话' };
+                const gid = String(args.gid ?? '').trim() || ga.gid || latestGroupId();
+                if (!gid)
+                    return { ok: false, msg: '当前不是群会话且未指定 gid' };
+                const ids = (Array.isArray(args.member_openids) ? args.member_openids : [])
+                    .map((x) => String(x).trim())
+                    .filter(Boolean)
+                    .slice(0, 20);
+                if (ids.length === 0)
+                    return { ok: false, msg: 'member_openids 为空' };
+                // ApiResult 失败结构是 { ok:false, err:{ code, human } }
+                const r = (await ga.client.removeMembers(gid, ids, args.add_to_blacklist === true));
+                if (r?.ok !== true) {
+                    const code = String(r?.err?.code || '');
+                    const human = String(r?.err?.human || '');
+                    return {
+                        ok: false,
+                        msg: '踢人失败: ' + (human || code || '(平台无返回)') + (code ? ' [code=' + code + ']' : '') +
+                            '（常见原因: 平台未勾选该权限 / 机器人非管理员 / 对方是群主或管理员）',
+                    };
+                }
+                const failN = Array.isArray(r.data?.add_to_member_blacklist_fail_openids)
+                    ? r.data.add_to_member_blacklist_fail_openids.length
+                    : 0;
+                return {
+                    ok: true,
+                    msg: '✅ 已提交移出 ' + ids.length + ' 人' + (failN > 0 ? '；加黑名单失败 ' + failN + ' 人' : ''),
+                };
+            }
+            catch (e) {
+                return { ok: false, msg: '踢人异常: ' + (e instanceof Error ? e.message : String(e)) };
+            }
+        },
+    });
     const recallBatchTool = defineTool({
         name: 'group_recall_batch',
         description: '群管理(写,危险): 批量撤回消息 + 可选批量禁言发送者。'
@@ -2702,6 +2759,7 @@ export async function apply(ctx) {
         { name: 'group_msg_search', tool: msgSearchTool },
         { name: 'group_recall_batch', tool: recallBatchTool },
         { name: 'recall_keywords', tool: recallKeywordsTool },
+        { name: 'group_kick', tool: kickMemberTool },
         { name: 'id_lookup', tool: idLookupTool },
         { name: 'session_list', tool: sessionListTool },
         { name: 'session_wake', tool: sessionWakeTool },
