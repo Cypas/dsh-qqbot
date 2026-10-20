@@ -1,3 +1,18 @@
+## [1.10.13] - 2026-10-20
+
+### 修复
+- **生成式安装（dsh-market / DSH Desktop）下「添加账号」保存失败，报「找不到 cordis.patch.yml(仅 web profile 支持)」（GitHub issue #14）**：
+  `settings-host.js` 的 `resolveProfileRoot()` 只会「包根上溯 3 级」，直装时恰好等于 profile 根；
+  市场装法下拿到的是 `profiles/.generations/live/<pkg>`。兜底又写死 `~/.dsh/profiles`，
+  而 Desktop 的 `DSH_HOME` 在 `%APPDATA%\dsh-desktop\harness`，扫不到 → `PATCH_FILE` 指向不存在的文件。
+  现在按四级定位：**`DSH_PROFILE_DIR`/`DSH_PROFILE_ROOT` 环境变量 → 代码位置 → 向上找 `.generations` 取其父目录为 profiles 根 → 扫 `$DSH_HOME/profiles` 与 `~/.dsh/profiles`**；
+  扫描时优先认「目录里真有 `cordis.patch.yml`」的 profile。
+  连带修好 `resolveProfileName()`：此前它跟着推错，导致设置落到 `qqbot-settings/_default/` 而不是 `.../<profile>/`。
+- **入群审批：申请群就是 hub 群时只「注记不唤醒」**：`safeAppendUserMessage` 只把申请写进会话，不叫醒 AI，
+  要等下次有人说话才被带进上下文 —— 表现为「hub 群里完全收不到提醒」。现在 `isHub` 分支里若 `pollJoinRequests.wakeGroup` 为真，
+  会再 `wakeSessionAgent(hub 会话)` 一次。（1.10.12 补的是「hub 失效时唤醒申请群」，这次补齐 hub 群自身。）
+
+
 ## [1.10.12] - 2026-10-20
 
 ### 新增

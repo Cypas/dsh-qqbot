@@ -29,27 +29,51 @@ const NS = 'im-qqbot';
  * 本文件被从源码目录加载), 则扫描 ~/.dsh/profiles/* 找装着 @zaofan/dsh-qqbot 的 profile。
  */
 function resolveProfileRoot() {
-  const byLocation = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+  // 2026-10-20 修(GitHub issue #14): 生成式安装(dsh-market / DSH Desktop)下,
+  //   "包根上溯 3 级"得到的是 profiles/.generations/live/<pkg>, 不是 profile 根;
+  //   且 Desktop 的 DSH_HOME 在 %APPDATA%dsh-desktopharness, 原兜底写死 ~/.dsh 扫不到。
+  //   → 显式环境变量 > 代码位置 > .generations 反推 > 多 home 扫描。
+  for (const k of ['DSH_PROFILE_DIR', 'DSH_PROFILE_ROOT']) {
+    const v = (process.env[k] ?? '').trim();
+    if (v) { try { if (existsSync(join(v, 'cordis.patch.yml'))) return v; } catch { /* 下一个 */ } }
+  }
+  const here = dirname(fileURLToPath(import.meta.url));
+  const byLocation = resolve(here, '..', '..', '..');
   try {
     if (existsSync(join(byLocation, 'cordis.patch.yml'))) return byLocation;
   } catch { /* 继续扫描 */ }
+  const roots = [];
   try {
-    const base = join(homedir(), '.dsh', 'profiles');
-    for (const name of readdirSync(base)) {
-      const prof = resolve(base, name);
-      try {
-        if (!statSync(prof).isDirectory()) continue;
-      } catch { continue; }
-      try {
-        if (existsSync(join(prof, 'node_modules', '@zaofan', 'dsh-qqbot'))) return prof;
-      } catch { /* 走下一判据 */ }
-      try {
-        const pkg = JSON.parse(readFileSync(join(prof, 'package.json'), 'utf8'));
-        const blob = JSON.stringify(pkg.dsh?.profile?.bundles ?? []) + JSON.stringify(pkg.dependencies ?? {});
-        if (blob.includes('@zaofan/dsh-qqbot')) return prof;
-      } catch { /* 无 package.json, 跳过 */ }
+    let cur = here;
+    for (let n = 0; n < 12; n++) {
+      cur = dirname(cur);
+      if (basename(cur) === '.generations') { roots.push(dirname(cur)); break; }
     }
-  } catch { /* profiles 目录不存在 */ }
+  } catch { /* ignore */ }
+  const homeEnv = (process.env.DSH_HOME ?? '').trim();
+  if (homeEnv) roots.push(join(homeEnv, 'profiles'));
+  roots.push(join(homedir(), '.dsh', 'profiles'));
+  for (const base of roots) {
+    try {
+      for (const name of readdirSync(base)) {
+        const prof = resolve(base, name);
+        try {
+          if (!statSync(prof).isDirectory()) continue;
+        } catch { continue; }
+        try {
+          if (existsSync(join(prof, 'cordis.patch.yml'))) return prof;
+        } catch { /* 走下一判据 */ }
+        try {
+          if (existsSync(join(prof, 'node_modules', '@zaofan', 'dsh-qqbot'))) return prof;
+        } catch { /* 走下一判据 */ }
+        try {
+          const pkg = JSON.parse(readFileSync(join(prof, 'package.json'), 'utf8'));
+          const blob = JSON.stringify(pkg.dsh?.profile?.bundles ?? []) + JSON.stringify(pkg.dependencies ?? {});
+          if (blob.includes('@zaofan/dsh-qqbot')) return prof;
+        } catch { /* 无 package.json, 跳过 */ }
+      }
+    } catch { /* 该 profiles 根不存在 */ }
+  }
   return byLocation;
 }
 const PROFILE_ROOT = resolveProfileRoot();

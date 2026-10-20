@@ -276,6 +276,21 @@ export async function handleGroupJoinRequestEvent(
         }
       }
     } else {
+      // 2026-10-20: 申请群就是 hub 群时, 原来只"注记不唤醒" —— 主人完全收不到提示(注记要等下次有人说话才被带进上下文)。
+      // 现在按 wakeGroup 开关也唤醒 hub 会话: 注记照写, 另外叫醒它立刻处理。
+      const pollOpts1 = config.groupAdmin?.pollJoinRequests;
+      if (pollOpts1?.wakeGroup) {
+        const rec1 = manager.findByPeer('group', gid);
+        if (rec1) {
+          const w1 = await wakeSessionAgent(
+            manager,
+            rec1.sessionId,
+            logger,
+            `${summary}${String.fromCharCode(10)}${String.fromCharCode(10)}可回复我处理(如: 查看入群申请 / 通过 某人 / 拒绝 某人)`,
+          );
+          logger.info(`[group-join] 唤醒 hub 群 AI: ${w1} gid=${gid.slice(0, 8)}…`);
+        }
+      }
       logger.info(`[group-join] 申请群即 hub 群, 不再额外通知(注记已在 hub) gid=${gid.slice(0, 8)}…`);
     }
     return true;
