@@ -271,6 +271,16 @@ const groupAdminSchema = Schema.object({
         notifyGroup: false,
         wakeGroup: false,
     }).description('入群申请轮询(事件兜底)'),
+    autoRecall: Schema.object({
+        enabled: Schema.boolean().default(false).description('自动撤回总开关(命中关键词/附件类型就立刻撤, 不走 AI)'),
+        mode: Schema.union(['keep', 'drop']).default('keep')
+            .description('keep=消息仍进 AI 上下文(只从聊天记录里消失); drop=连 AI 都不看(在入站扩展之后拦截, 不影响扩展契约)'),
+        keywords: Schema.array(Schema.string()).default([]).description('关键词: 子串匹配正文, 命中任一即撤回(一行一个)'),
+        kinds: Schema.array(Schema.union(['text', 'image', 'voice', 'video', 'file'])).default([])
+            .description('按附件类型命中(图片/语音/视频/文件; 空=不按类型筛)'),
+        muteSeconds: Schema.number().min(0).default(0).description('同时禁言发送者秒数(0=不禁言; 需机器人为群管理员)'),
+        dryRun: Schema.boolean().default(false).description('演练模式: 只记日志不真撤'),
+    }).default({ enabled: false, mode: 'keep', keywords: [], kinds: [], muteSeconds: 0, dryRun: false }).description('自动撤回'),
 }).default({
     enabled: false,
     owners: [],
@@ -280,6 +290,7 @@ const groupAdminSchema = Schema.object({
     hubSessionId: '',
     hubNotify: true,
     pollJoinRequests: { enabled: false, intervalMin: 5, minCount: 2, wakeLlm: true, hubNotify: true, notifyGroup: false, wakeGroup: false },
+    autoRecall: { enabled: false, mode: 'keep', keywords: [], kinds: [], muteSeconds: 0, dryRun: false },
 }).description('QQ 群管理');
 /** Web 设置页可编辑项的 schema(behavior/sticker.gates/injectRules/groupPrompt/schedule) */
 export const EditableConfigSchema = Schema.object({

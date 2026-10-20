@@ -1,4 +1,26 @@
-## [未发布]
+## [1.10.11] - 2026-10-20
+
+### 新增
+- **群消息撤回（三个工具）**：`group_recall`（撤某人最近一条 / 群里最近一条 / 指定 message_id）、
+  `group_msg_search`（按关键词 / 类型搜台账，含机器人自己发的）、`group_recall_batch`（批量撤 + 可选批量禁言）。
+  机器人是群管理员时可撤回**普通成员**的消息，官方窗口 2 分钟（`group_recall_batch` 就是为此而生）。
+  `gid` 是**可选**的：不传=当前会话所在的群；要操作别的群（机器人也是那个群管理员）才传。
+- **自动撤回**（`groupAdmin.autoRecall`）：命中关键词或附件类型（文本/图片/语音/视频/文件）时**立刻撤回**，不走 AI。
+  `mode=keep` 只撤消息、`mode=drop` 连 AI 都收不到；`muteSeconds` 顺带禁言、`dryRun` 演练只看日志。
+  ★ 挂载点是 **debounce 之前**的中间件 —— 写在 `bot.on('message')` 会被 debounce 吃掉，写在 `handleInbound` 又要等派发、早过 2 分钟窗口（两种都实测踩过）。
+- **消息历史台账**：`{dataRoot}/.qqbot/msg-history/<group_群号|c2c_对方>/<YYYY-MM-DD>.jsonl` ——
+  一会话一个目录、一天一个文件、默认保留 7 天（启动时 + 每 200 次写清理过期文件）；
+  入站（handleInbound）与出站（pushSent）都记，行内含 `message_id` / 发送者 / 昵称 / 类型 / 正文摘要 / 时间 / 是否机器人。
+  每个群目录里会生成 `<群名>.txt`、根目录生成 `_索引.txt`，方便人工辨认（群名从 `.qqbot/groups.json` 取，改名会自动重建）。
+- 设置面板新增「🔨 锤子 → ♻️ 自动撤回」子标签：启用、命中后模式、关键词多行、附件类型、顺带禁言秒数、演练、保存即时生效。
+
+### 修复
+- 「自动撤回」页的保存**复用了群组设置的保存逻辑**，会把本页不存在的字段（如「群管理」开关）用 state 旧值一起提交，
+  表现为「保存自动撤回之后群管理被关掉、群工具全部报非群会话」；已改为 `saveAutoRecallOnly()`，只 patch `autoRecall`。
+- 群管理工具的默认群解析：优先用**会话自己的 `peerId`**（入站群 openid），不再被"最近一次出站目标"带偏；
+  找不到群会话记录时，依次回退 `manageGroup` / "最近有消息写入的群目录"。
+- settings 热更新可能没落到 `handleInbound` 闭包里的 config（实测"面板已保存、收消息却当没规则"）：
+  自动撤回读取加兜底 —— `config.autoRecall ?? 直接读 ~/.dsh/qqbot-settings/<profile>/<ns>.json`。
 
 ### 文档 / 脚本
 - **升级 dsh 0.2.1-rc.2 后 `{{cwd}}` 会让整轮直接失败**（`unknown prompt variable "{{cwd}}" ... registered variables: provider, model`）：
@@ -191,7 +213,7 @@
   4. 模块变量降级为"本地缓存"，只做加速、不做唯一来源。
 - **验证**（headless 双实例自检，用两个不同 `?v=` 各 import 一次命令模块，正是真机场景）：
   实例 A 走 handler 发卡（`会话列表-1-…`，workspace，8 个候选）→ **实例 B（`W` 全空）**点 `p0`
-  ⇒ **不再报过期**，状态推进到 `session` 并列出 **80** 个候选（含 `🟢 做早饭会话问候` 等带标题的在线会话）。
+  ⇒ **不再报过期**，状态推进到 `session` 并列出 **80** 个候选（含 `🟢 带标题的在线会话` 等）。
 - **附带**：`onInteraction` 的日志补了 `kernel=??`，以后同类问题一眼看出是"实例分裂"还是"真过期"。
 
 ## [1.10.3] - 2026-10-14

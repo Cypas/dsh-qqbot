@@ -219,6 +219,24 @@ export interface GroupAdminConfig {
         /** 是否唤醒普通群(申请所在群)会话的 AI(2026-09-11 主人要求与唤醒群管 AI 分开设置) */
         wakeGroup: boolean;
     };
+    /**
+     * 自动撤回（2026-10-20 主人定）: 命中关键词/附件类型就**立刻撤回**（不走 AI），可选顺带禁言。
+     * `mode`:
+     *   · `'keep'` = 消息仍然进 AI 上下文（只从聊天记录里消失）—— 默认，最安全；
+     *   · `'drop'` = 连 AI 都不看（在**入站扩展之后**拦截，不破坏扩展契约）。
+     */
+    autoRecall: {
+        enabled: boolean;
+        mode: 'keep' | 'drop';
+        /** 关键词（子串匹配正文；命中任一即撤回） */
+        keywords: string[];
+        /** 按附件类型命中（空数组=不按类型筛） */
+        kinds: Array<'text' | 'image' | 'voice' | 'video' | 'file'>;
+        /** 同时禁言发送者的秒数（0=不禁言） */
+        muteSeconds: number;
+        /** 演练：只记日志不真撤 */
+        dryRun: boolean;
+    };
 }
 /** Web 设置可编辑子集(不含 appId/appSecret 等敏感/底层字段) */
 export interface EditableConfig {

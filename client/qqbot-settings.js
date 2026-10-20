@@ -2277,7 +2277,7 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
       setInterval(refreshBadge, 20000)
 
       // ── 面板状态(每个实例独立保存, 切回不丢) ──
-      var state = { ns: '', accts: [], gid: '', groups: [], tab: 'chat', sendScope: 'group', sendTo: '', sendName: '', sendText: '', insertCtx: true, targetQ: '', c2cs: [], joins: null, mutes: null, members: null, muteSecs: '60', bindGid: '', bindName: '', msg: '', busy: '', wantPeer: null, lookedUp: false, detected: null, detectedHit: null, chatItems: [], chatMore: false, chatBusy: '', chatErr: '', chatOldest: 0, chatText: '', chatIns: true, outMode: '', outRev: undefined, bpEvents: [], bpSel: null, bpDraft: null, bpExt: null, bpExtBusy: '', bpReq: '', bpReqHint: '', bpSrcText: null, bpSrcPath: '', rosterSel: {}, rosterScope: 'all', rosterQ: '', hubSid: '', hubRev: undefined, hubBusy: '', hubMsg: '', gaEnabled: false, gaPoll: false, gaPollWake: true, gaHubNotify: true, gaNotifyGroup: true, gaInterval: 5, gaMinCount: 1, gaMsg: '', gaBusy: '', bcDraft: null, bcTasks: null, cardMd: '', cardBtns: '', cardGid: '', cardBusy: '', cardQ: '', tgGroups: [], tgCur: '', hammerSub: 'mute', qunLogged: null, qunUin: '', qunGroups: [], qunGc: '', qunKw: '', qunMembers: [], qunCount: 0, qunQr: false, qunMsg: '', qunBusy: false, qunLoading: false }
+      var state = { ns: '', accts: [], gid: '', groups: [], tab: 'chat', sendScope: 'group', sendTo: '', sendName: '', sendText: '', insertCtx: true, targetQ: '', c2cs: [], joins: null, mutes: null, members: null, muteSecs: '60', bindGid: '', bindName: '', msg: '', busy: '', wantPeer: null, lookedUp: false, detected: null, detectedHit: null, chatItems: [], chatMore: false, chatBusy: '', chatErr: '', chatOldest: 0, chatText: '', chatIns: true, outMode: '', outRev: undefined, bpEvents: [], bpSel: null, bpDraft: null, bpExt: null, bpExtBusy: '', bpReq: '', bpReqHint: '', bpSrcText: null, bpSrcPath: '', rosterSel: {}, rosterScope: 'all', rosterQ: '', hubSid: '', hubRev: undefined, hubBusy: '', hubMsg: '', gaEnabled: false, gaPoll: false, gaPollWake: true, gaHubNotify: true, gaNotifyGroup: true, gaInterval: 5, gaMinCount: 1, gaMsg: '', gaBusy: '', bcDraft: null, bcTasks: null, cardMd: '', cardBtns: '', cardGid: '', cardBusy: '', cardQ: '', tgGroups: [], tgCur: '', hammerSub: 'mute', arOn: false, arMode: 'keep', arKws: '', arKinds: [], arMute: 0, arDry: false, arMsg: '', qunLogged: null, qunUin: '', qunGroups: [], qunGc: '', qunKw: '', qunMembers: [], qunCount: 0, qunQr: false, qunMsg: '', qunBusy: false, qunLoading: false }
       // 🗂 自定义目标分组(仿 QQ 分组): 2026-09-12 起**host 持久化**({dataRoot}/.qqbot/target-groups.json),
       // localStorage 只当秒开缓存 —— 这样 **AI 与主人共用同一份分组**(agent 侧 broadcast_send 可直接写分组名群发),
       // 顺带修掉"换个浏览器分组就没了"的老毛病。
@@ -3245,6 +3245,23 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
           var e4c = panel && panel.querySelector('#dk-ga-wakegroup'); if (e4c) e4c.checked = state.gaWakeGroup
           var e5 = panel && panel.querySelector('#dk-ga-interval'); if (e5) e5.value = state.gaInterval
           var e6 = panel && panel.querySelector('#dk-ga-mincount'); if (e6) e6.value = state.gaMinCount
+          // 🔨 自动撤回(2026-10-20): 载入 autoRecall 当前值
+          var ar = ga.autoRecall || {}
+          state.arOn = ar.enabled === true
+          state.arMode = ar.mode === 'drop' ? 'drop' : 'keep'
+          state.arKws = (ar.keywords || []).join('\n')
+          state.arKinds = (ar.kinds || []).slice()
+          state.arMute = Number(ar.muteSeconds) || 0
+          state.arDry = ar.dryRun === true
+          var a1 = panel && panel.querySelector('#dk-ar-on'); if (a1) a1.checked = state.arOn
+          var a2 = panel && panel.querySelector('#dk-ar-mode'); if (a2) a2.value = state.arMode
+          var a3 = panel && panel.querySelector('#dk-ar-kws'); if (a3) a3.value = state.arKws
+          var a4 = panel && panel.querySelector('#dk-ar-mute'); if (a4) a4.value = state.arMute
+          var a5 = panel && panel.querySelector('#dk-ar-dry'); if (a5) a5.checked = state.arDry
+          ;['text', 'image', 'voice', 'video', 'file'].forEach(function (k) {
+            var el = panel && panel.querySelector('#dk-ar-k-' + k)
+            if (el) el.checked = state.arKinds.indexOf(k) >= 0
+          })
         }).catch(function () {})
       }
       function gaHint(t) {
@@ -3252,8 +3269,44 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
         var el = panel && panel.querySelector('#dk-ga-hint')
         if (el) el.textContent = state.gaMsg
       }
+      // 自动撤回页自己的提示行（保存反馈也写这里，2026-10-20）
+      function arHint(t) {
+        state.arMsg = t || ''
+        var el = panel && panel.querySelector('#dk-ar-hint')
+        if (el) el.textContent = state.arMsg
+      }
+      /**
+       * 只保存 autoRecall（2026-10-20 修 BUG）:
+       * 之前复用 saveGroupAdmin，会把 enabled/轮询这些**不在本页的字段**用 state 旧值一起提交（state.gaEnabled 本页无控件回读）
+       * → 保存自动撤回时顺手把「群管理」关掉了。改为只 patch 本页字段。
+       */
+      function saveAutoRecallOnly() {
+        arHint('保存中…')
+        fetch(READ + (state.ns ? '?' + outNsQ() : '')).then(function (r) { return r.json() }).then(function (d) {
+          if (!d || !d.value) { arHint('✗ 保存失败: 读取当前设置失败'); return }
+          var cur = d.value
+          var patch = Object.assign({}, cur)
+          patch.groupAdmin = Object.assign({}, cur.groupAdmin || {}, {
+            autoRecall: {
+              enabled: state.arOn === true,
+              mode: state.arMode === 'drop' ? 'drop' : 'keep',
+              keywords: String(state.arKws || '').split(String.fromCharCode(10)).map(function (x) { return x.trim() }).filter(Boolean),
+              kinds: (state.arKinds || []).slice(),
+              muteSeconds: Math.max(0, parseInt(state.arMute, 10) || 0),
+              dryRun: state.arDry === true,
+            },
+          })
+          return fetch(UPDATE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ ns: state.ns || undefined, patch: patch, expectedRevision: d.revision }),
+          }).then(function (r) { return r.json().catch(function () { return null }) }).then(function (d2) {
+            if (d2 && d2.value) { state.hubRev = d2.revision; arHint('✓ 自动撤回已保存(live 生效，立刻按新规则执行)') }
+            else arHint('✗ 保存失败: ' + ((d2 && d2.error) || '未知错误'))
+          }).catch(function () { arHint('✗ 保存异常') })
+        }).catch(function () { arHint('✗ 读取当前设置失败') })
+      }
       function saveGroupAdmin() {
-        state.gaBusy = 'ga'; gaHint('保存中…')
+        state.gaBusy = 'ga'; gaHint('保存中…'); arHint('保存中…')
         var doSave = function () {
           var trySave = function (cur, rev) {
             var patch = Object.assign({}, cur || {})
@@ -3269,6 +3322,15 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
                 notifyGroup: state.gaNotifyGroup,
                 wakeGroup: state.gaWakeGroup,
               },
+              // 🔨 自动撤回(2026-10-20 主人定): 命中关键词/附件类型 → 立刻撤; mode 决定是否进 AI
+              autoRecall: {
+                enabled: state.arOn === true,
+                mode: state.arMode === 'drop' ? 'drop' : 'keep',
+                keywords: String(state.arKws || '').split('\n').map(function (s) { return s.trim() }).filter(Boolean),
+                kinds: (state.arKinds || []).slice(),
+                muteSeconds: Math.max(0, parseInt(state.arMute, 10) || 0),
+                dryRun: state.arDry === true,
+              },
             })
             patch.groupAdmin = ga
             return fetch(UPDATE, {
@@ -3279,10 +3341,12 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
               if (d2 && d2.value) {
                 state.hubRev = d2.revision
                 gaHint('✓ 群组设置已保存(live 生效, 轮询无需重启)')
+                arHint('✓ 自动撤回已保存(live 生效，立刻按新规则执行)')
               } else {
                 gaHint('保存失败: ' + ((d2 && d2.error) || '未知错误') + (d2 && String(d2.error || '').indexOf('changed since') >= 0 ? '(冲突, 请重试)' : ''))
+                arHint('✗ 保存失败: ' + ((d2 && d2.error) || '未知错误'))
               }
-            }).catch(function () { state.gaBusy = ''; gaHint('保存异常') })
+            }).catch(function () { state.gaBusy = ''; gaHint('保存异常'); arHint('✗ 保存异常') })
           }
           fetch(READ + (state.ns ? '?' + outNsQ() : '')).then(function (r) { return r.json() }).then(function (d) {
             if (d && d.value) trySave(d.value, d.revision)
@@ -3930,6 +3994,7 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
           body += '<div class="dk-row" style="gap:6px;margin:2px 0">'
             + '<button class="dk-btn' + (hsub === 'mute' ? ' ok' : '') + '" data-hsub="mute">🔇 禁言</button>'
             + '<button class="dk-btn' + (hsub === 'kick' ? ' ok' : '') + '" data-hsub="kick">👢 踢人</button>'
+            + '<button class="dk-btn' + (hsub === 'auto' ? ' ok' : '') + '" data-hsub="auto">♻️ 自动撤回</button>'
             + '</div>'
           if (hsub === 'mute') {
             body += '<div class="dk-row">目标群: ' + groupSelHtml
@@ -3939,8 +4004,10 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
             body += '<div class="dk-list" id="dk-member-list"></div>'
             body += '<div style="font-weight:700;font-size:13px;margin:8px 0 4px">② 正在禁言中</div>'
             body += '<div class="dk-list" id="dk-mute-list"></div>'
-          } else {
+          } else if (hsub === 'kick') {
             body += hammerKickHtml()
+          } else {
+            body += hammerAutoRecallHtml()
           }
         } else if (state.tab === 'roster') {
           body += '<div class="dk-row" style="font-weight:700;font-size:13px;margin:2px 0">📇 会话台账:机器人聊过的对象</div>'
@@ -4380,6 +4447,32 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
       // ── 🔨 锤子 · 踢人（2026-10-02 主人定）──
       //   登录态与 AI **共享**：两边读写同一个 {dataRoot}/qun-cookie.json，
       //   所以面板登录完 AI 立刻能用、AI 登录完面板也立刻显示已登录。
+      // ── 🔨 锤子 · 自动撤回（2026-10-20 主人定）──
+      function hammerAutoRecallHtml() {
+        var kinds = [['text', '文本'], ['image', '图片'], ['voice', '语音'], ['video', '视频'], ['file', '文件']]
+        var box = kinds.map(function (k) {
+          return '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:12px"><input type="checkbox" id="dk-ar-k-' + k[0] + '"' + (state.arKinds.indexOf(k[0]) >= 0 ? ' checked' : '') + '> ' + k[1] + '</label>'
+        }).join('')
+        return '<div class="dk-row" style="gap:8px;flex-wrap:wrap">'
+          + '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:12px"><input type="checkbox" id="dk-ar-on"' + (state.arOn ? ' checked' : '') + '> 启用自动撤回</label>'
+          + '<span style="font-size:12px;color:#666">命中后:</span>'
+          + '<select id="dk-ar-mode" style="font-size:12px;padding:2px 4px">'
+          + '<option value="keep"' + (state.arMode !== 'drop' ? ' selected' : '') + '>仍进 AI（只撤回聊天记录）</option>'
+          + '<option value="drop"' + (state.arMode === 'drop' ? ' selected' : '') + '>直接吞掉（AI 也不看）</option>'
+          + '</select>'
+          + '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:12px" title="只记日志, 不真撤"><input type="checkbox" id="dk-ar-dry"' + (state.arDry ? ' checked' : '') + '> 演练</label>'
+          + '</div>'
+          + '<div style="font-weight:700;font-size:13px;margin:8px 0 4px">① 关键词（一行一个，命中任一即撤）</div>'
+          + '<textarea id="dk-ar-kws" rows="4" style="width:100%;box-sizing:border-box;font-size:12px;padding:6px;border:1px solid #e2d9ff;border-radius:6px" placeholder="例如：加我微信">' + (state.arKws || '') + '</textarea>'
+          + '<div style="font-weight:700;font-size:13px;margin:8px 0 4px">② 按附件类型（勾上=这类消息直接被撤）</div>'
+          + '<div class="dk-row" style="gap:10px;flex-wrap:wrap">' + box + '</div>'
+          + '<div class="dk-row" style="gap:8px;margin-top:8px;align-items:center">'
+          + '<span style="font-size:12px;color:#666">顺带禁言 <input type="number" id="dk-ar-mute" min="0" value="' + (state.arMute || 0) + '" style="width:64px;font-size:12px;padding:2px 4px"> 秒（0=不禁言）</span>'
+          + '<button class="dk-btn ok" id="dk-ar-save" style="margin-left:auto">💾 保存</button>'
+          + '</div>'
+          + '<div class="dk-msg" style="line-height:1.5;color:#888">执行点在「入站扩展之后」：选"仍进 AI"=扩展与 AI 都照常收到、只是聊天记录里消失；选"直接吞掉"=扩展照常执行、但这条不进 AI。机器人需为群管理员，且官方撤回窗口只有 2 分钟。</div>'
+          + '<div class="dk-msg" id="dk-ar-hint" style="color:#2f9e44">' + (state.arMsg || '') + '</div>'
+      }
       function hammerKickHtml() {
         if (state.qunLogged !== true) {
           var h = '<div class="dk-msg">踢人需要先登录 QQ 群管理（扫码一次，之后长期免扫；登录态与 AI 共享）。</div>'
@@ -4528,6 +4621,25 @@ var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180de
             paintBody()
           }
         })
+        // 🔨 自动撤回 · 保存（2026-10-20）
+        var arSaveBtn = panel.querySelector('#dk-ar-save')
+        if (arSaveBtn) arSaveBtn.onclick = function () {
+          var kv = panel.querySelector('#dk-ar-kws')
+          state.arKws = kv ? kv.value : ''
+          var on = panel.querySelector('#dk-ar-on'); state.arOn = on ? on.checked : false
+          var md = panel.querySelector('#dk-ar-mode'); state.arMode = (md && md.value === 'drop') ? 'drop' : 'keep'
+          var dr = panel.querySelector('#dk-ar-dry'); state.arDry = dr ? dr.checked : false
+          var mu = panel.querySelector('#dk-ar-mute')
+          state.arMute = Math.max(0, parseInt(mu ? mu.value : '0', 10) || 0)
+          var arr = []
+          ;['text', 'image', 'voice', 'video', 'file'].forEach(function (k) {
+            var el = panel.querySelector('#dk-ar-k-' + k)
+            if (el && el.checked) arr.push(k)
+          })
+          state.arKinds = arr
+          state.arMsg = '保存中…'
+          saveGroupAdmin()
+        }
         var qLoginBtn = panel.querySelector('#dk-qun-login')
         if (qLoginBtn) qLoginBtn.onclick = function () { doQunLogin() }
         var qStatusBtn = panel.querySelector('#dk-qun-status')

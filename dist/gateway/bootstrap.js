@@ -13,6 +13,8 @@ import { startScheduler } from '../features/scheduler.js';
 import { startJoinRequestPolling } from '../features/poll-join-requests.js';
 import { configureScheduleStore, getScheduleStore } from '../features/schedule-store.js';
 import { initContextlessStore, traceContextless, describeStorePath } from '../features/contextless-store.js';
+import { rememberInbound, rememberSelf } from '../features/msg-recent.js';
+import { initMsgHistory, appendMsgHistory } from '../features/msg-history.js';
 import { setChannelBridge } from '../channel-tools.js';
 import { QqApprovalController, setApprovalDispatch, makeApprovalListener, registerApprovalController } from '../features/qq-approval.js';
 import { QqUserQuestionsController, registerQuestionController } from '../features/qq-user-questions.js';
@@ -140,9 +142,78 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
     logger.info(`QQBot SDK initialized (UA: ${userAgent})${watchJoinRequests ? ' [watchJoinRequests: GROUP_MEMBER_EVENT 已订阅]' : ''}`);
     // ── 中间件链 ──
     await setupMiddlewares(bot, config, manager, logger, ctx);
+    // 2026-10-20: 消息历史台账（落盘、按会话一个文件）
+    initMsgHistory(dataRootOf(config));
     // ── 入站：经过中间件链后的消息交给 dsh agent ──
     bot.on('message', async (mCtx) => {
         const msg = mCtx.message;
+        // 2026-10-20 主人需求: 先判消息类型 + 记进「最近 2 分钟」内存缓冲（不落盘）
+        let inKind = 'text';
+        let inText = '';
+        try {
+            const anyMsg = msg;
+            const atts = anyMsg.attachments ?? [];
+            const ct = (a) => String(a.content_type ?? a.type ?? '');
+            inKind = atts.length === 0
+                ? 'text'
+                : atts.some((a) => /image/i.test(ct(a))) ? 'image'
+                    : atts.some((a) => /audio|voice|silk/i.test(ct(a))) ? 'voice'
+                        : atts.some((a) => /video/i.test(ct(a))) ? 'video'
+                            : 'file';
+            inText = inKind === 'text' ? String(anyMsg.content ?? '') : `[${inKind}]`;
+            const rScope = String(msg.groupOpenid ?? '') !== '' ? 'group' : 'c2c';
+            const rPeer = rScope === 'group' ? (msg.groupOpenid ?? msg.senderId ?? '') : (msg.senderId ?? '');
+            rememberInbound(rScope, String(rPeer ?? ''), {
+                msgId: String(msg.messageId ?? ''),
+                senderId: String(msg.senderId ?? ''),
+                senderName: String(msg.senderName ?? msg.senderId ?? ''),
+                at: Date.now(),
+                text: inText,
+                kind: inKind,
+            });
+        }
+        catch { /* 缓冲失败不影响主流程 */ }
+        // 自动撤回（2026-10-20 主人定）: 命中关键词/附件类型 → **立刻撤回**（不等 AI）。
+        // ★ 位置说明: 这里已经是**中间件链 + 入站扩展全部跑完之后**，所以 mode='drop' 只决定
+        //   "这条消息要不要进 agent"，不改变扩展收到的 ctx、也不改扩展执行顺序 —— 不破坏扩展契约。
+        let autoDropped = false;
+        try {
+            const ar = config.autoRecall;
+            const msgId = String(msg.messageId ?? '');
+            if (ar?.enabled === true && String(msg.groupOpenid ?? '') !== '' && msgId !== '') {
+                const kws = (ar.keywords ?? []).map((k) => String(k).trim()).filter(Boolean);
+                const kinds = (ar.kinds ?? []).map(String);
+                const textLower = String(msg.content ?? '').toLowerCase();
+                const hitKw = kws.find((k) => textLower.includes(k.toLowerCase()));
+                const hitKind = kinds.includes(inKind);
+                if (hitKw !== undefined || hitKind) {
+                    const gid = String(msg.groupOpenid ?? '');
+                    const ga = manager.groupAdmin;
+                    const dry = ar.dryRun === true;
+                    logger.info(`auto-recall hit: gid=…${gid.slice(-4)} kind=${inKind} kw=${hitKw ?? '-'} dry=${dry} mode=${ar.mode ?? 'keep'}`);
+                    if (!dry && ga && gid) {
+                        void ga.recallMessage(gid, msgId, 'group').catch(() => undefined);
+                        const secs = Math.max(0, Math.round(Number(ar.muteSeconds) || 0));
+                        const sid = String(msg.senderId ?? '');
+                        if (secs > 0 && /^[0-9A-Za-z]{32}$/u.test(sid)) {
+                            const pad = (n) => String(n).padStart(2, '0');
+                            const ex = new Date(Date.now() + secs * 1000);
+                            const rfc = `${ex.getFullYear()}-${pad(ex.getMonth() + 1)}-${pad(ex.getDate())}T${pad(ex.getHours())}:${pad(ex.getMinutes())}:${pad(ex.getSeconds())}+08:00`;
+                            void ga.setMemberMute(gid, sid, rfc).catch(() => undefined);
+                        }
+                    }
+                    if ((ar.mode ?? 'keep') === 'drop')
+                        autoDropped = true;
+                }
+            }
+        }
+        catch (err) {
+            logger.warn(`auto-recall error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (autoDropped) {
+            logger.debug('auto-recall drop: 该消息不进 agent（扩展已执行完）');
+            return;
+        }
         // QQ 远程审批: /approve|/deny CODE 最先拦截(消费后不再进 agent/普通聊天)
         if (approvalController) {
             const scope = msg.kind === 'group' ? 'group' : 'c2c';
@@ -194,7 +265,7 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
     const HISTORY_LIMIT = 10;
     const sentByPeer = new Map();
     const keyOf = (t) => `${t.scope}:${t.targetId}`;
-    const pushSent = (target, id) => {
+    const pushSent = (target, id, text, kind) => {
         if (!id)
             return;
         const k = keyOf(target);
@@ -206,6 +277,14 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
         arr.unshift({ target, id }); // 最新在前
         if (arr.length > HISTORY_LIMIT)
             arr.length = HISTORY_LIMIT;
+        // 2026-10-20 主人需求: 机器人自己发的消息也进 msg-recent 缓冲,
+        // 这样「自动撤回/按关键词搜索消息」也能覆盖自己发的。
+        try {
+            const sc = String(target.scope ?? 'group') === 'c2c' ? 'c2c' : 'group';
+            rememberSelf(sc, String(target.targetId ?? ''), { msgId: id, text, kind: kind ?? 'text' });
+            appendMsgHistory(sc, String(target.targetId ?? ''), { id, s: 'self', n: '机器人', t: Date.now(), k: kind ?? 'text', x: text ?? '', me: true });
+        }
+        catch { /* 记不了不影响发送 */ }
     };
     const doRecall = async (target, index) => {
         const arr = sentByPeer.get(keyOf(target));
@@ -252,7 +331,7 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
                         : { target, msgType: 0, content: rawText, messageReference: { message_id: refId } };
                     try {
                         const resp = (await bot.send(refBody));
-                        pushSent(target, resp?.id);
+                        pushSent(target, resp?.id, rawText);
                         return resp;
                     }
                     catch (refErr) {
@@ -263,11 +342,11 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
                 // 纯文本降级: 无 markdown 语法/@标签 → 直接纯文本通道, 省富媒体额度与频控
                 if (!hasMarkdownSyntax(rawText)) {
                     const respT = (await bot.sendText(target, rawText));
-                    pushSent(target, respT?.id);
+                    pushSent(target, respT?.id, rawText);
                     return respT;
                 }
                 const resp = (await bot.sendMarkdown(target, content));
-                pushSent(target, resp?.id);
+                pushSent(target, resp?.id, rawText);
                 return resp;
             }
             catch (err) {

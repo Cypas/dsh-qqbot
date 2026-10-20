@@ -20,6 +20,7 @@ import { diagWrite } from './shared/diag.js';
 import { makeExtCaps } from './features/ext-capabilities.js';
 import { verifyHuman, groupRegistryPath } from './api/group-admin.js';
 import { readGroupMembers } from './features/chat-ledger.js';
+import { readMsgHistory, latestMsgHistory, historyDebug, latestGroupId } from './features/msg-history.js';
 import * as broadcastQueue from './features/broadcast.js';
 import { wakeSessionAgent, safeAppendUserMessage } from './features/group-hub.js';
 import { managersOf, findManagerByPeer, findManagerBySessionId } from './features/session-registry.js';
@@ -1141,10 +1142,15 @@ export async function apply(ctx) {
                 const client = s.ch.manager.groupAdmin;
                 if (!client)
                     return undefined;
+                // 2026-10-20 修(主人定)：群工具**不该让人传 gid** —— 默认就该是"当前会话所在的群"。
+                //   优先用会话自己的 peerId（= 入站 group openid，最可靠）；
+                //   replyTarget 只是"最近一次出站目标"，发过一次别的群就会被带歪（实测踩过）。
+                const peer = String(s.rec.peerId ?? '').trim();
                 const t = s.rec.replyTarget;
-                const gid = t && t.scope === 'group'
-                    ? t.targetId
-                    : s.ch.manager.manageGroup || undefined;
+                const gid = peer
+                    || (t && t.scope === 'group' ? t.targetId : undefined)
+                    || s.ch.manager.manageGroup
+                    || undefined;
                 return { client, gid };
             }
             // 会话表无此 agent(web 直连等): 遍历全局桥, 找第一个"群管理开启 + 配了 manageGroup"的实例
@@ -1294,7 +1300,7 @@ export async function apply(ctx) {
         description: '群管理(写,危险,**仅主人明确要求时调用**): 按关键词批量审批入群申请 —— 验证消息**命中任一关键词的放行**, 其余直接拒绝。基于官方待审列表(不含本地历史流水)。拒绝不可逆; 想先看结果传 dry_run=true。' +
             '\n示例: {gid:"<群openid>", keywords:["早饭"], rejectReason:"答非所问"} · 只放行不拒: {..., rejectUnmatched:false} · 预览: {..., dry_run:true}',
         parameters: {
-            gid: { type: 'string', description: '目标群 openid(可选; 不填=当前会话群/manageGroup)' },
+            gid: { type: 'string', description: '目标群 openid(**可选**：不填=当前会话所在的群；跨群操作才传)' },
             keywords: { type: 'array', items: { type: 'string' }, required: true, description: '放行关键词(任一命中即放行; 不区分大小写)' },
             rejectUnmatched: { type: 'boolean', description: 'true(默认)=未命中的一律拒绝; false=只放行命中的, 其余不动' },
             rejectReason: { type: 'string', description: '拒绝理由(默认"答非所问"; 不要写暗号/答案)' },
@@ -2067,7 +2073,7 @@ export async function apply(ctx) {
         name: 'group_mute_state',
         description: '群管理(读): 查看当前群禁言状态(全员模式 + 正在禁言中的成员及到期时间)。仅主人要求时调用。',
         parameters: {
-            gid: { type: 'string', description: '目标群 openid(可选; 不填=当前会话群/manageGroup)' },
+            gid: { type: 'string', description: '目标群 openid(**可选**：不填=当前会话所在的群；跨群操作才传)' },
         },
         output: {
             schema: {
@@ -2080,7 +2086,7 @@ export async function apply(ctx) {
             const ga = groupAdminOf(exec);
             if (!ga)
                 return { ok: false, msg: '群管理未开启或非群会话' };
-            const gid = String(args.gid ?? '').trim() || ga.gid || '';
+            const gid = String(args.gid ?? '').trim() || ga.gid || latestGroupId();
             if (!gid)
                 return { ok: false, msg: '当前不是群会话且未指定 gid, 无法确定目标群' };
             const r = await ga.client.getMuteState(gid);
@@ -2092,13 +2098,198 @@ export async function apply(ctx) {
             return { ok: true, msg: `全员禁言: ${mode === 'always' ? '开启' : mode === 'schedule' ? '定时' : '关闭'}\n禁言中 ${members.length} 人:\n${lines.length ? lines.join('\n') : '(无)'}` };
         },
     });
+    /**
+     * 撤回群消息（2026-10-20 主人需求）: 官方允许**群管理员撤回普通成员的消息**（窗口 2 分钟）。
+     * msgId 来源 = 入站时记进 msg-recent 的内存缓冲（bootstrap），这里按「成员 / 最近一条」取。
+     * 不新增落盘台账；缓冲只保留最近 2 分钟（容量上限 50 条），重启即清空。
+     */
+    const groupRecallTool = defineTool({
+        name: 'group_recall',
+        description: '群管理(写,危险): 撤回群消息(机器人是群管理员时可撤**普通成员**的消息; 官方窗口 2 分钟)。'
+            + '\nmember=按成员 openid 撤其最近一条; 不传 member=撤群里最近一条; 也可直接给 msg_id。'
+            + '\nmsgId 来自入站内存缓冲(只记最近 2 分钟/50 条, 重启清空)。仅主人明确要求时调用。'
+            + '\n示例: {member:"<openid>"} / {msg_id:"ROBOT1.0_xxx"}',
+        parameters: {
+            gid: { type: 'string', description: '目标群 openid(**可选**：不填=当前会话所在的群；只有要操作别的群(机器人也是那个群的管理员)时才传)' },
+            member: { type: 'string', description: '成员 openid(可选): 撤该成员最近一条' },
+            msg_id: { type: 'string', description: '直接指定 message_id(可选, 优先于 member)' },
+        },
+        output: {
+            schema: {
+                type: 'object', additionalProperties: false,
+                properties: { ok: { type: 'boolean', required: true }, msg: { type: 'string', required: true } },
+            },
+            render: (_a, v) => [{ type: 'text', text: v.ok ? v.msg : `失败: ${v.msg}` }],
+        },
+        async execute(args, exec) {
+            const ga = groupAdminOf(exec);
+            if (!ga)
+                return { ok: false, msg: '群管理未开启或非群会话' };
+            const gid = String(args.gid ?? '').trim() || ga.gid || latestGroupId();
+            if (!gid)
+                return { ok: false, msg: '当前不是群会话且未指定 gid, 无法确定目标群' };
+            let msgId = String(args.msg_id ?? '').trim();
+            let who = '';
+            if (msgId === '') {
+                const member = String(args.member ?? '').trim();
+                const rec = latestMsgHistory('group', gid, { senderId: member || undefined, withinMs: 120_000 });
+                if (!rec) {
+                    return {
+                        ok: false,
+                        msg: member
+                            ? '没找到该成员 2 分钟内的消息（msgId 只存在内存缓冲里，重启会清空；也可能超时了）'
+                            : '群里 2 分钟内没有记录到可撤回的消息',
+                    };
+                }
+                msgId = rec.id;
+                who = rec.n || rec.s;
+            }
+            const r = await ga.client.recallMessage(gid, msgId, 'group');
+            if (!r.ok)
+                return { ok: false, msg: r.err.human };
+            return { ok: true, msg: `✅ 已撤回${who ? ` ${who} 的` : ''}消息（msg_id=${msgId.slice(0, 18)}…）` };
+        },
+    });
+    /**
+     * 消息搜索（2026-10-20 主人需求）: 在「最近 2 分钟消息缓冲」里搜消息（**包含机器人自己发的**）。
+     * 返回的 msg_id 可直接喂给 group_recall_batch。
+     */
+    const msgSearchTool = defineTool({
+        name: 'group_msg_search',
+        description: '群管理(读): 在最近 2 分钟的消息缓冲里按关键词/类型搜消息（**含机器人自己发的**），返回 msg_id 供 group_recall_batch 批量撤回。'
+            + '\n缓冲不落盘、重启清空，只覆盖最近 2 分钟（官方撤回窗口）。',
+        parameters: {
+            gid: { type: 'string', description: '目标群 openid(**可选**：不填=当前会话所在的群；只有要操作别的群(机器人也是那个群的管理员)时才传)' },
+            keyword: { type: 'string', description: '关键词(子串匹配正文; 不填=不筛)' },
+            kind: { type: 'string', enum: ['text', 'image', 'voice', 'video', 'file'], description: '消息类型筛选(可选)' },
+            from_self: { type: 'boolean', description: 'true=只搜机器人自己发的; false=只搜别人发的; 不填=都搜' },
+            limit: { type: 'integer', description: '最多返回条数(默认 20, 上限 50)' },
+        },
+        output: {
+            schema: {
+                type: 'object', additionalProperties: false,
+                properties: { ok: { type: 'boolean', required: true }, msg: { type: 'string', required: true } },
+            },
+            render: (_a, v) => [{ type: 'text', text: v.ok ? v.msg : `失败: ${v.msg}` }],
+        },
+        async execute(args, exec) {
+            const ga = groupAdminOf(exec);
+            if (!ga)
+                return { ok: false, msg: '群管理未开启或非群会话' };
+            const gid = String(args.gid ?? '').trim() || ga.gid || latestGroupId();
+            if (!gid)
+                return { ok: false, msg: '当前不是群会话且未指定 gid' };
+            const list = readMsgHistory('group', gid, {
+                keyword: args.keyword ? String(args.keyword) : undefined,
+                kind: (args.kind ? String(args.kind) : undefined),
+                fromSelf: typeof args.from_self === 'boolean' ? args.from_self : undefined,
+                limit: Number(args.limit) || 20,
+            });
+            if (list.length === 0)
+                return { ok: true, msg: '台账里没有命中的消息（默认只查最近 2 小时）。' + historyDebug('group', gid) };
+            const lines = list.map((m, i) => `${i + 1}. ${m.me ? '🤖' : '👤'}${m.n || m.s} [${m.k ?? 'text'}] ${m.x || '(无正文)'}｜id=${String(m.id).slice(0, 16)}…｜${new Date(m.t).toLocaleTimeString('zh-CN')}`);
+            return {
+                ok: true,
+                msg: `命中 ${list.length} 条（默认最近 2 小时）:\n${lines.join('\n')}\n→ 用 group_recall_batch 传 msg_ids 批量撤回（也可以直接给它 keyword/kind 让它自己挑）`,
+            };
+        },
+    });
+    /**
+     * 批量撤回 + 可选批量禁言（2026-10-20 主人需求）
+     */
+    const recallBatchTool = defineTool({
+        name: 'group_recall_batch',
+        description: '群管理(写,危险): 批量撤回消息 + 可选批量禁言发送者。'
+            + '\n① msg_ids 直接给要撤的 id 列表; 或 ② 留空并给 keyword/kind，让它从 2 分钟缓冲里自己挑(最多 20 条)。'
+            + '\nmute_seconds>0 → 对涉及的**普通成员**批量禁言(机器人自己发的会跳过)。'
+            + '\ndry_run=true 只回显要撤哪些、不执行。仅主人明确要求时调用。',
+        parameters: {
+            gid: { type: 'string', description: '目标群 openid(**可选**：不填=当前会话所在的群；只有要操作别的群(机器人也是那个群的管理员)时才传)' },
+            msg_ids: { type: 'array', items: { type: 'string' }, description: '要撤的 message_id 列表(可空: 空则按 keyword/kind 从缓冲挑)' },
+            keyword: { type: 'string', description: '按关键词挑(与 msg_ids 二选一)' },
+            kind: { type: 'string', enum: ['text', 'image', 'voice', 'video', 'file'], description: '按类型挑(可选)' },
+            mute_seconds: { type: 'integer', description: '同时禁言发送者的秒数(0/不填=不禁言)' },
+            dry_run: { type: 'boolean', description: 'true=只列出、不执行' },
+        },
+        output: {
+            schema: {
+                type: 'object', additionalProperties: false,
+                properties: { ok: { type: 'boolean', required: true }, msg: { type: 'string', required: true } },
+            },
+            render: (_a, v) => [{ type: 'text', text: v.ok ? v.msg : `失败: ${v.msg}` }],
+        },
+        async execute(args, exec) {
+            const ga = groupAdminOf(exec);
+            if (!ga)
+                return { ok: false, msg: '群管理未开启或非群会话' };
+            const gid = String(args.gid ?? '').trim() || ga.gid || latestGroupId();
+            if (!gid)
+                return { ok: false, msg: '当前不是群会话且未指定 gid' };
+            const brief = (m) => `${m.me ? '🤖' : '👤'}${m.n || m.s} [${m.k ?? 'text'}] ${(m.x ?? '').slice(0, 24)}`;
+            let ids = (Array.isArray(args.msg_ids) ? args.msg_ids : []).map((v) => String(v).trim()).filter(Boolean);
+            let picked = [];
+            if (ids.length === 0) {
+                picked = readMsgHistory('group', gid, {
+                    keyword: args.keyword ? String(args.keyword) : undefined,
+                    kind: (args.kind ? String(args.kind) : undefined),
+                    limit: 20,
+                }).map((r) => ({ me: r.me, s: r.s, n: r.n, k: r.k, x: r.x, msgId: r.id }));
+                ids = picked.map((p) => p.msgId);
+            }
+            else {
+                const all = readMsgHistory('group', gid, { withinMs: 120_000, limit: 200 }).map((r) => ({ me: r.me, s: r.s, n: r.n, k: r.k, x: r.x, msgId: r.id }));
+                picked = all.filter((p) => ids.includes(p.msgId));
+            }
+            ids = ids.slice(0, 20);
+            if (ids.length === 0)
+                return { ok: false, msg: '没有要撤的消息（台账只查最近 2 分钟窗口，或关键词没命中）' };
+            if (args.dry_run === true) {
+                return {
+                    ok: true,
+                    msg: `[dry-run] 将撤回 ${ids.length} 条:\n${picked.slice(0, 20).map((p, i) => `${i + 1}. ${brief(p)}`).join('\n') || ids.join('\n')}`
+                        + (Number(args.mute_seconds) > 0 ? `\n并禁言涉及成员 ${Number(args.mute_seconds)} 秒` : ''),
+                };
+            }
+            let ok = 0;
+            const errs = [];
+            for (const id of ids) {
+                const r = await ga.client.recallMessage(gid, id, 'group');
+                if (r.ok)
+                    ok++;
+                else
+                    errs.push(`…${id.slice(-6)}: ${r.err.human}`);
+                await new Promise((res) => setTimeout(res, 80));
+            }
+            let muteNote = '';
+            const secs = Math.max(0, Math.round(Number(args.mute_seconds) || 0));
+            if (secs > 0 && picked.length > 0) {
+                const senders = [...new Set(picked.filter((p) => !p.me && /^[0-9A-Za-z]{32}$/u.test(p.s)).map((p) => p.s))].slice(0, 20);
+                if (senders.length > 0) {
+                    const pad = (n) => String(n).padStart(2, '0');
+                    const ex = new Date(Date.now() + secs * 1000);
+                    const rfc = `${ex.getFullYear()}-${pad(ex.getMonth() + 1)}-${pad(ex.getDate())}T${pad(ex.getHours())}:${pad(ex.getMinutes())}:${pad(ex.getSeconds())}+08:00`;
+                    let mOk = 0;
+                    for (const sid of senders) {
+                        const mr = await ga.client.setMemberMute(gid, sid, rfc);
+                        if (mr.ok)
+                            mOk++;
+                        await new Promise((res) => setTimeout(res, 120));
+                    }
+                    muteNote = `\n禁言: ${mOk}/${senders.length} 人成功(${secs} 秒)`;
+                }
+            }
+            const head = `✅ 撤回 ${ok}/${ids.length} 条`;
+            const failNote = errs.length ? `\n失败:\n${errs.slice(0, 5).join('\n')}` : '';
+            return { ok: ok > 0, msg: `${head}${muteNote}${failNote}` };
+        },
+    });
     const muteMemberTool = defineTool({
         name: 'group_mute_member',
         description: '群管理(写,危险): 禁言/解除群成员(**可批量, 单次最多 20 人**)。action=mute 禁言(seconds 秒, 默认600); unmute=解除。只能禁普通成员(群主/管理员禁不了)。' +
             '\n想按昵称禁言先用 id_lookup 拿 openid; 仅主人明确要求时调用。' +
             '\n示例: {member_openids:["<openid>"], action:"mute", seconds:600}',
         parameters: {
-            gid: { type: 'string', description: '目标群 openid(可选; 不填=当前会话群/manageGroup)' },
+            gid: { type: 'string', description: '目标群 openid(**可选**：不填=当前会话所在的群；跨群操作才传)' },
             member_openids: { type: 'array', items: { type: 'string' }, required: true, description: '目标成员 openid 数组(只禁 1 个也传数组; ≤20 个; 可先用 id_lookup 按昵称查)' },
             action: { type: 'string', required: true, enum: ['mute', 'unmute'], description: 'mute 禁言 / unmute 解除' },
             seconds: { type: 'number', required: true, description: '禁言秒数(mute 时; 不需要可填 600)' },
@@ -2114,7 +2305,7 @@ export async function apply(ctx) {
             const ga = groupAdminOf(exec);
             if (!ga)
                 return { ok: false, msg: '群管理未开启或非群会话' };
-            const gid = String(args.gid ?? '').trim() || ga.gid || '';
+            const gid = String(args.gid ?? '').trim() || ga.gid || latestGroupId();
             if (!gid)
                 return { ok: false, msg: '当前不是群会话且未指定 gid, 无法确定目标群' };
             const secs = Math.max(1, Math.min(30 * 86400, Math.round(Number(args.seconds ?? 600))));
@@ -2425,6 +2616,9 @@ export async function apply(ctx) {
         { name: 'group_join_auto', tool: autoApproveJoinTool },
         { name: 'group_mute_state', tool: muteStateTool },
         { name: 'group_mute_member', tool: muteMemberTool },
+        { name: 'group_recall', tool: groupRecallTool },
+        { name: 'group_msg_search', tool: msgSearchTool },
+        { name: 'group_recall_batch', tool: recallBatchTool },
         { name: 'id_lookup', tool: idLookupTool },
         { name: 'session_list', tool: sessionListTool },
         { name: 'session_wake', tool: sessionWakeTool },
@@ -3221,29 +3415,17 @@ const CTX_TOOL_NAMES = ['context_memo', 'context_compact', 'context_drop', 'qq_g
  * ⚠️ 可见性不在这里决定 —— 交给 {@link restrictContextTools} 按会话剪枝。
  */
 /**
-
  * 把 `expose: 'all'` 的扩展工具注册到**插件根作用域**（2026-10-10 主人要的"暴露给全部会话"）。
-
  *
-
  * 为什么必须挂在这一层：扩展工具平时由 session-manager 在**每个 QQ 会话**上用 `agentCtx` 注册，
-
  * 而 web / 终端等**非 QQ 会话不走那条链** ⇒ 压根看不到它们。想让它们跨通道，
-
  * 只能挂到插件根 —— 宿主会让所有会话继承插件作用域的工具（`context_*` 三工具当年也是为此才改成全局）。
-
  *
-
  * 命名：`<name>@<人设 id>`，并且**每个账号实例各注册一份**（实例各有自己的 preset / appId / 账号数据）；
-
  * 执行时由注册名里的 tag 反查账号包（见 buildWorkspaceQqPack）—— **名字即归属**。
-
  *
-
  * 幂等：句柄存 globalThis（跨热刷可见），已注册过的 `name@tag` 不重复注册。
-
  * fail-soft：拿不到 tools 服务 / 没有实例 / 目录读不到，一律静默跳过，绝不影响主流程。
-
  */
 export function ensureExtToolsGlobal(globalCtx) {
     // 节流：本函数挂在 agent/pre-step（**每个 step** 都触发）—— 15 秒内不重复扫盘；

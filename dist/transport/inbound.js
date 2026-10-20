@@ -1,6 +1,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { skipSilentAppend } from '../session/surface-guard.js';
 import { clearGroupHistory } from '../features/history-store.js';
 import { traceContextless } from '../features/contextless-store.js';
@@ -16,6 +17,7 @@ import { getStickerStore, computeDHash } from '../features/sticker-store.js';
 import { lookupImagePath, rememberImagePath } from '../features/image-path-cache.js';
 import { extractFaceImageUrls, slimQuoteText } from './quote-text.js';
 import { lookupMsgContent, rememberMsgContent } from './msg-content-cache.js';
+import { appendMsgHistory } from '../features/msg-history.js';
 import { recordImageUrl, lookupStickerIdByUrl } from '../features/image-url-ledger.js';
 import { pushQuote } from '../features/quote-cache.js';
 import { computeRelevance, touchAffinity, classifyEmo, getAffinityEntry, memoryStrength } from '../features/local-signals.js';
@@ -65,6 +67,86 @@ export async function handleInbound(rawMsg, manager, config, logger, state) {
         targetId: peerId,
         msgId: msg.messageId,
     };
+    /**
+     * 从盘上直接读 autoRecall（2026-10-20）。
+     * 为什么需要：settings 是 live 重载的，但 handleInbound 闭包里的 config 可能是启动时那份，
+     * 实测「面板保存成功、收到消息却当没有规则」。这里直接读 ~/.dsh/qqbot-settings/<profile>/<ns>.json 兜底。
+     */
+    function readAutoRecallFromDisk(config) {
+        try {
+            const c = config;
+            const prof = process.env.DSH_PROFILE || 'web';
+            const ns = String(c?.settingsNs || c?.ns || 'im-qqbot-2');
+            const f = homedir() + '/.dsh/qqbot-settings/' + prof + '/' + ns + '.json';
+            const j = JSON.parse(readFileSync(f, 'utf8'));
+            return j?.groupAdmin?.autoRecall;
+        }
+        catch {
+            return undefined;
+        }
+    }
+    // 2026-10-20 判消息类型 + 写消息历史台账（主人定：按会话分目录 + 一天一个文件 + 保留 7 天）
+    // ★ 为什么放这里：群消息先经 debounce 中间件攒窗口，它会 **consume**（不 next）后再调 handleInbound，
+    //   所以写在 bot.on('message') 里根本不会执行（实测：台账里只有机器人自己的消息、自动撤回不动）。
+    //   handleInbound 才是"消息确实进来了"的唯一必经点。
+    let _kind = 'text';
+    let _text = '';
+    try {
+        const _atts = Array.isArray(msg.attachments) ? msg.attachments : [];
+        const _ct = (a) => String(a?.content_type ?? '');
+        _kind = _atts.length === 0
+            ? 'text'
+            : _atts.some((a) => /image/i.test(_ct(a))) ? 'image'
+                : _atts.some((a) => /audio|voice|silk/i.test(_ct(a))) ? 'voice'
+                    : _atts.some((a) => /video/i.test(_ct(a))) ? 'video'
+                        : 'file';
+        _text = _kind === 'text' ? String(msg.content ?? '') : `[${_kind}]`;
+        appendMsgHistory(scope, String(peerId ?? ''), {
+            id: String(msg.messageId ?? ''),
+            s: String(msg.senderId ?? ''),
+            n: String(msg.senderName ?? msg.senderId ?? ''),
+            t: Date.now(),
+            k: _kind,
+            x: _text,
+        });
+    }
+    catch { /* 台账失败不影响主流程 */ }
+    // 自动撤回（2026-10-20 主人定）：命中关键词/附件类型 → **立刻撤回**（不等 AI），可选顺带禁言。
+    // ★ 同样必须放在 handleInbound（放 bot.on('message') 里会被 debounce 吃掉，实测不生效）。
+    try {
+        const ar = config.autoRecall ?? readAutoRecallFromDisk(config);
+        const _mId = String(msg.messageId ?? '');
+        try {
+            appendFileSync(homedir() + '/.dsh/qqbot-settings/../auto-recall-diag-' + process.pid + '.log', new Date().toISOString() + ' ar=' + (ar ? 'Y' : 'N') + ' enabled=' + String(ar?.enabled) + ' kws=' + String((ar?.keywords || []).length) + ' msg=' + String(msg.content || '').slice(0, 24) + ' id=' + _mId.slice(0, 16) + String.fromCharCode(10), 'utf8');
+        }
+        catch { /* ignore */ }
+        if (ar?.enabled === true && scope === 'group' && _mId !== '') {
+            const kws = (ar.keywords ?? []).map((k) => String(k).trim()).filter(Boolean);
+            const kinds = (ar.kinds ?? []).map(String);
+            const lower = String(msg.content ?? '').toLowerCase();
+            const hitKw = kws.find((k) => lower.includes(k.toLowerCase()));
+            const hitKind = kinds.includes(_kind);
+            if (hitKw !== undefined || hitKind) {
+                const gid = String(msg.groupOpenid ?? peerId ?? '');
+                const ga = manager.groupAdmin;
+                if (ar.dryRun !== true && ga && gid) {
+                    void ga.recallMessage(gid, _mId, 'group').catch(() => undefined);
+                    const secs = Math.max(0, Math.round(Number(ar.muteSeconds) || 0));
+                    const sid = String(msg.senderId ?? '');
+                    if (secs > 0 && /^[0-9A-Za-z]{32}$/u.test(sid)) {
+                        const p2 = (n) => String(n).padStart(2, '0');
+                        const ex = new Date(Date.now() + secs * 1000);
+                        const rfc = `${ex.getFullYear()}-${p2(ex.getMonth() + 1)}-${p2(ex.getDate())}T${p2(ex.getHours())}:${p2(ex.getMinutes())}:${p2(ex.getSeconds())}+08:00`;
+                        void ga.setMemberMute(gid, sid, rfc).catch(() => undefined);
+                    }
+                }
+                logger.info(`auto-recall hit: kind=${_kind} kw=${hitKw ?? '-'} dry=${ar.dryRun === true} mode=${ar.mode ?? 'keep'}`);
+            }
+        }
+    }
+    catch (e) {
+        logger.warn(`auto-recall error: ${e instanceof Error ? e.message : String(e)}`);
+    }
     // ── 读取中间件已下载的文件（attachmentProcessor 写入 state.downloadedFiles） ──
     const downloaded = mwState.downloadedFiles ?? [];
     // ── 组装 agentBody（对齐 openclaw-qqbot body-assembler） ──
@@ -137,6 +219,10 @@ export async function handleInbound(rawMsg, manager, config, logger, state) {
             rememberMsgContent(dataRootOf(config), `${scope}:${peerId}`, _mi, {
                 ...(_txt ? { t: _txt.slice(0, 200) } : {}),
                 ...(_imgs.length ? { imgs: _imgs } : {}),
+                ...(msg.messageId ? { m: String(msg.messageId) } : {}),
+                ...(msg.senderId ? { s: String(msg.senderId) } : {}),
+                ...(msg.senderName ? { n: String(msg.senderName) } : {}),
+                k: _imgs.length > 0 ? 'image' : (_txt ? 'text' : 'file'),
             });
         }
     }

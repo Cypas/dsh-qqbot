@@ -646,6 +646,55 @@ AI 侧的工具叫 **`qq_group_admin`**：
 - **不常驻**：拿到凭据立刻关；等扫码最多留 5 分钟；宿主退出时会一起带走（不留孤儿进程）
 - 凭据只存在你自己的机器上，仓库里不含任何凭据
 
+## ♻️ 撤回消息与自动撤回（v1.10.11+）
+
+机器人**是群管理员**时，可以撤回**普通成员**的消息（官方窗口 2 分钟，超时就撤不了，这是平台限制）。
+
+### 三个工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `group_recall` | 撤某人最近一条 / 群里最近一条 / 指定 message_id |
+| `group_msg_search` | 按关键词或类型搜台账（**含机器人自己发的**），返回 message_id |
+| `group_recall_batch` | 批量撤（给 msg_ids，或给关键词/类型让它自己挑）+ 可选批量禁言发送者 |
+
+`gid` 是**可选**的：不传 = 当前会话所在的群；要撤别的群（机器人也是那个群的管理员）才传。
+
+### 自动撤回（设置面板 → 🔨 锤子 → ♻️ 自动撤回）
+
+命中关键词或附件类型 → 消息**一进来就撤**，不等 AI。配置项 `groupAdmin.autoRecall`：
+
+```yaml
+autoRecall:
+  enabled: true
+  mode: keep          # keep=仍进 AI（只撤消息）；drop=连 AI 都收不到
+  keywords: ["加我微信"]
+  kinds: []           # text / image / voice / video / file，按附件类型命中
+  muteSeconds: 0      # >0 时顺带禁言发送者
+  dryRun: false       # true = 只记日志、不真撤
+```
+
+> **实现位置很关键**：挂在 **debounce 之前**的中间件里。
+> 写在 `bot.on('message')` 里会被 debounce 吃掉（它 consume 后自己调 `handleInbound`）；
+> 写在 `handleInbound` 里又要等派发，等到了往往已过 2 分钟窗口 —— 两种都实测踩过。
+
+## 📒 消息历史台账（v1.10.11+）
+
+```
+{dataRoot}/.qqbot/msg-history/
+├── _索引.txt                 # 目录 ↔ 群名 对照，方便人工辨认
+├── group_<群openid>/
+│   ├── 群名.txt              # 文件名就是群名
+│   └── 2026-10-20.jsonl      # 一天一个文件
+└── c2c_<对方openid>/
+    └── 2026-10-20.jsonl
+```
+
+- 一行一条：`message_id` / 发送者 / 昵称 / 类型 / 正文摘要 / 时间 / 是否机器人
+- 默认保留 **7 天**（启动时 + 每 200 次写清理过期文件；目录空了自动删）
+- 入站与出站都记；`group_msg_search` / `group_recall*` 就是读它
+- 与引用补全用的 `.qqbot/msg-content.jsonl` **互不干扰**（后者只存被引用消息的正文与图片路径）
+
 ## 🚫 无上下文模式（按会话省 token）
 
 让某个 QQ 会话**每轮只记得最近几条对话**，更早的历史自动折叠 —— 群聊省 token 利器。

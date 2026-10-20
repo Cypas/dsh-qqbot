@@ -278,6 +278,42 @@ pluginCtx) {
     //     debounce.enabled=false 或 @ 秒回(mentionDelayed=false)/斜杠命令 → 直放行, 交下方群冷却中间件
     //     与既有链路处理(原 60s 冷却语义完整保留)。配置 config.behavior.debounce(live 热更)。
     //     ⚠️ 本地手改功能, 同步纪律同下方群冷却中间件。
+    // 自动撤回（2026-10-20 主人定）★ 必须挂在 debounce **之前**：
+    //   debounce 会攒窗口、延后派发，等到 handleInbound 时早过了 2 分钟撤回窗口（实测：消息都没进入站日志）。
+    //   命中且 mode=drop 时直接不 next()（吞掉，后续/AI 都收不到）；keep 则撤完继续。
+    bot.use(async (ctx, next) => {
+        try {
+            const m = ctx.message;
+            const ar = config
+                .groupAdmin?.autoRecall;
+            if (m && ar?.enabled === true && m.messageId && m.groupOpenid) {
+                const kws = (ar.keywords ?? []).map((k) => String(k).trim()).filter(Boolean);
+                const lower = String(m.content ?? "").toLowerCase();
+                const hit = kws.some((k) => lower.includes(k.toLowerCase()));
+                if (hit) {
+                    const ga = manager.groupAdmin;
+                    if (ar.dryRun !== true && ga) {
+                        void ga.recallMessage(String(m.groupOpenid), String(m.messageId), "group").catch(() => undefined);
+                        const secs = Math.max(0, Math.round(Number(ar.muteSeconds) || 0));
+                        const sid = String(m.senderId ?? "");
+                        if (secs > 0 && /^[0-9A-Za-z]{32}$/u.test(sid)) {
+                            const p2 = (n) => String(n).padStart(2, "0");
+                            const ex = new Date(Date.now() + secs * 1000);
+                            const rfc = `${ex.getFullYear()}-${p2(ex.getMonth() + 1)}-${p2(ex.getDate())}T${p2(ex.getHours())}:${p2(ex.getMinutes())}:${p2(ex.getSeconds())}+08:00`;
+                            void ga.setMemberMute(String(m.groupOpenid), sid, rfc).catch(() => undefined);
+                        }
+                    }
+                    logger.info("auto-recall(mw) hit: " + String(m.content ?? "").slice(0, 20) + " drop=" + String(ar.mode === "drop"));
+                    if (ar.mode === "drop")
+                        return;
+                }
+            }
+        }
+        catch (e) {
+            logger.warn("auto-recall(mw) error: " + (e instanceof Error ? e.message : String(e)));
+        }
+        return next();
+    });
     bot.use(debounceLayer(config, manager, logger, lastDispatchAt));
     // 8. 斜杠命令（在 concurrencyGuard 之前，命令匹配后不排队直接响应）
     //    基础命令 + 用户扩展命令(P4.1)已在上方合并为 cmdList/cmdMap(同时供历史缓冲跳过命令);

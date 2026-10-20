@@ -15,6 +15,7 @@ import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from
 import { dirname, join } from 'node:path';
 /** 单个 peer 保留的台账行数上限（超出只留尾部，防文件无限膨胀） */
 const MAX_LINES = 2000;
+const NL = String.fromCharCode(10);
 /** 文件路径 → { mtimeKey, index, lines } */
 const cache = new Map();
 function fileOf(dataRoot) {
@@ -34,8 +35,9 @@ function load(dataRoot) {
     const hit = cache.get(file);
     // 'dirty' = 本进程刚写过，内存比文件新 → 直接用内存，别重读整个文件
     if (hit && (hit.key === key || hit.key === 'dirty'))
-        return { index: hit.index, lines: hit.lines };
+        return { index: hit.index, lines: hit.lines, list: hit.list };
     const index = new Map();
+    const list = [];
     let lines = 0;
     try {
         for (const line of readFileSync(file, 'utf8').split('\n')) {
@@ -47,17 +49,23 @@ function load(dataRoot) {
                 const r = JSON.parse(s);
                 if (!r || !r.p || !r.i)
                     continue;
+                list.push(r);
                 index.set(indexKey(r.p, r.i), {
                     ...(r.t ? { t: r.t } : {}),
                     ...(Array.isArray(r.imgs) && r.imgs.length ? { imgs: r.imgs } : {}),
+                    ...(r.m ? { m: r.m } : {}),
+                    ...(r.s ? { s: r.s } : {}),
+                    ...(r.n ? { n: r.n } : {}),
+                    ...(r.k ? { k: r.k } : {}),
+                    ...(r.me ? { me: true } : {}),
                 });
             }
             catch { /* 坏行跳过 */ }
         }
     }
     catch { /* 没有文件 */ }
-    cache.set(file, { key, index, lines });
-    return { index, lines };
+    cache.set(file, { key, index, lines, list });
+    return { index, lines, list };
 }
 /**
  * 记一条：这条消息（msgIdx）的文本与图片本地路径。
@@ -67,9 +75,10 @@ export function rememberMsgContent(dataRoot, peerKey, msgIdx, rec) {
     const idx = String(msgIdx ?? '').trim();
     if (!dataRoot || !peerKey || !idx)
         return;
-    if (!rec.t && !(rec.imgs && rec.imgs.length))
-        return; // 没内容可记（纯表情符号之类），跳过
-    const { index, lines } = load(dataRoot);
+    // 2026-10-20: 现在也承载"撤回台账"，只有 message_id 没有正文时同样要记
+    if (!rec.t && !(rec.imgs && rec.imgs.length) && !rec.m)
+        return;
+    const { index, lines, list } = load(dataRoot);
     index.set(indexKey(peerKey, idx), rec);
     const file = fileOf(dataRoot);
     try {
@@ -78,16 +87,13 @@ export function rememberMsgContent(dataRoot, peerKey, msgIdx, rec) {
         const nextLines = lines + 1;
         if (nextLines > MAX_LINES) {
             // 超上限 → 重写成尾部 MAX_LINES 条（内存里已有的直接重建）
-            const tail = [];
-            for (const [k, v] of index) {
-                const pos = k.indexOf('\u0000');
-                tail.push(JSON.stringify({ p: k.slice(0, pos), i: k.slice(pos + 1), ...v, at: 0 }));
-            }
-            writeFileSync(file, tail.slice(-MAX_LINES).join('\n') + '\n', 'utf8');
-            cache.set(file, { key: 'dirty', index, lines: Math.min(nextLines, MAX_LINES) });
+            // 用 list 重写(保留每行 at 与顺序); 旧实现按 index 重建会把 at 丢成 0, 按时间窗扫描会全判过期。
+            const keep = list.slice(-MAX_LINES);
+            writeFileSync(file, keep.map((r) => JSON.stringify(r)).join(NL) + NL, 'utf8');
+            cache.set(file, { key: 'dirty', index, lines: keep.length, list: keep });
             return;
         }
-        cache.set(file, { key: 'dirty', index, lines: nextLines });
+        cache.set(file, { key: 'dirty', index, lines: nextLines, list });
     }
     catch { /* 落盘失败不影响主链（内存索引已经更新） */ }
 }
@@ -101,5 +107,43 @@ export function lookupMsgContent(dataRoot, peerKey, msgIdx) {
     catch {
         return undefined;
     }
+}
+/**
+ * 扫该 peer 的台账（2026-10-20 撤回功能/消息搜索用）。
+ * ★ 严格按 peerKey 过滤 —— 群与群、群与私聊绝不串。
+ * 返回新→旧（同一毫秒内按写入顺序倒序）。
+ */
+export function scanMsgContent(dataRoot, peerKey, q = {}) {
+    if (!dataRoot || !peerKey)
+        return [];
+    let list = [];
+    try {
+        list = load(dataRoot).list;
+    }
+    catch {
+        return [];
+    }
+    const now = Date.now();
+    const within = q.withinMs ?? 2 * 60 * 60 * 1000;
+    const limit = Math.max(1, Math.min(200, q.limit ?? 20));
+    const kw = String(q.keyword ?? '').trim().toLowerCase();
+    const out = [];
+    for (let i = list.length - 1; i >= 0 && out.length < limit; i--) {
+        const r = list[i];
+        if (!r || r.p !== peerKey)
+            continue;
+        if (now - Number(r.at ?? 0) > within)
+            continue;
+        if (q.fromSelf !== undefined && Boolean(r.me) !== q.fromSelf)
+            continue;
+        if (q.senderId && r.s !== q.senderId)
+            continue;
+        if (q.kind && (r.k ?? 'text') !== q.kind)
+            continue;
+        if (kw && !String(r.t ?? '').toLowerCase().includes(kw))
+            continue;
+        out.push(r);
+    }
+    return out;
 }
 //# sourceMappingURL=msg-content-cache.js.map
