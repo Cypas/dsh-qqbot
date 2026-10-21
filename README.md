@@ -728,3 +728,28 @@ autoRecall:
 ## License
 
 [MIT](./LICENSE)
+
+---
+
+## 正文图组：markdown 图片直接发
+
+DSH 前端会把**回复正文里的 markdown 图片**渲染成图；本插件把同一段文本**原样转发到 QQ** ——
+本地路径会自动上传成 `qqbot-media` 引用（读文件头补真实宽高，配额满 100 张自动删最早），不需要调用任何工具。
+
+```markdown
+![干饭女王 #400px](D:/pics/a.jpg)
+
+第一幕：本鲸宣布今晚不睡了
+
+![何意味 #400px](D:/pics/b.jpg)
+```
+
+**一行一张、连续几行就是图组**（小剧场 / 分镜 / 图文并排），QQ 侧按顺序渲染成一屏。
+
+| DSH 前端 | QQ 群 |
+| :---: | :---: |
+| ![DSH 前端显示](docs/images/dsh-md-images.png) | ![QQ 群显示](docs/images/qq-md-images.jpg) |
+
+配合表情包库最顺手：`list_stickers` 搜到图 → 把本地路径写进正文 → 图组直接出来，比连发 `send_media` 更像翻漫画。
+
+失败策略：正文里图传不上去会**原样留在文字里**（不阻断本条）；而 `send_md` 卡片是“图传失败就整条不发”，两者别混用。

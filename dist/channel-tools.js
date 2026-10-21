@@ -308,8 +308,9 @@ function buildWorkspaceQqPack(tag, dataRoot) {
         // 2026-10-22（主人定）：素材上传等本来**不需要群管理权限** —— 这里直接用机器人自己的
         //   access_token 通道（与 api/group-admin.ts 同源），不再借 groupAdmin，也不依赖本实例是否启用群管理。
         apiCall: (() => {
-            const appId = String(mgr?.config?.appId ?? '');
-            const appSecret = String(mgr?.config?.appSecret ?? '');
+            const cred = globalThis.__qqbotAppCred;
+            const appId = String(mgr?.config?.appId || cred?.appId || '');
+            const appSecret = String(mgr?.config?.appSecret || cred?.appSecret || '');
             if (!appId || !appSecret)
                 return undefined;
             const g = globalThis;

@@ -1,5 +1,20 @@
 ## [1.10.14] - 2026-10-20
 
+## 1.10.15 (2026-10-22)
+
+### 新增
+· **正文图组**：回复正文里写 markdown 图片（`![说明 #宽px #高px](本地路径)`），前端渲染、QQ 端原样转发；
+  本地路径自动上传成 `qqbot-media` 引用，自动补真实宽高，配额满 100 张自动删最早。多行即图组（小剧场/分镜）。
+· `qq_material` 内置工具：素材上传 / 列表 / 删除（对应官方 `/v2/media-images/*`）。
+· `@全体成员`：`<qqbot-at-everyone />`（botplay 里也可用 `atAll()`）。
+
+### 修复
+· **扩展工具拿不到 QQ 通道**：`env.qq` 只给 `expose:'all'` 的工具，普通扩展应使用 `env.manager.groupAdmin.apiCall`，
+  且必须 `bind(groupAdmin)`（内部依赖 `this`）。`send_md` 已按此修正，可在卡片里直接写本地图。
+· **`context_*` 三工具在未开无上下文模式时仍可见**：`restrict` 只认全局层名字 → 改用 `ctx.root` 注册；
+  `restrict()` 返回的是函数，释放必须函数优先（`.dispose?.()` 会静默失效）。
+· 出站自动传图取不到句柄：`managersOf()` 里的 manager 没有 `groupAdmin`，改用会话自己的 `manager`。
+
 ### 新增
 - **出站流式真正可用**（对齐上游 `tencent-connect/dsh-qqbot` commit `c8b9158`）：改为监听宿主**瞬态通道** `agent/assistant-stream`，
   只消费 `start` / `chunk(text-delta)` 两类帧，其余（reasoning / tool-call / finish / end）一律忽略；用 `attemptId` 跟踪 ——

@@ -43,6 +43,14 @@ function replyTargetOfInteraction(event, _ctx, _manager) {
 }
 export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
     const manager = new SessionManager(ctx, agents, config, logger);
+    // 2026-10-22: 账号包要用机器人 token 通道（素材上传），这里把凭据放全局供 pack 读取
+    try {
+        globalThis.__qqbotAppCred = {
+            appId: String(config.appId ?? ''),
+            appSecret: String(config.appSecret ?? ''),
+        };
+    }
+    catch { /* ignore */ }
     // 2026-10-21: 出站自动传图用 —— 给 md-media-rewrite 一个拿得到 token 的句柄
     try {
         setMaterialTargetFactory(() => {
