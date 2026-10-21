@@ -3566,6 +3566,10 @@ export function ensureExtToolsGlobal(globalCtx: unknown): void {
 }
 
 export function ensureContextToolsGlobal(globalCtx: unknown): void {
+    // 2026-10-21 修（trace 实证）：restrict 报 "names unknown global tools" => 我们注册的层不是「全局层」。
+    //   cordis 的 ctx.root 才是根作用域；拿不到就退回传入值（行为不变）。
+    const rootOfGlobal = ((globalCtx as { root?: unknown }).root ?? globalCtx) as unknown;
+    if (rootOfGlobal !== globalCtx) traceToolReg('[ctxtool-reg] 用 root ctx 注册（不同于传入的 ctx）');
   try {
     if (!globalCtx || typeof globalCtx !== 'object') return;
     // ⚠️ 2026-10-09 修（实测抓到）：apply 的注入列表是 `["settings","webServer"]`，**没有 `tools`** ⇒
@@ -3573,7 +3577,7 @@ export function ensureContextToolsGlobal(globalCtx: unknown): void {
     //   表现就是"全局注册压根没发生"（trace 里只有别的报错、没有"全局注册 N 件"）。
     //   正解：**用 cordis 的运行时取服务 `ctx.get('tools')`**（不需要 inject 声明）——
     //   本插件别处也是这个姿势（见 ext-capabilities 给扩展工具的 kernel 文档：`ctx.get('tools')`）。
-    const ctxObj = globalCtx as unknown as {
+    const ctxObj = rootOfGlobal as unknown as {
       tools?: { register?: (t: unknown) => unknown };
       get?: (name: string) => unknown;
     };

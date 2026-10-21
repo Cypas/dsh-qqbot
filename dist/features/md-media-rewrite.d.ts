@@ -5,5 +5,5 @@ export declare function setMaterialTargetFactory(fn: (() => MdMediaTarget | unde
  * 扫描文本里的 markdown 图片；本地路径的替换成 qqbot-media 引用。
  * 失败时保留原样（宁可在 QQ 里显示成路径文字，也不要吞掉正文）。
  */
-export declare function rewriteLocalMarkdownImages(text: string): Promise<string>;
+export declare function rewriteLocalMarkdownImages(text: string, explicitTarget?: MdMediaTarget): Promise<string>;
 //# sourceMappingURL=md-media-rewrite.d.ts.map

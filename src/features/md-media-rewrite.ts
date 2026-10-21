@@ -79,9 +79,9 @@ async function ensureQuota(target: MdMediaTarget, need: number): Promise<number>
  * 扫描文本里的 markdown 图片；本地路径的替换成 qqbot-media 引用。
  * 失败时保留原样（宁可在 QQ 里显示成路径文字，也不要吞掉正文）。
  */
-export async function rewriteLocalMarkdownImages(text: string): Promise<string> {
+export async function rewriteLocalMarkdownImages(text: string, explicitTarget?: MdMediaTarget): Promise<string> {
   if (!text || text.indexOf('![') < 0) return text;
-  const target = targetFactory?.();
+  const target = explicitTarget ?? targetFactory?.();
   if (!target) { diag('no target（没有注册 groupAdmin 句柄）'); return text; }
 
   const matches: Array<{ raw: string; alt: string; src: string }> = [];

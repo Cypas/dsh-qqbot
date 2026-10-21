@@ -610,7 +610,14 @@ class OutboundRouter {
   private async send(_record: SessionRecord, text: string, tag: string): Promise<void> {
     try {
       // 2026-10-21: 正文里的本地图 markdown 自动传 QQ、转 qqbot-media 引用（失败保留原样）
-      const outText = await rewriteLocalMarkdownImages(text);
+      // 2026-10-21 修：不再依赖全局 factory（managersOf() 拿不到 groupAdmin），
+      //   直接用本 router 自己的 manager —— 它一定就是这个会话实例的那个。
+      let mdTarget: { apiCall: (m: string, p: string, b?: unknown) => Promise<unknown> } | undefined;
+      try {
+        const ga = this.manager.groupAdmin;
+        if (ga) mdTarget = { apiCall: ga.apiCall.bind(ga) as unknown as (m: string, p: string, b?: unknown) => Promise<unknown> };
+      } catch { /* ignore */ }
+      const outText = await rewriteLocalMarkdownImages(text, mdTarget as never);
       // 2026-10-21: 改写后含 qqbot-media 图片引用 → 必须走 markdown 通道(msg_type=2)，普通文本不渲染图片
       if (outText.indexOf('qqbot-media://') >= 0) {
         try {
