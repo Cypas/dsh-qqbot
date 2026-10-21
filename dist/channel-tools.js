@@ -8,6 +8,8 @@
  * 复制进共享 node_modules，也不得在 dependencies 里自带 dsh-tools(避免双包)。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { uploadMarkdownImage, listMarkdownImages, deleteMarkdownImage } from './features/md-media.js';
+import { setMaterialTargetFactory } from './features/md-media-rewrite.js';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -169,6 +171,19 @@ function findChannelByTag(tag) {
  * @param tag       人设 id（如 whale）
  * @param dataRoot  插件数据根（群台账在这里）
  */
+// 2026-10-21: 出站自动传图需要 groupAdmin 句柄；取**任一**桥（不依赖当前会话）
+setMaterialTargetFactory(() => {
+    try {
+        // 2026-10-21 修：channelBridges 实测是空的（同文件 204 行注释也写了），要用 managersOf()
+        for (const m of managersOf()) {
+            const cc = m.groupAdmin;
+            if (cc)
+                return { apiCall: cc.apiCall.bind(cc) };
+        }
+    }
+    catch { /* ignore */ }
+    return undefined;
+});
 function buildWorkspaceQqPack(tag, dataRoot) {
     const hit = findChannelByTag(tag);
     if (!hit)
@@ -2336,6 +2351,91 @@ export async function apply(ctx) {
             }
         },
     });
+    /** 素材管理（2026-10-21 新接口 /v2/media-images/*：本地图 → qqbot-media:// 引用串） */
+    function anyAdminOf(exec) {
+        try {
+            const s = findSessionRec(channelOf(exec), exec);
+            const client = s?.ch?.manager?.groupAdmin;
+            const root = String(s?.ch?.manager?.config?.dataRoot ?? '');
+            if (client)
+                return { client, dataRoot: root };
+            for (const b of channelBridges) {
+                try {
+                    const c = b.manager.groupAdmin;
+                    if (c)
+                        return { client: c, dataRoot: String(b.manager.config?.dataRoot ?? '') };
+                }
+                catch { /* 跳过坏桥 */ }
+            }
+            return undefined;
+        }
+        catch {
+            return undefined;
+        }
+    }
+    const materialTool = defineTool({
+        name: 'qq_material',
+        description: 'QQ 素材管理(Markdown 图片): 把**本地图片**传到 QQ 平台换 qqbot-media:// 引用串，可直接写进 markdown 消息（不再需要公网图床）。限制: 单张 ≤10MB、png/jpeg/gif/webp、单机器人最多 100 张、图片滑动过期 90 天(每次被引用顺延)。action=upload 传图 / list 看已传列表 / delete 删除释放配额。',
+        parameters: {
+            action: { type: 'string', enum: ['upload', 'list', 'delete'], description: '默认 upload' },
+            image: { type: 'string', description: 'upload: 本地图片绝对路径' },
+            image_id: { type: 'string', description: 'delete: 图片 ID（list 里能看到）' },
+            cursor: { type: 'string', description: 'list: 翻页游标（首页不传）' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: { ok: { type: 'boolean' }, msg: { type: 'string' }, url: { type: 'string' }, markdown: { type: 'string' } },
+                additionalProperties: false,
+            },
+            render: (_a, v) => [{ type: 'text', text: String(v.msg || (v.ok ? 'ok' : '失败')) }],
+        },
+        execute: async (args, exec) => {
+            const mat = anyAdminOf(exec);
+            if (!mat)
+                return { ok: false, msg: '拿不到机器人实例（没有已连接的本）' };
+            const target = { apiCall: mat.client.apiCall.bind(mat.client) };
+            const action = String(args.action ?? 'upload').trim() || 'upload';
+            if (action === 'upload') {
+                const r = await uploadMarkdownImage(target, String(args.image ?? '').trim());
+                if (!r.ok)
+                    return { ok: false, msg: '上传失败: ' + String(r.msg || '') };
+                const name = String(args.image ?? '').split(/[\\/]/).pop() || 'image';
+                const dim = r.width && r.height ? ' #' + r.width + 'px #' + r.height + 'px' : '';
+                const markdown = '![' + name + dim + '](' + String(r.url) + ')';
+                const head = (r.cached ? '✅ 命中本地缓存，未重复上传' : '✅ 已上传')
+                    + '（' + Math.round((r.bytes ?? 0) / 1024) + 'KB'
+                    + (r.width ? '，' + r.width + '×' + r.height : '') + '）';
+                return { ok: true, url: String(r.url), markdown, msg: head + '\n' + markdown };
+            }
+            if (action === 'list') {
+                const r = await listMarkdownImages(target, String(args.cursor ?? ''));
+                if (!r.ok)
+                    return { ok: false, msg: '查询失败: ' + String(r.msg || '') };
+                const d = (r.data ?? {});
+                const list = Array.isArray(d.images) ? d.images : [];
+                const lines = list.slice(0, 20).map((x, i) => {
+                    const exp = x.expires_at ? ' | 到期 ' + new Date(Number(x.expires_at) * 1000).toISOString().slice(0, 10) : '';
+                    return i + 1 + '. ' + String(x.file_name || '?') + ' | ' + String(x.image_id || '') + exp;
+                });
+                const more = d.next_cursor ? '（还有下一页，cursor=' + d.next_cursor + '）' : '';
+                return {
+                    ok: true,
+                    msg: '共 ' + String(d.total ?? list.length) + ' 张' + more + (lines.length ? '\n' + lines.join('\n') : '\n（列表为空）'),
+                };
+            }
+            if (action === 'delete') {
+                const id = String(args.image_id ?? '').trim();
+                if (!id)
+                    return { ok: false, msg: 'delete 需要 image_id' };
+                const r = await deleteMarkdownImage(target, id);
+                return r.ok
+                    ? { ok: true, msg: '✅ 已删除 ' + id + '（配额已释放；已发出的消息不受影响）' }
+                    : { ok: false, msg: '删除失败: ' + String(r.msg || '') };
+            }
+            return { ok: false, msg: '未知 action: ' + action + '（可选 upload / list / delete）' };
+        },
+    });
     const recallBatchTool = defineTool({
         name: 'group_recall_batch',
         description: '群管理(写,危险): 批量撤回消息 + 可选批量禁言发送者。'
@@ -2760,6 +2860,7 @@ export async function apply(ctx) {
         { name: 'group_recall_batch', tool: recallBatchTool },
         { name: 'recall_keywords', tool: recallKeywordsTool },
         { name: 'group_kick', tool: kickMemberTool },
+        { name: 'qq_material', tool: materialTool },
         { name: 'id_lookup', tool: idLookupTool },
         { name: 'session_list', tool: sessionListTool },
         { name: 'session_wake', tool: sessionWakeTool },
@@ -3763,14 +3864,55 @@ export function ensureContextToolsGlobal(globalCtx) {
 }
 /** 每个 agent 作用域当前的可见性状态（幂等用：状态没变就不动） */
 const ctxRestrictState = new WeakMap();
+/** 释放 restriction 的唯一正确姿势（2026-10-21，抄 dsh-computer-use/internal/schema-visibility.mjs）：
+ *  cordis 的 `ctx.effect(fn)` 返回的是**函数**（`Disposable<T> = () => T`），
+ *  对函数调 `.dispose?.()` 会**静默变成空操作** —— 限制挂上去、再也没摘下来。
+ *  所以函数优先，`.dispose()` 只作兼容。
+ */
+function liftRestriction(disposable) {
+    if (typeof disposable === 'function') {
+        try {
+            disposable();
+        }
+        catch { /* ignore */ }
+        return;
+    }
+    const d = disposable;
+    if (d && typeof d.dispose === 'function') {
+        try {
+            d.dispose();
+        }
+        catch { /* ignore */ }
+    }
+}
+/** 取某作用域的 tools 服务：`ctx.tools` 在未声明 inject 时会抛，退化到 cordis 运行时 `ctx.get('tools')`。 */
+function toolsOfScope(agentCtx) {
+    const c = agentCtx;
+    try {
+        const t = c?.tools;
+        if (t && typeof t === 'object')
+            return t;
+    }
+    catch { /* 未 inject 时读 ctx.tools 会抛 */ }
+    try {
+        const t = c?.get?.('tools');
+        if (t && typeof t === 'object')
+            return t;
+    }
+    catch { /* ignore */ }
+    return undefined;
+}
 /**
- * 按会话**实时剪枝**三个上下文工具的可见性（2026-10-09，主人要的"实时变更"）。
+ * 按会话**实时剪枝**三个上下文工具的可见性（2026-10-09 起；2026-10-21 按 `dsh-computer-use` 的实测修）。
  *
  * 语义：**开了「无上下文模式 + 智能判断」**的会话 → 看得见那三个工具；
  * 否则该会话**连工具名都看不到**（模型清单里没有 = 零 token），而**注册表纹丝不动**。
- * 面板一改开关 → 下一次 pre-step（下一回合/下一 step）即生效；撤销限制是立即的。
+ * 面板一改开关 → 下一次 pre-step（下一回合 / 下一 step）即生效。
  *
- * 幂等：同一作用域状态没变化就直接 return，不重复设/撤 restriction（避免无谓的变更通知与抖动）。
+ * 2026-10-21 修两处（对齐 `dsh-plugins/dsh-computer-use/internal/schema-visibility.mjs`）：
+ *   ① `ctx.tools` 在未 inject 时会抛 ⇒ 必须退化到 `ctx.get('tools')`，否则"剪枝"整段被 catch 吞掉；
+ *   ② `restrict()` 的返回值是**函数**，释放必须走 {@link liftRestriction}。
+ * 幂等：同一作用域状态没变化就直接 return，不重复设/撤 restriction（避免无谓变更通知与抖动）。
  */
 export function restrictContextTools(agentCtx, shouldHave, env) {
     try {
@@ -3784,27 +3926,34 @@ export function restrictContextTools(agentCtx, shouldHave, env) {
         const st = ctxRestrictState.get(key);
         if (st && st.shouldHave === shouldHave)
             return; // ← 状态一致：不动（这是"不抖"的关键）
-        if (st?.dispose) {
-            try {
-                st.dispose();
-            }
-            catch { /* ignore */ }
-        }
-        const toolsObj = agentCtx.tools;
-        const restrict = toolsObj?.restrict;
+        if (st?.dispose)
+            liftRestriction(st.dispose);
         let dispose;
-        if (!shouldHave && typeof restrict === 'function') {
+        if (!shouldHave) {
+            const toolsObj = toolsOfScope(agentCtx);
+            const restrict = toolsObj?.restrict;
+            if (typeof restrict !== 'function') {
+                traceToolReg('[ctxtool-reg] 剪枝失败: 拿不到 tools.restrict（ctx.tools 与 ctx.get("tools") 都取不到）');
+                ctxRestrictState.set(key, { shouldHave });
+                return;
+            }
             try {
                 const d = restrict.call(toolsObj, { deny: [...CTX_TOOL_NAMES] });
                 if (typeof d === 'function')
                     dispose = d;
+                else if (d && typeof d.dispose === 'function') {
+                    const dd = d;
+                    dispose = () => { dd.dispose(); };
+                }
+                traceToolReg('[ctxtool-reg] 剪枝已挂 deny=' + CTX_TOOL_NAMES.join(',') + ' 返回形态=' + (typeof d));
             }
             catch (e) {
-                traceToolReg('[ctxtool-reg] restrict 失败: ' + String(e?.message ?? e).slice(0, 160));
+                traceToolReg('[ctxtool-reg] restrict 抛错: ' + String(e?.message ?? e).slice(0, 160));
             }
         }
         ctxRestrictState.set(key, dispose ? { shouldHave, dispose } : { shouldHave });
-        traceToolReg(`[ctxtool-reg] ${shouldHave ? '放开(本会话继承全局三个工具)' : '剪枝(本会话看不到三个工具)'} dataRoot=${String(env?.dataRoot ?? '')} sk=${String(env?.sessionKey ?? '')}`);
+        traceToolReg(`[ctxtool-reg] ${shouldHave ? '放开(本会话继承全局三个工具)' : '剪枝(本会话看不到三个工具)'}`
+            + ` dispose=${dispose ? '有' : '无'} dataRoot=${String(env?.dataRoot ?? '')} sk=${String(env?.sessionKey ?? '')}`);
     }
     catch (e) {
         traceToolReg('[ctxtool-reg] 剪枝异常: ' + String(e?.message ?? e).slice(0, 160));

@@ -96,6 +96,9 @@ export function parseStreamFrame(raw) {
         if (ch && ch.type === 'text-delta' && typeof ch.text === 'string' && ch.text !== '') {
             return { agentId, delta: { kind: 'text-delta', attemptId, text: ch.text } };
         }
+        if (ch && ch.type === 'reasoning-delta' && typeof ch.text === 'string' && ch.text !== '') {
+            return { agentId, delta: { kind: 'reasoning-delta', attemptId, text: ch.text } };
+        }
     }
     return undefined;
 }

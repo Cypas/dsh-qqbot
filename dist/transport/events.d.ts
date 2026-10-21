@@ -96,6 +96,10 @@ export type StreamDelta = {
     kind: 'text-delta';
     attemptId: string;
     text: string;
+} | {
+    kind: 'reasoning-delta';
+    attemptId: string;
+    text: string;
 };
 /**
  * 解析宿主 `agent/assistant-stream` 的 payload（{ agent: { id }, frame }）。

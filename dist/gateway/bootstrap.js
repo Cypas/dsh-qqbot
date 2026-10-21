@@ -4,6 +4,7 @@ import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol';
 import { SessionManager } from '../session/index.js';
 import { handleInbound, createOutboundHandler } from '../transport/index.js';
 import { parseStreamFrame } from '../transport/events.js';
+import { setMaterialTargetFactory } from '../features/md-media-rewrite.js';
 import { buildUserAgent } from '../shared/index.js';
 import { setupMiddlewares } from './middleware-setup.js';
 import { configureDiag, diagWrite } from '../shared/diag.js';
@@ -42,6 +43,14 @@ function replyTargetOfInteraction(event, _ctx, _manager) {
 }
 export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
     const manager = new SessionManager(ctx, agents, config, logger);
+    // 2026-10-21: 出站自动传图用 —— 给 md-media-rewrite 一个拿得到 token 的句柄
+    try {
+        setMaterialTargetFactory(() => {
+            const c = manager.groupAdmin;
+            return c ? { apiCall: c.apiCall.bind(c) } : undefined;
+        });
+    }
+    catch { /* ignore */ }
     // 实例标识(settingsNs), 全 bootstrap 共用: 注册表按 ns 隔离(B类修复 2026-09-11)
     const myNs = config.settingsNs?.trim() || 'im-qqbot';
     // ★ 2026-10-06 诊断日志总开关（默认关）：开了才写 {DSH_HOME|~/.dsh}/*.log。

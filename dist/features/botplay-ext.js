@@ -162,7 +162,8 @@ export function makeExtContext(deps, ev, cardId, clicker) {
         },
         emit: (text, at) => {
             const ids = at === undefined ? [] : (Array.isArray(at) ? at : [at]);
-            const prefix = ids.filter(Boolean).map((id) => `<@${id}> `).join('');
+            // 2026-10-21 主人加：at 里写 'all' / 'everyone' → @全体成员（官方语法 <qqbot-at-everyone />）
+            const prefix = ids.filter(Boolean).map((id) => id === 'all' || id === 'everyone' || id === '@all' ? '<qqbot-at-everyone /> ' : `<@${id}> `).join('');
             return deps.emit(prefix + String(text ?? ''));
         },
         markdown: (content) => deps.markdown(String(content ?? '')),
@@ -174,6 +175,8 @@ export function makeExtContext(deps, ev, cardId, clicker) {
         file: (source) => (typeof deps.media === 'function' ? deps.media('file', source) : Promise.resolve(false)),
         markdownCard: (c, kb) => (typeof deps.markdownCard === 'function' ? deps.markdownCard(String(c ?? ''), kb) : Promise.resolve(false)),
         at: (id) => `<@${String(id ?? '')}>`,
+        /** @全体成员（QQ 官方语法；需要主人/管理权限，慎用） */
+        atAll: () => '<qqbot-at-everyone />',
         kernel: deps.kernel,
         getMember: (id) => {
             const nm = deps.memberName(String(id ?? ''));

@@ -174,6 +174,10 @@ export interface BotplayExtContext {
   card(): BotplayExtCard & { dirty: boolean };
   /** 发文本(支持 <@openid> @人; 群/私聊自动走对链路) */
   emit(text: string, at?: string | string[]): Promise<boolean>;
+  /** @单个成员（返回 `<@openid>` 文本，直接拼进正文即可） */
+  at(id: string): string;
+  /** @全体成员（返回 QQ 官方语法 `<qqbot-at-everyone />`；需要权限，慎用） */
+  atAll(): string;
   /** 发 markdown(按钮卡片正文那种富文本) */
   markdown(content: string): Promise<boolean>;
   /** 发图(网络图 url / 本地文件 localPath) */
@@ -413,7 +417,10 @@ export function makeExtContext(
     },
     emit: (text: string, at?: string | string[]): Promise<boolean> => {
       const ids = at === undefined ? [] : (Array.isArray(at) ? at : [at]);
-      const prefix = ids.filter(Boolean).map((id) => `<@${id}> `).join('');
+      // 2026-10-21 主人加：at 里写 'all' / 'everyone' → @全体成员（官方语法 <qqbot-at-everyone />）
+      const prefix = ids.filter(Boolean).map((id) =>
+        id === 'all' || id === 'everyone' || id === '@all' ? '<qqbot-at-everyone /> ' : `<@${id}> `,
+      ).join('');
       return deps.emit(prefix + String(text ?? ''));
     },
     markdown: (content: string): Promise<boolean> => deps.markdown(String(content ?? '')),
@@ -425,6 +432,8 @@ export function makeExtContext(
     file: (source) => (typeof deps.media === 'function' ? deps.media('file', source) : Promise.resolve(false)),
     markdownCard: (c: string, kb?: unknown) => (typeof deps.markdownCard === 'function' ? deps.markdownCard(String(c ?? ''), kb) : Promise.resolve(false)),
     at: (id: string) => `<@${String(id ?? '')}>`,
+    /** @全体成员（QQ 官方语法；需要主人/管理权限，慎用） */
+    atAll: () => '<qqbot-at-everyone />',
     kernel: deps.kernel,
     getMember: (id: string) => {
       const nm = deps.memberName(String(id ?? ''));

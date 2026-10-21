@@ -111,13 +111,16 @@ export declare function syncContextTools(agentCtx: unknown, shouldHave: boolean,
 export declare function ensureExtToolsGlobal(globalCtx: unknown): void;
 export declare function ensureContextToolsGlobal(globalCtx: unknown): void;
 /**
- * 按会话**实时剪枝**三个上下文工具的可见性（2026-10-09，主人要的"实时变更"）。
+ * 按会话**实时剪枝**三个上下文工具的可见性（2026-10-09 起；2026-10-21 按 `dsh-computer-use` 的实测修）。
  *
  * 语义：**开了「无上下文模式 + 智能判断」**的会话 → 看得见那三个工具；
  * 否则该会话**连工具名都看不到**（模型清单里没有 = 零 token），而**注册表纹丝不动**。
- * 面板一改开关 → 下一次 pre-step（下一回合/下一 step）即生效；撤销限制是立即的。
+ * 面板一改开关 → 下一次 pre-step（下一回合 / 下一 step）即生效。
  *
- * 幂等：同一作用域状态没变化就直接 return，不重复设/撤 restriction（避免无谓的变更通知与抖动）。
+ * 2026-10-21 修两处（对齐 `dsh-plugins/dsh-computer-use/internal/schema-visibility.mjs`）：
+ *   ① `ctx.tools` 在未 inject 时会抛 ⇒ 必须退化到 `ctx.get('tools')`，否则"剪枝"整段被 catch 吞掉；
+ *   ② `restrict()` 的返回值是**函数**，释放必须走 {@link liftRestriction}。
+ * 幂等：同一作用域状态没变化就直接 return，不重复设/撤 restriction（避免无谓变更通知与抖动）。
  */
 export declare function restrictContextTools(agentCtx: unknown, shouldHave: boolean, env?: {
     dataRoot?: string;

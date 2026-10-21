@@ -26,6 +26,8 @@ export function isGateSilence(rawArgs) {
     }
 }
 import { parseEvent, extractTurnError, } from './events.js';
+import { feedReasoning, endReasoningTurn } from '../features/reasoning-bus.js';
+import { rewriteLocalMarkdownImages } from '../features/md-media-rewrite.js';
 /** 不展示给用户的轮次错误码（底层传输/网络错误，对用户无意义，且常被重试兜住） */
 const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
 /** 适配主动: 同一入站消息(msg_id)最多被动回复条数(QQ 回复同一消息上限 ~4-5 条), 超出自动转主动 */
@@ -44,12 +46,18 @@ class OutboundRouter {
     buffers = new Map();
     /** agentId(sessionId) → 当前正在流的 attemptId（LLM 重试会换 attempt） */
     streamAttempt = new Map();
+    /** 本回合是否产出过正文增量（turn/end 判断"有没有正文"用） */
+    streamSawText = new Set();
     /**
      * 消费 `agent/assistant-stream` 的瞬态帧（2026-10-20 对齐上游 c8b9158）。
      * · attempt-start：新 attempt → 丢掉上一 attempt 已流出的内容（重试不该出第二条）
      * · text-delta：增量交给该会话的出站缓冲，走 StreamingWriter
      */
     routeStreamFrame(agentId, delta) {
+        if (delta.kind === 'reasoning-delta') {
+            feedReasoning(agentId, delta.text);
+            return;
+        }
         const buffer = this.buffers.get(agentId);
         if (!buffer)
             return; // 不是 QQ 会话 / 本回合还没建缓冲
@@ -65,6 +73,7 @@ class OutboundRouter {
         }
         if (cur !== undefined && cur !== delta.attemptId)
             return; // 旧 attempt 的尾帧丢弃
+        this.streamSawText.add(agentId);
         if (delta.text)
             buffer.append(delta.text);
     }
@@ -248,6 +257,14 @@ class OutboundRouter {
             // 键与入站侧保持一致：`<scope>:<targetId>`（群 openid / 私聊 openid）
             const sender = getLastSender(`${record.replyTarget.scope}:${record.replyTarget.targetId}`);
             if (event.reasoning !== undefined) {
+                // 2026-10-21: 块级思考全文（每步一条 = 步结束）也喂给 reasoning 总线；宿主不推 delta 时这是唯一可靠来源
+                try {
+                    feedReasoning(String(record.sessionKey || record.replyTarget.targetId), event.reasoning, {
+                        scope: String(record.replyTarget.scope),
+                        peerId: String(record.replyTarget.targetId),
+                    });
+                }
+                catch { /* ignore */ }
                 // ① 思考**原文**留档(隐私: 只落本地; 与标量分开存, 便于单独删)
                 noteThinking(root, {
                     scope: record.replyTarget.scope,
@@ -480,6 +497,12 @@ class OutboundRouter {
     }
     /** 轮次结束：清理 buffer，异常结束时告知用户 */
     onTurnEnd(sessionId, _record, event) {
+        // 2026-10-20：把"本回合有没有正文"告诉 reasoning 总线（扩展据此决定要不要转发 [汇报]）
+        try {
+            endReasoningTurn(sessionId, this.streamSawText.has(sessionId));
+            this.streamSawText.delete(sessionId);
+        }
+        catch { /* 扩展抛错不影响出站 */ }
         // 闸门静默标记只在**本回合内**有效，清在最后（下面还要用它判断"这个回合本就不该出声"）
         const silenced = this.gateSilenced.has(_record.sessionKey);
         // 详细主动: 回合结束前把聚合中的工具调用提示发出去 —— 但静默回合不发
@@ -514,7 +537,19 @@ class OutboundRouter {
     /** 统一发送：逐条自适应目标(适配主动) + 富媒体感知分块；媒体指令([MEDIA:..]/[RECALL])被剔除，失败降级记录 */
     async send(_record, text, tag) {
         try {
-            await sendRichOutbound(this.bot, _record.replyTarget, text, this.config.textChunkLimit, this.config.cwd, (m) => this.logger.error(m), () => this.resolveTarget(_record), this.chunkTargetFn(_record), undefined, this.refLookupFor(_record));
+            // 2026-10-21: 正文里的本地图 markdown 自动传 QQ、转 qqbot-media 引用（失败保留原样）
+            const outText = await rewriteLocalMarkdownImages(text);
+            // 2026-10-21: 改写后含 qqbot-media 图片引用 → 必须走 markdown 通道(msg_type=2)，普通文本不渲染图片
+            if (outText.indexOf('qqbot-media://') >= 0) {
+                try {
+                    await this.bot.sendMarkdown(this.activeTarget(_record), outText);
+                    return;
+                }
+                catch (err) {
+                    this.logger.error('im-qqbot: markdown(含图) 失败，回落普通文本: ' + (err instanceof Error ? err.message : String(err)));
+                }
+            }
+            await sendRichOutbound(this.bot, _record.replyTarget, outText, this.config.textChunkLimit, this.config.cwd, (m) => this.logger.error(m), () => this.resolveTarget(_record), this.chunkTargetFn(_record), undefined, this.refLookupFor(_record));
         }
         catch (err) {
             this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);

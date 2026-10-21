@@ -117,6 +117,10 @@ export interface BotplayExtContext {
     };
     /** 发文本(支持 <@openid> @人; 群/私聊自动走对链路) */
     emit(text: string, at?: string | string[]): Promise<boolean>;
+    /** @单个成员（返回 `<@openid>` 文本，直接拼进正文即可） */
+    at(id: string): string;
+    /** @全体成员（返回 QQ 官方语法 `<qqbot-at-everyone />`；需要权限，慎用） */
+    atAll(): string;
     /** 发 markdown(按钮卡片正文那种富文本) */
     markdown(content: string): Promise<boolean>;
     /** 发图(网络图 url / 本地文件 localPath) */

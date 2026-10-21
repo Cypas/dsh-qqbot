@@ -156,7 +156,8 @@ export function extractTurnError(reason: TurnEndReason): { code: string; message
 //   只监听它 ⇒ 流式永远收不到帧，回复只能整块发。
 export type StreamDelta =
   | { kind: 'attempt-start'; attemptId: string }
-  | { kind: 'text-delta'; attemptId: string; text: string };
+  | { kind: 'text-delta'; attemptId: string; text: string }
+  | { kind: 'reasoning-delta'; attemptId: string; text: string };
 
 /**
  * 解析宿主 `agent/assistant-stream` 的 payload（{ agent: { id }, frame }）。
@@ -176,6 +177,9 @@ export function parseStreamFrame(raw: unknown): { agentId: string; delta: Stream
     const ch = f.chunk as { type?: unknown; text?: unknown } | null;
     if (ch && ch.type === 'text-delta' && typeof ch.text === 'string' && ch.text !== '') {
       return { agentId, delta: { kind: 'text-delta', attemptId, text: ch.text } };
+    }
+    if (ch && ch.type === 'reasoning-delta' && typeof ch.text === 'string' && ch.text !== '') {
+      return { agentId, delta: { kind: 'reasoning-delta', attemptId, text: ch.text } };
     }
   }
   return undefined;
