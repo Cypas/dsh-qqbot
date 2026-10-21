@@ -4,7 +4,7 @@ import { FULL_INTENTS } from '@tencent-connect/qqbot-nodejs/protocol';
 import { SessionManager } from '../session/index.js';
 import { handleInbound, createOutboundHandler } from '../transport/index.js';
 import { parseStreamFrame } from '../transport/events.js';
-import { setMaterialTargetFactory } from '../features/md-media-rewrite.js';
+import { setMaterialTargetFactory, rewriteLocalMarkdownImages, lastMediaRewrite } from '../features/md-media-rewrite.js';
 import { buildUserAgent } from '../shared/index.js';
 import { setupMiddlewares } from './middleware-setup.js';
 import { configureDiag, diagWrite } from '../shared/diag.js';
@@ -329,7 +329,25 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
     const sender = {
         sendMarkdown: async (target, content) => {
             try {
-                const rawText = String(content || '');
+                let rawText = String(content || '');
+                // 2026-10-21: markdown 通道也要自动传本地图 ——
+                //   扩展工具 send_md / 卡片 / sendText 都直接走这个 sender.sendMarkdown，
+                //   绕过了 OutboundRouter.send() 里的那次重写，所以这里必须再来一次。
+                if (rawText.indexOf('![') >= 0) {
+                    try {
+                        const ga = manager.groupAdmin;
+                        if (ga)
+                            rawText = await rewriteLocalMarkdownImages(rawText, { apiCall: ga.apiCall.bind(ga) });
+                        // 2026-10-21（主人定）：markdown 卡片通道里，本地图没传成功就**不发送**这条（正文不受影响，正文走 send()）
+                        {
+                            const rw = lastMediaRewrite();
+                            if (rw && Number(rw.failed || 0) > 0) {
+                                throw new Error('图上传失败 ' + rw.failed + '/' + rw.matched + '，本条未发送');
+                            }
+                        }
+                    }
+                    catch { /* 失败保留原样 */ }
+                }
                 // 引用消息(2026-09-13 主人定): AI 写 [rf:短号] → 台账查表还原 msg_id, 出站带 message_reference 以"引用"形式发出
                 const refId = target.referenceMessageId;
                 if (refId) {

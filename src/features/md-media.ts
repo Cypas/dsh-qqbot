@@ -31,6 +31,8 @@ export interface MdMediaTarget {
 
 export interface MdMediaResult {
   ok: boolean;
+  /** 外网 COS 预签名（短时效，仅供测试/预览；不是持久链接） */
+  previewUrl?: string;
   url?: string;
   imageId?: string;
   width?: number;
@@ -88,6 +90,20 @@ export function imageSize(buf: Buffer): { width: number; height: number } {
       i += 2 + len;
     }
   }
+  // WEBP(VP8X：RIFF....WEBP VP8X，宽高在 offset 24 起，各 3 字节 LE，存的是值-1)
+  if (buf.length > 30 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+    const kind = buf.toString('ascii', 12, 16);
+    if (kind === 'VP8X') {
+      const w = 1 + buf.readUIntLE(24, 3);
+      const h = 1 + buf.readUIntLE(27, 3);
+      return { width: w, height: h };
+    }
+    if (kind === 'VP8L' && buf.length > 25) {
+      const b = buf.readUInt32LE(21);
+      return { width: (b & 0x3fff) + 1, height: ((b >> 14) & 0x3fff) + 1 };
+    }
+  }
+
   return { width: 0, height: 0 };
 }
 
@@ -187,14 +203,27 @@ export async function uploadMarkdownImage(
   // ④ complete（md5 用 ETag）
   const done = await target.apiCall('POST', '/v2/media-images/complete', { upload_id: uploadId, md5: etag });
   if (!done.ok) return { ok: false, msg: 'complete 失败: ' + (done.err?.human || done.err?.code || '未知') };
-  const dd = (done.data ?? {}) as { image_id?: string; url?: string };
+  const dd = (done.data ?? {}) as { image_id?: string; url?: string; preview_url?: string };
   const url = String(dd.url ?? '');
+  const imageIdFinal = String(dd.image_id ?? '');
+  // 2026-10-21（主人要求）：**用 list 核实** —— complete 说成功但列表里没有 = 没真上去，别当成功。
+  try {
+    const chk = await listMarkdownImages(target);
+    if (chk.ok) {
+      const arr = ((chk.data ?? {}) as { images?: Array<{ image_id?: string }> }).images ?? [];
+      if (arr.length > 0 && !arr.some((x) => String(x.image_id || '') === imageIdFinal)) {
+        return { ok: false, msg: 'complete 成功但 list 查不到该图（image_id=' + imageIdFinal + '），视为上传失败' };
+      }
+    }
+  } catch { /* list 不可用则按成功处理 */ }
   if (!url) return { ok: false, msg: 'complete 返回缺 url: ' + JSON.stringify(dd).slice(0, 200) };
 
+  const previewUrl = String(dd.preview_url ?? '');
   return {
     ok: true,
     url,
-    imageId: String(dd.image_id ?? ''),
+    previewUrl,
+    imageId: imageIdFinal,
     width: size.width,
     height: size.height,
     bytes: buf.length,

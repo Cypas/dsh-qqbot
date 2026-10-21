@@ -299,9 +299,48 @@ function buildWorkspaceQqPack(tag: string, dataRoot: string): Record<string, unk
       (typeof sender?.sendMarkdown === 'function' && id ? Promise.resolve(sender.sendMarkdown(toTarget(scope, id), String(md))).then(() => true).catch(() => false) : Promise.resolve(false)),
     sendImage: (scope: string, id: string, src: string) =>
       (typeof sender?.sendMedia === 'function' && id ? Promise.resolve(sender.sendMedia(toTarget(scope, id), 'image', src)).then(() => true).catch(() => false) : Promise.resolve(false)),
-    apiCall: typeof mgr?.groupAdmin?.apiCall === 'function'
-      ? (m: 'GET' | 'POST' | 'PATCH' | 'DELETE', p: string, b?: unknown) => mgr!.groupAdmin!.apiCall!(m, p, b)
-      : undefined,
+    // 2026-10-22（主人定）：素材上传等本来**不需要群管理权限** —— 这里直接用机器人自己的
+    //   access_token 通道（与 api/group-admin.ts 同源），不再借 groupAdmin，也不依赖本实例是否启用群管理。
+    apiCall: ((): ((m: string, p: string, b?: unknown) => Promise<unknown>) | undefined => {
+      const appId = String(mgr?.config?.appId ?? '');
+      const appSecret = String(mgr?.config?.appSecret ?? '');
+      if (!appId || !appSecret) return undefined;
+      const g = globalThis as unknown as { __qqbotBotToken?: Map<string, { t: string; at: number }> };
+      if (!g.__qqbotBotToken) g.__qqbotBotToken = new Map();
+      const cache = g.__qqbotBotToken;
+      const token = async (): Promise<string | undefined> => {
+        const hit = cache.get(appId);
+        if (hit && Date.now() < hit.at) return hit.t;
+        try {
+          const res = await fetch('https://bots.qq.com/app/getAppAccessToken', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ appId, clientSecret: appSecret }),
+          });
+          const j = (await res.json()) as { access_token?: string; expires_in?: number };
+          if (!j.access_token) return undefined;
+          cache.set(appId, { t: j.access_token, at: Date.now() + ((j.expires_in ?? 7200) - 60) * 1000 });
+          return j.access_token;
+        } catch { return undefined; }
+      };
+      return async (method: string, path: string, body?: unknown) => {
+        const tk = await token();
+        if (!tk) return { ok: false, err: { code: 'no-token', human: '取不到 access_token（appId/appSecret 缺失或网络失败）' } };
+        try {
+          const res = await fetch('https://api.sgroup.qq.com' + path, {
+            method,
+            headers: { Authorization: 'QQBot ' + tk, 'content-type': 'application/json' },
+            body: body === undefined ? undefined : JSON.stringify(body),
+          });
+          const text = await res.text();
+          let data: unknown = {};
+          try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+          return { ok: res.ok, data, err: res.ok ? undefined : { code: res.status, human: text.slice(0, 200) } };
+        } catch (e) {
+          return { ok: false, err: { code: 'net', human: (e as Error)?.message ?? String(e) } };
+        }
+      };
+    })(),
   };
 }
 

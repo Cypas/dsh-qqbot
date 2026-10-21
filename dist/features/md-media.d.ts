@@ -13,6 +13,8 @@ export interface MdMediaTarget {
 }
 export interface MdMediaResult {
     ok: boolean;
+    /** 外网 COS 预签名（短时效，仅供测试/预览；不是持久链接） */
+    previewUrl?: string;
     url?: string;
     imageId?: string;
     width?: number;

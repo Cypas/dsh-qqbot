@@ -305,9 +305,62 @@ function buildWorkspaceQqPack(tag, dataRoot) {
         },
         sendMarkdown: (scope, id, md) => (typeof sender?.sendMarkdown === 'function' && id ? Promise.resolve(sender.sendMarkdown(toTarget(scope, id), String(md))).then(() => true).catch(() => false) : Promise.resolve(false)),
         sendImage: (scope, id, src) => (typeof sender?.sendMedia === 'function' && id ? Promise.resolve(sender.sendMedia(toTarget(scope, id), 'image', src)).then(() => true).catch(() => false) : Promise.resolve(false)),
-        apiCall: typeof mgr?.groupAdmin?.apiCall === 'function'
-            ? (m, p, b) => mgr.groupAdmin.apiCall(m, p, b)
-            : undefined,
+        // 2026-10-22（主人定）：素材上传等本来**不需要群管理权限** —— 这里直接用机器人自己的
+        //   access_token 通道（与 api/group-admin.ts 同源），不再借 groupAdmin，也不依赖本实例是否启用群管理。
+        apiCall: (() => {
+            const appId = String(mgr?.config?.appId ?? '');
+            const appSecret = String(mgr?.config?.appSecret ?? '');
+            if (!appId || !appSecret)
+                return undefined;
+            const g = globalThis;
+            if (!g.__qqbotBotToken)
+                g.__qqbotBotToken = new Map();
+            const cache = g.__qqbotBotToken;
+            const token = async () => {
+                const hit = cache.get(appId);
+                if (hit && Date.now() < hit.at)
+                    return hit.t;
+                try {
+                    const res = await fetch('https://bots.qq.com/app/getAppAccessToken', {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({ appId, clientSecret: appSecret }),
+                    });
+                    const j = (await res.json());
+                    if (!j.access_token)
+                        return undefined;
+                    cache.set(appId, { t: j.access_token, at: Date.now() + ((j.expires_in ?? 7200) - 60) * 1000 });
+                    return j.access_token;
+                }
+                catch {
+                    return undefined;
+                }
+            };
+            return async (method, path, body) => {
+                const tk = await token();
+                if (!tk)
+                    return { ok: false, err: { code: 'no-token', human: '取不到 access_token（appId/appSecret 缺失或网络失败）' } };
+                try {
+                    const res = await fetch('https://api.sgroup.qq.com' + path, {
+                        method,
+                        headers: { Authorization: 'QQBot ' + tk, 'content-type': 'application/json' },
+                        body: body === undefined ? undefined : JSON.stringify(body),
+                    });
+                    const text = await res.text();
+                    let data = {};
+                    try {
+                        data = text ? JSON.parse(text) : {};
+                    }
+                    catch {
+                        data = { raw: text };
+                    }
+                    return { ok: res.ok, data, err: res.ok ? undefined : { code: res.status, human: text.slice(0, 200) } };
+                }
+                catch (e) {
+                    return { ok: false, err: { code: 'net', human: e?.message ?? String(e) } };
+                }
+            };
+        })(),
     };
 }
 /** 全局「智能判断」开关（由 session-manager 初始化时注入；照 setChannelBridge 同款做法） */
