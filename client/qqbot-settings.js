@@ -25,8 +25,13 @@ window.__ModuleLoader__.load({
     // ── 迷你设计系统(2026-09-05 专家团定稿; 深色柔和适配宿主, 不刺眼) ──
     // 宿主 dsh web 为深色主题 → 卡片用半透明深色、文字浅色、主色用低饱和紫(贴合 #9775fa 系)
     var T = {
-      bg: 'transparent', card: '#ffffff', cardHi: '#fafafa', cardSolid: '#f4f5f8', border: '#e2e5ea', borderLight: '#eef0f3',
-      text: '#1f2329', text2: '#4e5560', text3: '#8a919c',
+      // 2026-10-22 P0：结构色改走 CSS token（定义在 QQS_THEME_CSS，宿主切 body[data-ds-dark-theme] 时自动变）
+      // 每个 var 都带亮色回退：变量表没加载时回退亮色，绝不出现 unset/透明
+      bg: 'transparent',
+      card: 'var(--qqs-card,#ffffff)', cardHi: 'var(--qqs-card-hi,#fafafa)', cardSolid: 'var(--qqs-card-solid,#f4f5f8)',
+      border: 'var(--qqs-border,#e2e5ea)', borderLight: 'var(--qqs-border-light,#eef0f3)',
+      text: 'var(--qqs-text,#1f2329)', text2: 'var(--qqs-text2,#4e5560)', text3: 'var(--qqs-text3,#8a919c)',
+      dangerSoft: '#e5484d88',
       primary: '#7c6cf0', primary2: '#6b5ae6', primaryBg: '#7c6cf01a', primaryBorder: '#7c6cf04d',
       danger: '#e5484d', dangerBg: '#e5484d14',
       success: '#1f9e4f', successBg: '#1f9e4f14',
@@ -1466,7 +1471,7 @@ window.__ModuleLoader__.load({
             //   查不到 openid ≠ 群不存在（实测：群正常、定时任务照发，却被标红“群已失效”）。
             //   故不再据此标失效；真要判定需调 QQ API 探测。
             var deadGroup = false
-            return h('div', { key: j.id, style: { border: '1px solid ' + (deadGroup ? T.danger + '88' : (j.enabled ? T.border : '#ffa94d66')), borderRadius: T.radius, padding: '8px 10px', margin: '6px 0', background: '#fff', opacity: j.enabled ? 1 : 0.72 } },
+            return h('div', { key: j.id, style: { border: '1px solid ' + (deadGroup ? T.dangerSoft : (j.enabled ? T.border : '#ffa94d66')), borderRadius: T.radius, padding: '8px 10px', margin: '6px 0', background: '#fff', opacity: j.enabled ? 1 : 0.72 } },
               h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
                 chip(j.kind),
                 h('span', { style: { fontWeight: 600, fontSize: T.fsSm } }, fmtWhen(j)),
@@ -1922,8 +1927,26 @@ window.__ModuleLoader__.load({
         props && props.close ? h('button', { className: 'qqs-btn', onClick: props.close, style: { float: 'right', marginTop: 6 } }, '完成') : null)
     }
 
-var QQS_CSS = ".qqs-btn{font:inherit;color:#333;background:linear-gradient(180deg,#ffffff,#f5f6f8);border:1px solid #d0d5dd;border-radius:9px;padding:5px 13px;cursor:pointer;transition:all .15s}.qqs-btn:hover{background:#ffffff;border-color:#7c6cf0;color:#7c6cf0}.qqs-btn:active{transform:translateY(1px)}.qqs-inp,.qqs-area{font:inherit;color:#1f2329;background:#ffffff;border:1px solid #d0d5dd;border-radius:9px;padding:5px 10px;outline:none;transition:border-color .15s}.qqs-inp::placeholder,.qqs-area::placeholder{color:#9aa1ab}.qqs-inp:focus,.qqs-area:focus{border-color:#7c6cf0;box-shadow:0 0 0 2px #7c6cf033}.qqs-cb{accent-color:#7c6cf0;width:15px;height:15px}.qqs-card{transition:box-shadow .15s,border-color .15s}.qqs-card:hover{box-shadow:0 2px 10px #0002}.qqs-panel{background:linear-gradient(180deg,#ffffff,#f7f8fa);border:1px solid #e2e5ea;border-radius:16px;padding:16px;box-shadow:0 10px 34px #0002}.qqs-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:#f7f8fa;border:1px solid #e2e5ea;border-radius:12px;padding:8px 10px;margin-bottom:10px}.qqs-modal{background:#ffffff;color:#1f2329}"
-    function ensureCss() { try { if (!document.getElementById('qqs-css')) { var st = document.createElement('style'); st.id = 'qqs-css'; st.textContent = QQS_CSS; document.head.appendChild(st) } } catch (e) {} }
+var QQS_CSS = ".qqs-btn{font:inherit;color:var(--qqs-text,#1f2329);background:var(--qqs-card,#fff);border:1px solid var(--qqs-border,#d0d5dd);border-radius:9px;padding:5px 13px;cursor:pointer;transition:all .15s}.qqs-btn:hover{background:var(--qqs-card-hi,#fafafa);border-color:#7c6cf0;color:#7c6cf0}.qqs-btn:active{transform:translateY(1px)}.qqs-inp,.qqs-area{font:inherit;color:var(--qqs-text,#1f2329);background:var(--qqs-input,#fff);border:1px solid var(--qqs-border,#d0d5dd);border-radius:9px;padding:5px 10px;outline:none;transition:border-color .15s}.qqs-inp::placeholder,.qqs-area::placeholder{color:var(--qqs-text3,#9aa1ab)}.qqs-inp:focus,.qqs-area:focus{border-color:#7c6cf0;box-shadow:0 0 0 2px #7c6cf033}.qqs-cb{accent-color:#7c6cf0;width:15px;height:15px}.qqs-card{transition:box-shadow .15s,border-color .15s}.qqs-card:hover{box-shadow:0 2px 10px #0002}.qqs-panel{background:var(--qqs-panel,#fff);border:1px solid var(--qqs-border,#e2e5ea);border-radius:16px;padding:16px;box-shadow:0 10px 34px #0002}.qqs-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--qqs-toolbar,#f7f8fa);border:1px solid var(--qqs-border,#e2e5ea);border-radius:12px;padding:8px 10px;margin-bottom:10px}.qqs-modal{background:var(--qqs-panel,#fff);color:var(--qqs-text,#1f2329)}"
+var QQS_THEME_CSS = [
+  // 亮色（默认）：挂在 body 上，宿主切换主题时不需要我们做任何 JS
+  'body{',
+  '--qqs-card:#ffffff;--qqs-card-hi:#fafafa;--qqs-card-solid:#f4f5f8;',
+  '--qqs-border:#e2e5ea;--qqs-border-light:#eef0f3;',
+  '--qqs-text:#1f2329;--qqs-text2:#4e5560;--qqs-text3:#8a919c;',
+  '--qqs-panel:#ffffff;--qqs-toolbar:#f7f8fa;--qqs-input:#ffffff;',
+  '--qqs-dock-panel:#ffffff;--qqs-dock-body:#f5f6f8;--qqs-bubble-in:#ffffff;',
+  '}',
+  // 暗色：宿主 ThemePresenter 在 scheme==='dark' 时给 body 加这个属性、切主题时自动增删
+  'body[data-ds-dark-theme]{',
+  '--qqs-card:#232834;--qqs-card-hi:#2b3140;--qqs-card-solid:#2a3040;',
+  '--qqs-border:#3a4152;--qqs-border-light:#333a49;',
+  '--qqs-text:#e6e8ee;--qqs-text2:#b9c0cc;--qqs-text3:#8f97a6;',
+  '--qqs-panel:#232834;--qqs-toolbar:#272d3a;--qqs-input:#2b3140;',
+  '--qqs-dock-panel:#232834;--qqs-dock-body:#1e232e;--qqs-bubble-in:#2b3140;',
+  '}',
+].join('')
+    function ensureCss() { try { if (!document.getElementById('qqs-css')) { var st = document.createElement('style'); st.id = 'qqs-css'; st.textContent = QQS_CSS + QQS_THEME_CSS; document.head.appendChild(st) } } catch (e) {} }
 
     // ── 审批双通道 · Web 浮层(右下角小卡片) ──
     // 轮询 host 待办池(与 QQ 按钮/文本码共用同一 pending), 有点击即 POST 结算。
