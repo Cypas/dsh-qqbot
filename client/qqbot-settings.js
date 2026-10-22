@@ -19,7 +19,7 @@ window.__ModuleLoader__.load({
     var inputStyle = { marginLeft: 8, padding: '2px 6px', border: '1px solid #8884', borderRadius: 4, background: 'transparent', color: 'inherit', width: 110 }
     var wideStyle = { ...inputStyle, width: 260 }
     var fullStyle = { ...inputStyle, width: '92%', display: 'block', margin: '4px 0 8px' }
-    var boxStyle = { border: '1px solid #e5e6eb', borderRadius: 8, padding: '10px 14px 12px', margin: '8px 0', background: '#fff' }
+    var boxStyle = { border: '1px solid var(--qqs-border,#e5e6eb)', borderRadius: 8, padding: '10px 14px 12px', margin: '8px 0', background: 'var(--qqs-card,#fff)' }
     var sectionTitle = { fontWeight: 600, margin: '10px 0 4px', fontSize: 14, color: '#1f2329' }
 
     // ── 迷你设计系统(2026-09-05 专家团定稿; 深色柔和适配宿主, 不刺眼) ──
@@ -1471,7 +1471,7 @@ window.__ModuleLoader__.load({
             //   查不到 openid ≠ 群不存在（实测：群正常、定时任务照发，却被标红“群已失效”）。
             //   故不再据此标失效；真要判定需调 QQ API 探测。
             var deadGroup = false
-            return h('div', { key: j.id, style: { border: '1px solid ' + (deadGroup ? T.dangerSoft : (j.enabled ? T.border : '#ffa94d66')), borderRadius: T.radius, padding: '8px 10px', margin: '6px 0', background: '#fff', opacity: j.enabled ? 1 : 0.72 } },
+            return h('div', { key: j.id, style: { border: '1px solid ' + (deadGroup ? T.dangerSoft : (j.enabled ? T.border : '#ffa94d66')), borderRadius: T.radius, padding: '8px 10px', margin: '6px 0', background: 'var(--qqs-card,#fff)', opacity: j.enabled ? 1 : 0.72 } },
               h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
                 chip(j.kind),
                 h('span', { style: { fontWeight: 600, fontSize: T.fsSm } }, fmtWhen(j)),
@@ -1854,7 +1854,7 @@ window.__ModuleLoader__.load({
           h('button', { className: 'qqs-btn', onClick: function () { setAddMenu(!addMenu) }, style: { borderColor: '#b197fc99', color: '#171a21', fontWeight: 700 } }, addMenu ? '✕ 关闭' : '➕ 添加账号'),
           h('span', { style: { fontSize: 12, color: '#888' } }, '点加号选: 扫码绑定 或 手动填凭据'),
           (addMenu
-            ? h('div', { style: { position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 60, minWidth: 280, background: '#fff', border: '1px solid #d9c6ff', borderRadius: 10, boxShadow: '0 10px 28px rgba(60,40,140,.18)', padding: 6, display: 'flex', flexDirection: 'column', gap: 4 } },
+            ? h('div', { style: { position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 60, minWidth: 280, background: 'var(--qqs-card,#fff)', border: '1px solid var(--qqs-border,#d9c6ff)', borderRadius: 10, boxShadow: '0 10px 28px rgba(60,40,140,.18)', padding: 6, display: 'flex', flexDirection: 'column', gap: 4 } },
                 h('button', { className: 'qqs-btn', style: { display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', padding: '8px 10px', justifyContent: 'flex-start', background: '#f3f0ff', borderColor: '#d0bfff' }, onClick: function () { setAddMenu(false); startBind() } },
                   h('span', { style: { fontSize: 20 } }, '📱'),
                   h('span', null,
@@ -1900,7 +1900,7 @@ window.__ModuleLoader__.load({
                 editFiles.map(function (fl) { return h('option', { key: fl.name, value: fl.name }, fl.name + ' (' + Math.max(1, Math.ceil(fl.size / 1024)) + 'KB)') })),
               h('span', { style: { fontSize: 12, color: editP.writable === false ? '#ffa94d' : '#7fd8a8' } }, editP.writable === false ? '🔒 只读(内置预设, 请先复制一份再改)' : (editP.writable ? '✅ 可编辑(你的副本)' : '⏳ 读取权限中…'))),
             h('p', { style: { fontSize: 12, color: '#9fb0c9', margin: '2px 0 6px' } }, '提示: agent.cordis.yml 里 persona 插件 config.text 就是人设正文; 直接整文件编辑, 保存后新会话生效。'),
-            h('textarea', { className: 'qqs-inp', style: { width: '100%', boxSizing: 'border-box', flex: 1, minHeight: 300, fontFamily: 'ui-monospace,Consolas,monospace', fontSize: 12, lineHeight: 1.5, color: '#1f2329', whiteSpace: 'pre', resize: 'vertical', background: '#fff' }, value: editContent, readOnly: editP.writable === false, spellCheck: false, onChange: function (e) { setEditContent(e.target.value) } }),
+            h('textarea', { className: 'qqs-inp', style: { width: '100%', boxSizing: 'border-box', flex: 1, minHeight: 300, fontFamily: 'ui-monospace,Consolas,monospace', fontSize: 12, lineHeight: 1.5, color: 'var(--qqs-text,#1f2329)', whiteSpace: 'pre', resize: 'vertical', background: '#fff' }, value: editContent, readOnly: editP.writable === false, spellCheck: false, onChange: function (e) { setEditContent(e.target.value) } }),
             (editMsg ? h('p', { style: { fontSize: 12, color: '#ffa94d', margin: '4px 0' } }, editMsg) : null),
             h('div', { style: { textAlign: 'right', marginTop: 8 } },
               h('button', { className: 'qqs-btn', onClick: function () { if (!editBusy) setEditP(null) }, style: { marginRight: 8 } }, '关闭'),
@@ -1941,7 +1941,7 @@ var QQS_THEME_CSS = [
   'body[data-ds-dark-theme]{',
   '--qqs-card:#232834;--qqs-card-hi:#2b3140;--qqs-card-solid:#2a3040;',
   '--qqs-border:#3a4152;--qqs-border-light:#333a49;',
-  '--qqs-text:#e6e8ee;--qqs-text2:#b9c0cc;--qqs-text3:#8f97a6;',
+  '--qqs-text:#e8eaf0;--qqs-text2:#c3cad6;--qqs-text3:#a3abb9;',
   '--qqs-panel:#232834;--qqs-toolbar:#272d3a;--qqs-input:#2b3140;',
   '--qqs-dock-panel:#232834;--qqs-dock-body:#1e232e;--qqs-bubble-in:#2b3140;',
   '}',
