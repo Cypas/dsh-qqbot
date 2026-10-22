@@ -32,7 +32,7 @@ window.__ModuleLoader__.load({
       border: 'var(--qqs-border,#e2e5ea)', borderLight: 'var(--qqs-border-light,#eef0f3)',
       text: 'var(--qqs-text,#1f2329)', text2: 'var(--qqs-text2,#4e5560)', text3: 'var(--qqs-text3,#8a919c)',
       dangerSoft: '#e5484d88',
-      primary: '#7c6cf0', primary2: '#6b5ae6', primaryBg: '#7c6cf01a', primaryBorder: '#7c6cf04d',
+      primary: '#7c6cf0', primary2: '#6b5ae6', primaryBg: 'var(--qqs-primary-bg,#7c6cf01a)', primaryBorder: 'var(--qqs-primary-border,#7c6cf04d)',
       danger: '#e5484d', dangerBg: '#e5484d14',
       success: '#1f9e4f', successBg: '#1f9e4f14',
       warn: '#d97706', warnBg: '#d9770614',
@@ -1836,7 +1836,7 @@ window.__ModuleLoader__.load({
               inputRow('AppID: ', h('input', { className: 'qqs-inp', style: Object.assign({ width: 220 }, st), value: it.appId || '', onChange: function (e) { upd(i, { appId: e.target.value }) }, placeholder: '如 1234567890' })),
             inputRow('AppSecret: ', h('input', { className: 'qqs-inp', type: 'password', style: Object.assign({ width: 320 }, st), value: (it.appSecret === SECRET_MASK || (!it.appSecret && it.hasSecret)) ? '' : (it.appSecret || ''), onChange: function (e) { upd(i, { appSecret: e.target.value }) }, placeholder: (it.hasSecret && !it._new) ? '已保存(留空/掩码=保留原值; 填新值=更换)' : '扫码绑定会自动填; 也可手动填(两个都要填全才不弹码)' })),
             inputRow('Agent 预设(人格): ', (function () { if (presets.length === 0 && !selInvalid) {
-                return h('span', { className: 'qqs-inp', style: { display: 'inline-block', verticalAlign: 'middle', padding: '5px 10px', fontSize: 12, color: '#e8590c', background: '#fff5f0', borderRadius: 6 } }, '⚠️ 还没有任何 Agent 预设——请在下方②新建/复制一个')
+                return h('span', { className: 'qqs-inp', style: { display: 'inline-block', verticalAlign: 'middle', padding: '5px 10px', fontSize: 12, color: '#e8590c', background: 'var(--qqs-warn-bg,#fff5f0)', borderRadius: 6 } }, '⚠️ 还没有任何 Agent 预设——请在下方②新建/复制一个')
               } return h('select', { className: 'qqs-inp', style: { width: 320, padding: '4px 8px' }, value: it.preset || '', onChange: function (e) { upd(i, { preset: e.target.value }) } }, opts.map(function (o) { return h('option', { key: o.id, value: o.id, style: selInvalid && o.id === it.preset ? { color: '#e03131' } : null }, o.label) })) })()),
             inputRow('工作目录(各账号数据放这, 留空=默认): ', h('input', { className: 'qqs-inp', style: Object.assign({ width: '90%' }, st), value: it.cwd || '', onChange: function (e) { upd(i, { cwd: e.target.value }) }, placeholder: '如 D:\\bots\\二号机' })),
             (function () {
@@ -1936,6 +1936,7 @@ var QQS_THEME_CSS = [
   '--qqs-text:#1f2329;--qqs-text2:#4e5560;--qqs-text3:#8a919c;',
   '--qqs-panel:#ffffff;--qqs-toolbar:#f7f8fa;--qqs-input:#ffffff;',
   '--qqs-dock-panel:#ffffff;--qqs-dock-body:#f5f6f8;--qqs-bubble-in:#ffffff;',
+  '--qqs-primary-bg:#7c6cf01a;--qqs-primary-border:#7c6cf04d;--qqs-warn-bg:#fff5f0;',
   '}',
   // 暗色：宿主 ThemePresenter 在 scheme==='dark' 时给 body 加这个属性、切主题时自动增删
   'body[data-ds-dark-theme]{',
@@ -1944,6 +1945,7 @@ var QQS_THEME_CSS = [
   '--qqs-text:#e8eaf0;--qqs-text2:#c3cad6;--qqs-text3:#a3abb9;',
   '--qqs-panel:#232834;--qqs-toolbar:#272d3a;--qqs-input:#2b3140;',
   '--qqs-dock-panel:#232834;--qqs-dock-body:#1e232e;--qqs-bubble-in:#2b3140;',
+  '--qqs-primary-bg:#7c6cf033;--qqs-primary-border:#7c6cf080;--qqs-warn-bg:#3a2a20;',
   '}',
 ].join('')
     function ensureCss() { try { if (!document.getElementById('qqs-css')) { var st = document.createElement('style'); st.id = 'qqs-css'; st.textContent = QQS_CSS + QQS_THEME_CSS; document.head.appendChild(st) } } catch (e) {} }
