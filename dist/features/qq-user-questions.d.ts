@@ -149,13 +149,17 @@ export declare class QqUserQuestionsController {
      * 见 config.questionsMode 与 docs §11.29。
      */
     private readonly modeProvider;
+    /** openid → 昵称（2026-10-23 主人要求：回执显示谁答的要昵称，不是裸 openid）。拿不到就回落 openid。 */
+    private readonly nameResolver?;
     private readonly pending;
     constructor(manager: SessionManager, sender: QQBotSender, logger: Logger, timeoutMsProvider: () => number, 
     /**
      * 提问工作方式(现读, live 热更): 'async'=后台提问(默认, 不卡回合) / 'blocking'=旧行为(工具阻塞等答案)。
      * 见 config.questionsMode 与 docs §11.29。
      */
-    modeProvider?: () => 'async' | 'blocking');
+    modeProvider?: () => 'async' | 'blocking', 
+    /** openid → 昵称（2026-10-23 主人要求：回执显示谁答的要昵称，不是裸 openid）。拿不到就回落 openid。 */
+    nameResolver?: ((target: ReplyTarget, openid: string) => string) | undefined);
     /**
      * 群成员昵称 → openid 解析器(2026-09-24 主人需求: 提问卡片支持"昵称匹配"指定收件人)。
      * 数据源 = 本地群成员台账 `{dataRoot}/表情包/group-members.jsonl`(在群里发过言/申请过入群的人);

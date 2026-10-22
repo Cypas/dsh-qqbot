@@ -217,18 +217,22 @@ export class QqUserQuestionsController {
     logger;
     timeoutMsProvider;
     modeProvider;
+    nameResolver;
     pending = new Map();
     constructor(manager, sender, logger, timeoutMsProvider, 
     /**
      * 提问工作方式(现读, live 热更): 'async'=后台提问(默认, 不卡回合) / 'blocking'=旧行为(工具阻塞等答案)。
      * 见 config.questionsMode 与 docs §11.29。
      */
-    modeProvider = () => 'async') {
+    modeProvider = () => 'async', 
+    /** openid → 昵称（2026-10-23 主人要求：回执显示谁答的要昵称，不是裸 openid）。拿不到就回落 openid。 */
+    nameResolver) {
         this.manager = manager;
         this.sender = sender;
         this.logger = logger;
         this.timeoutMsProvider = timeoutMsProvider;
         this.modeProvider = modeProvider;
+        this.nameResolver = nameResolver;
     }
     /**
      * 群成员昵称 → openid 解析器(2026-09-24 主人需求: 提问卡片支持"昵称匹配"指定收件人)。
@@ -679,7 +683,21 @@ export class QqUserQuestionsController {
                 : (a.custom !== undefined && a.custom !== ''
                     ? a.custom
                     : (a.selected.length > 0 ? a.selected.join(' / ') : '未选'));
-            const byTag = a?.by ? (a.by === 'web' ? '（Web 浮层作答）' : `（由 <@${a.by}> 作答）`) : '';
+            let byTag = '';
+            if (a?.by) {
+                if (a.by === 'web')
+                    byTag = '（Web 浮层作答）';
+                else {
+                    let nm = '';
+                    try {
+                        nm = this.nameResolver?.(rec.replyTarget, a.by) || '';
+                    }
+                    catch {
+                        nm = '';
+                    }
+                    byTag = nm && nm !== a.by ? '（由 ' + nm + ' 作答）' : '（由 <@' + a.by + '> 作答）';
+                }
+            }
             return `「${qOf(qid, i)}」→ ${shown}${byTag}`;
         });
         const text = `[提问卡片·回执] 你之前发出的提问有结果了(后台送达, 已标注实际作答人)：\n${lines.join('\n')}`;

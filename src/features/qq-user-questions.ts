@@ -345,6 +345,8 @@ export class QqUserQuestionsController {
      * 见 config.questionsMode 与 docs §11.29。
      */
     private readonly modeProvider: () => 'async' | 'blocking' = () => 'async',
+    /** openid → 昵称（2026-10-23 主人要求：回执显示谁答的要昵称，不是裸 openid）。拿不到就回落 openid。 */
+    private readonly nameResolver?: (target: ReplyTarget, openid: string) => string,
   ) {}
 
   /**
@@ -773,7 +775,15 @@ export class QqUserQuestionsController {
         : (a.custom !== undefined && a.custom !== ''
           ? a.custom
           : (a.selected.length > 0 ? a.selected.join(' / ') : '未选'));
-      const byTag = a?.by ? (a.by === 'web' ? '（Web 浮层作答）' : `（由 <@${a.by}> 作答）`) : '';
+      let byTag = '';
+            if (a?.by) {
+              if (a.by === 'web') byTag = '（Web 浮层作答）';
+              else {
+                let nm = '';
+                try { nm = this.nameResolver?.(rec.replyTarget as ReplyTarget, a.by) || ''; } catch { nm = ''; }
+                byTag = nm && nm !== a.by ? '（由 ' + nm + ' 作答）' : '（由 <@' + a.by + '> 作答）';
+              }
+            }
       return `「${qOf(qid, i)}」→ ${shown}${byTag}`;
     });
     const text = `[提问卡片·回执] 你之前发出的提问有结果了(后台送达, 已标注实际作答人)：\n${lines.join('\n')}`;

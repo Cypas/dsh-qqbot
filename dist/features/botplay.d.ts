@@ -199,7 +199,10 @@ export declare class BotplayController {
      * (签到统计那种"列出所有签到者名字"的场景, 名字后面挂截断 openid 很难看)。
      * 数据源与 clickerLabel 同源(见其注释): 群成员台账 → 私聊台账 → 会话消息壳 → 回落 openid。
      */
-    private memberName;
+    /**
+     * 昵称反查 —— public（2026-10-23：提问卡片回执要显示作答人昵称，复用同一套台账→缓存→API 兜底）。
+     */
+    memberName(target: ReplyTarget, presser: string): string;
     /** 权限判定: all 放行 / triggerer=触发者本人 / owner=主人白名单 / users=指定 openid */
     private checkPerm;
     /**

@@ -657,6 +657,11 @@ export async function bootstrapGateway(
     () => config.approvalTimeoutMs || 120000,
     // 提问工作方式(现读/live 热更): 'async'=后台(默认, 卡片发出即返回, 不卡回合) / 'blocking'=旧行为
     () => (config.questionsMode === 'blocking' ? 'blocking' : 'async'),
+    // openid → 昵称：延迟求值（botplayController 在本段之后才创建）
+    (target, openid) => {
+      try { return botplayController?.memberName(target, openid) || ''; } catch { return ''; }
+    },
+
   );
   registerQuestionController(myNs, questionController);
   (ctx as unknown as {
