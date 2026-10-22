@@ -1806,7 +1806,7 @@ window.__ModuleLoader__.load({
         }).catch(function (e) { setEditBusy(false); setEditMsg('保存异常: ' + e.message) })
       }
       var st = { width: '100%', padding: '5px 8px', boxSizing: 'border-box' }
-      return h('div', { style: { maxWidth: 860 } },
+      return h('div', { style: { maxWidth: 860, background: 'var(--qqs-card,#fff)', border: '1px solid var(--qqs-border,#e2e5ea)', borderRadius: 12, padding: '14px 16px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 } },
           h('h2', { style: { margin: 0 } }, '账号与预设'),
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
@@ -1823,7 +1823,7 @@ window.__ModuleLoader__.load({
           if (selInvalid) opts.unshift({ id: it.preset, label: '⚠️ ' + it.preset + '(预设不存在, 请重选)' })
           // 默认收起: 老账号折叠, 新建(_new/_bound)展开待填; 用户手动切换后以 collapsed 为准
           var folded = collapsed[it.id] !== undefined ? !!collapsed[it.id] : (!it._new && !it._bound)
-          return h('div', { key: it.id, style: { border: '1px solid ' + (it.disabled ? '#ffa94d66' : '#00000026'), borderRadius: 10, padding: '8px 12px', margin: '8px 0', background: 'rgba(255,255,255,.5)' } },
+          return h('div', { key: it.id, style: { border: '1px solid ' + (it.disabled ? '#ffa94d66' : '#00000026'), borderRadius: 10, padding: '8px 12px', margin: '8px 0', background: 'var(--qqs-card-hi,#fafafa)' } },
             h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
               h('button', { className: 'qqs-btn', title: folded ? '展开设置' : '收起设置', onClick: function () { toggleCollapse(it.id) }, style: { padding: '1px 7px', fontSize: 13, lineHeight: '16px', background: '#0000000d', borderColor: '#00000026' } }, folded ? '▸' : '▾'),
               h('span', { style: { fontWeight: 800, color: '#171a21', cursor: 'pointer', userSelect: 'none' }, onClick: function () { toggleCollapse(it.id) } }, it._bound ? '📱 扫码绑定' : (it._new ? '🆕 新账号' : '🤖 账号')),
