@@ -47,9 +47,9 @@ export async function apply(ctx, config) {
             if (pc.name)
                 globalThis.__dshProfileName = pc.name;
             const dir = pc.dir || pc.root || pc.path;
-            // ★ 关键：把宿主给的值回写成环境变量 —— resolveProfileRoot() / resolveProfileName() 的
-            //   **第一优先级就是这两个环境变量**，所以不用改 settings-host.js 任何一行逻辑，
-            //   老宿主/新宿主都能命中正确 profile（生成式安装下也不会再落到 .generations 或 desktop-safe-mode）。
+            // ★ 把宿主给的值回写成环境变量 —— resolveProfileRoot()/resolveProfileName() 的**第一优先级**
+            //   就是这两个环境变量，所以不用改 settings-host.js 任何一行逻辑（issue #14/#15）。
+            //   已确认此前的保存故障与它无关（真因是前端脚本误写 SAVEOVERRIDE 标记）。
             try {
                 if (pc.name)
                     process.env.DSH_PROFILE = String(pc.name);
