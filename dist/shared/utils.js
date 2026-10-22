@@ -123,6 +123,10 @@ export function profileNameFromDir(dir) {
  * 拿不到返回 `''`，调用方（`nsPathsOf` / `settings-host.js`）落 `_default` —— 与旧行为一致，不会更糟。
  */
 export function resolveProfileName() {
+    // 2026-10-22（issue #14 建议 1）：宿主通过 profileContext 直接给名字 —— 有就用，别猜。
+    const fromCtx = globalThis.__dshProfileName;
+    if (typeof fromCtx === 'string' && fromCtx.trim())
+        return fromCtx.trim();
     const env = (process.env.DSH_PROFILE ?? '').trim();
     if (env)
         return env;

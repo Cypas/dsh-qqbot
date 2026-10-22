@@ -29,6 +29,10 @@ const NS = 'im-qqbot';
  * 本文件被从源码目录加载), 则扫描 ~/.dsh/profiles/* 找装着 @zaofan/dsh-qqbot 的 profile。
  */
 function resolveProfileRoot() {
+  // 2026-10-22（issue #14 建议 1）：宿主经 profileContext 直接给了 profile 目录就用它，
+  //   别再从代码位置/目录扫描去猜（生成式安装下上溯 3 级会落到 .generations/live/<gen>）。
+  const fromCtx = (globalThis.__dshProfileDir ?? '').trim();
+  if (fromCtx) { try { return fromCtx; } catch { /* 回落 */ } }
   // 2026-10-20 修(GitHub issue #14): 生成式安装(dsh-market / DSH Desktop)下,
   //   "包根上溯 3 级"得到的是 profiles/.generations/live/<pkg>, 不是 profile 根;
   //   且 Desktop 的 DSH_HOME 在 %APPDATA%dsh-desktopharness, 原兜底写死 ~/.dsh 扫不到。

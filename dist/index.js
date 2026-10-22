@@ -36,6 +36,23 @@ export const Config = ConfigSchema;
 export async function apply(ctx, config) {
     const agents = ctx.agents;
     const logger = ctx.logger ?? console;
+    // ── 2026-10-22（issue #14 建议 1）：**用宿主给的 profileContext，别靠路径推断** ──
+    //   宿主通过服务把"我是哪个 profile"告诉我们；拿得到就用它，拿不到（老版本宿主没有该服务）
+    //   才回落 resolveProfileName() 的路径推断（DSH_PROFILE → 代码位置 → 扫描）。
+    try {
+        const pc = ctx.get?.('profileContext');
+        if (pc) {
+            const g = globalThis;
+            g.__dshProfileContext = pc;
+            if (pc.name)
+                globalThis.__dshProfileName = pc.name;
+            const dir = pc.dir || pc.root || pc.path;
+            if (dir)
+                globalThis.__dshProfileDir = dir;
+            logger.debug?.('[profile] 来自宿主 profileContext: name=' + (pc.name || '?') + ' dir=' + (dir || '?'));
+        }
+    }
+    catch { /* 老宿主没有该服务：静默回落 */ }
     // __INSTALL_SELFCHECK__ 安装完整性自检（2026-09-28）
     //   entry.js（包入口）已拦住"缺 dist"；这里补查"import 成功但功能不全"
     //   （缺前端 / 缺配置桥 / 缺 patch —— 常见于"从 GitHub 直装但没跑构建"）。

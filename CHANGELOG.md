@@ -1,5 +1,11 @@
 ## [1.10.14] - 2026-10-20
 
+## 1.10.19 (2026-10-22)
+
+### 改进（issue #14 建议 1）
+· **优先用宿主提供的 profileContext，不再靠路径推断**：index.ts 启动时取 ctx.get("profileContext") 的 name/dir 写进 globalThis，
+  resolveProfileName() 与 settings-host.js 的 resolveProfileRoot() 都先读它，读不到才回落原有推断链；宿主没该服务时行为不变。
+
 ## 1.10.18 (2026-10-22)
 
 ### 修复（GitHub #15「一直显示连接中」，由用户 Asthestarsfalll 定位）
