@@ -1130,8 +1130,8 @@ window.__ModuleLoader__.load({
           h('label', { style: { fontSize: 13, whiteSpace: 'nowrap' } }, h('input', { className: 'qqs-inp', type: 'checkbox', className: 'qqs-cb', checked: untagged, onChange: function (e) { setUntagged(e.target.checked) } }), ' 只看没打标的'),
           h('button', { className: 'qqs-btn', onClick: function () { setImp(true) } }, '导入'),
           h('button', { className: 'qqs-btn', onClick: load }, '刷新')),
-        h('p', { style: { fontSize: 12, color: '#888' } }, '共 ' + items.length + ' 张。点图看大图并编辑标签/描述;勾选后底部批量操作。'),
-        items.length === 0 ? h('p', { style: { color: '#888', padding: 20, textAlign: 'center' } }, '这里还没有图' + (untagged ? '(没有未打标的图了 🎉)' : '，点右上角「导入」或等群里发图自动收藏')) : null,
+        h('p', { style: { fontSize: 12, color: 'var(--qqs-text2,#888)' } }, '共 ' + items.length + ' 张。点图看大图并编辑标签/描述;勾选后底部批量操作。'),
+        items.length === 0 ? h('p', { style: { color: 'var(--qqs-text2,#888)', padding: 20, textAlign: 'center' } }, '这里还没有图' + (untagged ? '(没有未打标的图了 🎉)' : '，点右上角「导入」或等群里发图自动收藏')) : null,
         h('div', { ref: gridRef, onMouseDown: onGridDown, style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(104px,1fr))', gap: 14, padding: 14, userSelect: 'none', cursor: 'crosshair', minHeight: 120 } },
           items.map(function (it) {
             var on = sel.includes(it.id)
@@ -1144,11 +1144,11 @@ window.__ModuleLoader__.load({
           })),
         h('div', { style: { height: 120, cursor: 'crosshair', userSelect: 'none' } }),
         sel.length ? h('div', { style: { position: 'sticky', bottom: 8, marginTop: 10, background: 'rgba(255,255,255,.86)', border: '1px solid #00000030', borderRadius: 12, padding: '8px 12px', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', boxShadow: '0 6px 22px rgba(0,0,0,.18)', backdropFilter: 'blur(4px)' } },
-          h('span', { style: { fontWeight: 800, color: '#171a21' } }, '已选 ' + sel.length + ' 张'),
+          h('span', { style: { fontWeight: 800, color: 'var(--qqs-text,#171a21)' } }, '已选 ' + sel.length + ' 张'),
           layer !== 'trash' ? h('button', { onClick: function () { batch('promote') }, style: { font: 'inherit', cursor: 'pointer', padding: '4px 12px', borderRadius: 9, border: '1px solid #2f9e4499', background: 'rgba(47,158,68,.12)', color: '#1d7a31', fontWeight: 700, fontSize: 13 } }, '移入收藏 ★') : null,
           layer !== 'trash' ? h('button', { onClick: function () { batch('trash') }, style: { font: 'inherit', cursor: 'pointer', padding: '4px 12px', borderRadius: 9, border: '1px solid #e8590c99', background: 'rgba(232,89,12,.12)', color: '#c2450a', fontWeight: 700, fontSize: 13 } }, '送回收站') : null,
           layer === 'trash' ? h('button', { onClick: function () { batch('restore') }, style: { font: 'inherit', cursor: 'pointer', padding: '4px 12px', borderRadius: 9, border: '1px solid #2f9e4499', background: 'rgba(47,158,68,.12)', color: '#1d7a31', fontWeight: 700, fontSize: 13 } }, '恢复') : null,
-          h('button', { onClick: function () { setSel([]) }, style: { font: 'inherit', cursor: 'pointer', padding: '4px 12px', borderRadius: 9, border: '1px solid #00000030', background: 'rgba(255,255,255,.7)', color: '#444', fontWeight: 600, fontSize: 13 } }, '取消')) : null,
+          h('button', { onClick: function () { setSel([]) }, style: { font: 'inherit', cursor: 'pointer', padding: '4px 12px', borderRadius: 9, border: '1px solid #00000030', background: 'rgba(255,255,255,.7)', color: 'var(--qqs-text,#444)', fontWeight: 600, fontSize: 13 } }, '取消')) : null,
         mq ? h('div', { style: { position: 'fixed', left: mq.x0, top: mq.y0, width: Math.max(0, mq.x1 - mq.x0), height: Math.max(0, mq.y1 - mq.y0), border: '1px dashed #5b9dff', background: '#5b9dff22', pointerEvents: 'none', zIndex: 500 } }) : null,
         msg ? h('p', { style: { fontSize: 13, color: '#2f9e44' } }, msg) : null,
         box ? h(Lightbox, { item: box, storeDir: DD || undefined, onClose: function () { setBox(null); load() }, onChanged: load }) : null,
@@ -1464,7 +1464,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 700, fontSize: 13 } }, '② 她答应你的定时提醒(在 QQ 里说一声就能建)'),
           h('p', { style: { fontSize: T.fsSm, color: T.text3 } }, '这些是她在 QQ 里应你要求安排的提醒。这里只管看/开关/删除;一次性到点自动消失。'),
           jobs === null ? h('p', { style: { fontSize: T.fsSm, color: T.text3 }, padding: 10 }, '加载中…') : null,
-          jobs !== null && jobs.length === 0 ? h('p', { style: { color: '#888', padding: 14, textAlign: 'center', fontSize: T.fsSm } }, '还没有这类提醒。去 QQ 里让她安排一个,就会出现在这里。') : null,
+          jobs !== null && jobs.length === 0 ? h('p', { style: { color: 'var(--qqs-text2,#888)', padding: 14, textAlign: 'center', fontSize: T.fsSm } }, '还没有这类提醒。去 QQ 里让她安排一个,就会出现在这里。') : null,
           (jobs || []).map(function (j) {
             var disabled = busyId === j.id
             // 2026-10-22 修：台账（groups.json / known-chats）只是本地缓存，可能为空或滞后，
@@ -1558,13 +1558,13 @@ window.__ModuleLoader__.load({
       return h('div', { style: { width: '100%' } },
         // ── 一级: 账号选择条(身份带) ──
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '2px 0 10px', padding: '6px 10px', border: '1px solid #b197fc55', borderRadius: 12, background: 'linear-gradient(90deg,#b197fc22,#b197fc0a)', color: 'var(--qqs-text,#1f2329)' } },
-          h('span', { style: { fontSize: 13, fontWeight: 800, color: '#171a21', whiteSpace: 'nowrap' } }, '🤖 正在查看:'),
+          h('span', { style: { fontSize: 13, fontWeight: 800, color: 'var(--qqs-text,#171a21)', whiteSpace: 'nowrap' } }, '🤖 正在查看:'),
           accts && accts.length > 0
             ? h('select', { className: 'qqs-inp', style: { padding: '4px 8px', fontWeight: 700 }, value: ac ? ac.id : '', onChange: function (e) { chooseAcct(e.target.value) } },
               accts.map(function (a) {
                 return h('option', { key: a.id, value: a.id }, a.id + (a.appId ? ' (AppID ' + a.appId + ')' : '') + (a.disabled ? ' [停用]' : ''))
               }))
-            : h('span', { style: { fontSize: 13, color: '#888' } }, '无账号… 去「账号与预设」添加'),
+            : h('span', { style: { fontSize: 13, color: 'var(--qqs-text2,#888)' } }, '无账号… 去「账号与预设」添加'),
           ac ? h('span', { style: { fontSize: 12, color: '#6d28d9', whiteSpace: 'nowrap' } }, ac.dataDir ? '数据目录: ' + ac.dataDir : '') : null,
           h('span', { style: { flex: 1 } }),
           h('span', { style: { fontSize: 12, color: '#8a97ad' } }, '设置/图库/定时 都跟随上面选的机器人')),
@@ -1576,7 +1576,7 @@ window.__ModuleLoader__.load({
             return h('button', { key: t[0], onClick: function () { choose(t[0]) },
               style: {
                 flex: 1, minWidth: 0, cursor: 'pointer', font: 'inherit',
-                color: '#171a21', fontSize: 14, textAlign: 'center',
+                color: 'var(--qqs-text,#171a21)', fontSize: 14, textAlign: 'center',
                 whiteSpace: 'nowrap', padding: '9px 8px', borderRadius: 14,
                 border: '1px solid ' + (on ? col : col + 'a6'),
                 background: 'linear-gradient(165deg,' + col + (on ? '66' : '40') + ',' + col + (on ? '1f' : '14') + ')',
@@ -1812,7 +1812,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
             h('button', { className: 'qqs-btn', title: '保存账号配置(保存后重启生效)', onClick: save, disabled: busy === 'save', style: { fontSize: 16, padding: '4px 12px', lineHeight: '20px' } }, '💾'),
             h('button', { className: 'qqs-btn', title: '重新读取(放弃未保存的修改)', onClick: function () { load() }, style: { fontSize: 16, padding: '4px 12px', lineHeight: '20px' } }, '🔄'))),
-        h('p', { style: { fontSize: 12, color: '#888' } }, '一个 QQ 机器人 = 一个账号实例(AppID/AppSecret)。想同时开几个机器人就加几个实例，每个可以配不同的 agent 预设(人格)与工作目录(各人各数据,不串)。⚠️ appSecret 会明文存在本机 cordis.patch.yml(改前自动备份 .bak)，别把配置文件传上网。'),
+        h('p', { style: { fontSize: 12, color: 'var(--qqs-text2,#888)' } }, '一个 QQ 机器人 = 一个账号实例(AppID/AppSecret)。想同时开几个机器人就加几个实例，每个可以配不同的 agent 预设(人格)与工作目录(各人各数据,不串)。⚠️ appSecret 会明文存在本机 cordis.patch.yml(改前自动备份 .bak)，别把配置文件传上网。'),
         h('div', { style: sectionTitle }, '① 机器人账号(改完点保存, 重启生效)'),
         (insts === null ? h('p', null, '加载中…') : null),
         (insts || []).map(function (it, i) {
@@ -1826,7 +1826,7 @@ window.__ModuleLoader__.load({
           return h('div', { key: it.id, style: { border: '1px solid ' + (it.disabled ? '#ffa94d66' : '#00000026'), borderRadius: 10, padding: '8px 12px', margin: '8px 0', background: 'var(--qqs-card-hi,#fafafa)', color: 'var(--qqs-text,#1f2329)' } },
             h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
               h('button', { className: 'qqs-btn', title: folded ? '展开设置' : '收起设置', onClick: function () { toggleCollapse(it.id) }, style: { padding: '1px 7px', fontSize: 13, lineHeight: '16px', background: '#0000000d', borderColor: '#00000026' } }, folded ? '▸' : '▾'),
-              h('span', { style: { fontWeight: 800, color: '#171a21', cursor: 'pointer', userSelect: 'none' }, onClick: function () { toggleCollapse(it.id) } }, it._bound ? '📱 扫码绑定' : (it._new ? '🆕 新账号' : '🤖 账号')),
+              h('span', { style: { fontWeight: 800, color: 'var(--qqs-text,#171a21)', cursor: 'pointer', userSelect: 'none' }, onClick: function () { toggleCollapse(it.id) } }, it._bound ? '📱 扫码绑定' : (it._new ? '🆕 新账号' : '🤖 账号')),
               h('input', { className: 'qqs-inp', style: Object.assign({ width: 170 }, st), value: it.id, disabled: !it._new && !it._bound, onChange: function (e) { upd(i, { id: e.target.value }) }, placeholder: '实例 id(如 im-qqbot-2)' }),
               h('label', { style: { fontSize: 13, whiteSpace: 'nowrap' } },
                 h('input', { className: 'qqs-cb', type: 'checkbox', checked: !it.disabled, onChange: function (e) { upd(i, { disabled: !e.target.checked }) } }), ' 启用'),
@@ -1842,7 +1842,7 @@ window.__ModuleLoader__.load({
             (function () {
               var ws = (workspaces || []).filter(function (w) { return w.path && w.count > 0 })
               if (ws.length === 0) return null
-              return h('div', { style: { margin: '2px 0 4px', fontSize: 12, color: '#555' } },
+              return h('div', { style: { margin: '2px 0 4px', fontSize: 12, color: 'var(--qqs-text,#555)' } },
                 '📁 已有 dsh 会话的工作区(点选填入上方): ',
                 ws.map(function (w) {
                   return h('button', { key: w.dir, className: 'qqs-btn', style: { fontSize: 11, padding: '1px 8px', margin: '2px 4px 2px 0' }, onClick: function () { upd(i, { cwd: w.path }) } },
@@ -1851,33 +1851,33 @@ window.__ModuleLoader__.load({
            })())))
         }),
         h('div', { style: { position: 'relative', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', margin: '8px 0' } },
-          h('button', { className: 'qqs-btn', onClick: function () { setAddMenu(!addMenu) }, style: { borderColor: '#b197fc99', color: '#171a21', fontWeight: 700 } }, addMenu ? '✕ 关闭' : '➕ 添加账号'),
-          h('span', { style: { fontSize: 12, color: '#888' } }, '点加号选: 扫码绑定 或 手动填凭据'),
+          h('button', { className: 'qqs-btn', onClick: function () { setAddMenu(!addMenu) }, style: { borderColor: '#b197fc99', color: 'var(--qqs-text,#171a21)', fontWeight: 700 } }, addMenu ? '✕ 关闭' : '➕ 添加账号'),
+          h('span', { style: { fontSize: 12, color: 'var(--qqs-text2,#888)' } }, '点加号选: 扫码绑定 或 手动填凭据'),
           (addMenu
             ? h('div', { style: { position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 60, minWidth: 280, background: 'var(--qqs-card,#fff)', border: '1px solid var(--qqs-border,#d9c6ff)', borderRadius: 10, boxShadow: '0 10px 28px rgba(60,40,140,.18)', padding: 6, display: 'flex', flexDirection: 'column', gap: 4 } },
                 h('button', { className: 'qqs-btn', style: { display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', padding: '8px 10px', justifyContent: 'flex-start', background: 'var(--qqs-card-hi,#f3f0ff)', borderColor: 'var(--qqs-border,#d0bfff)' }, onClick: function () { setAddMenu(false); startBind() } },
                   h('span', { style: { fontSize: 20 } }, '📱'),
                   h('span', null,
-                    h('b', { style: { color: '#171a21' } }, '扫码绑定新机器人'),
-                    h('div', { style: { fontSize: 11, color: '#777' } }, '推荐 — 手机 QQ 扫码自动填凭据'))),
+                    h('b', { style: { color: 'var(--qqs-text,#171a21)' } }, '扫码绑定新机器人'),
+                    h('div', { style: { fontSize: 11, color: 'var(--qqs-text2,#777)' } }, '推荐 — 手机 QQ 扫码自动填凭据'))),
                 h('button', { className: 'qqs-btn', style: { display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', padding: '8px 10px', justifyContent: 'flex-start' }, onClick: function () { setAddMenu(false); addBlank() } },
                   h('span', { style: { fontSize: 20 } }, '✍️'),
                   h('span', null,
-                    h('b', { style: { color: '#171a21' } }, '手动新建账号'),
-                    h('div', { style: { fontSize: 11, color: '#777' } }, '自己填写 AppID / AppSecret'))))
+                    h('b', { style: { color: 'var(--qqs-text,#171a21)' } }, '手动新建账号'),
+                    h('div', { style: { fontSize: 11, color: 'var(--qqs-text2,#777)' } }, '自己填写 AppID / AppSecret'))))
             : null)),
         h('div', { style: { ...sectionTitle, marginTop: 16, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
           '② Agent 预设(人格库)',
-          h('button', { className: 'qqs-btn', style: { fontSize: 12, padding: '2px 10px', borderColor: '#2b8a3e99', color: '#171a21' }, onClick: function () { setCopy({ fromStandard: true, sourceId: 'standard' }); setCopyId(''); setCopyName('') } }, '➕ 从标准模式新建(带QQ工具)')),
-        h('p', { style: { fontSize: 12, color: '#888' } }, PRESET_HINT),
+          h('button', { className: 'qqs-btn', style: { fontSize: 12, padding: '2px 10px', borderColor: '#2b8a3e99', color: 'var(--qqs-text,#171a21)' }, onClick: function () { setCopy({ fromStandard: true, sourceId: 'standard' }); setCopyId(''); setCopyName('') } }, '➕ 从标准模式新建(带QQ工具)')),
+        h('p', { style: { fontSize: 12, color: 'var(--qqs-text2,#888)' } }, PRESET_HINT),
         h('p', { style: { fontSize: 12, color: '#364fc7', background: '#edf2ff', borderRadius: 6, padding: '6px 10px' } }, '💡 QQ 工具(send_media/发图等)现在由机器人会话自动挂载(2026-09-06 起), 不再依赖预设是否带标记——任意预设都能在 QQ 用; 「从标准模式新建」的副本仍会自带标记供识别。'),
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: 10, margin: '8px 0' } },
           presets.map(function (p) {
             return h('div', { key: p.id, style: { border: '1px solid #00000026', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,.5)' } },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-                h('span', { style: { fontWeight: 800, color: '#171a21' } }, p.name),
+                h('span', { style: { fontWeight: 800, color: 'var(--qqs-text,#171a21)' } }, p.name),
                 h('span', { style: { fontSize: 10, padding: '1px 6px', borderRadius: 8, color: '#fff', background: p.hasChannelTools ? '#2b8a3e' : '#5b9dff' } }, p.hasChannelTools ? 'QQ工具' : '会话自动挂载')),
-              h('div', { style: { fontSize: 12, color: '#666', margin: '4px 0' } }, 'id=' + p.id),
+              h('div', { style: { fontSize: 12, color: 'var(--qqs-text2,#666)', margin: '4px 0' } }, 'id=' + p.id),
               h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
                 h('button', { className: 'qqs-btn', style: { padding: '2px 10px', fontSize: 12 }, onClick: function () { setCopy({ sourceId: p.id }); setCopyId(''); setCopyName('') } }, '复制'),
                 h('button', { className: 'qqs-btn', style: { padding: '2px 10px', fontSize: 12, borderColor: '#1971c299' }, onClick: function () { openPresetEditor(p) } }, '✏️ 人格'),
@@ -1904,7 +1904,7 @@ window.__ModuleLoader__.load({
             (editMsg ? h('p', { style: { fontSize: 12, color: '#ffa94d', margin: '4px 0' } }, editMsg) : null),
             h('div', { style: { textAlign: 'right', marginTop: 8 } },
               h('button', { className: 'qqs-btn', onClick: function () { if (!editBusy) setEditP(null) }, style: { marginRight: 8 } }, '关闭'),
-              (editP.writable === false ? null : h('button', { className: 'qqs-btn', onClick: saveEditFile, disabled: editBusy || editP.writable === undefined, style: { borderColor: '#2f9e4499', color: '#171a21' } }, editBusy ? '保存中…' : '💾 保存')))))
+              (editP.writable === false ? null : h('button', { className: 'qqs-btn', onClick: saveEditFile, disabled: editBusy || editP.writable === undefined, style: { borderColor: '#2f9e4499', color: 'var(--qqs-text,#171a21)' } }, editBusy ? '保存中…' : '💾 保存')))))
         : null,
         bind ? h('div', { style: { position: 'fixed', inset: 0, background: '#000c', zIndex: 999, display: 'flex', alignItems: 'center', justifyContent: 'center' } },
           h('div', { className: 'qqs-modal', style: { background: '#22252e', color: '#e8e8e8', borderRadius: 12, padding: 14, maxWidth: 620, width: '94%' }, onClick: function (e) { e.stopPropagation() } },
