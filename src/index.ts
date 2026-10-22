@@ -7,6 +7,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, EditableConfigSchema, type EditableConfig, type ImQQBotConfig } from './config.js';
 import { bootstrapGateway } from './gateway/index.js';
@@ -48,7 +49,9 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   //   entry.js（包入口）已拦住"缺 dist"；这里补查"import 成功但功能不全"
   //   （缺前端 / 缺配置桥 / 缺 patch —— 常见于"从 GitHub 直装但没跑构建"）。
   try {
-    const here = new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');   // → .../dist/
+    // 2026-10-22 修(GitHub issue #15)：URL.pathname 不解码，路径含空格时变成 %20，
+    //   existsSync 必然 false ⇒ 误报"安装不完整"。改走 fileURLToPath。
+    const here = fileURLToPath(new URL('.', import.meta.url));   // → .../dist/
     const pkgRoot = here.replace(/[\\/]dist[\\/]?$/, '');
     const expect = ['client/qqbot-settings.js', 'settings-host.js', 'cordis.patch.yml'];
     const miss = expect.filter((r) => !existsSync(pkgRoot + '/' + r));
