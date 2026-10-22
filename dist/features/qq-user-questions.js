@@ -433,11 +433,11 @@ export class QqUserQuestionsController {
             return false;
         if (parsedAnswer.kind === 'option') {
             await this.receipt(replyTarget, `已选择：${parsedAnswer.labels.join(' / ')}`);
-            this.settleAnswer(target, { selected: parsedAnswer.labels });
+            this.settleAnswer(target, { selected: parsedAnswer.labels, by: sender });
         }
         else {
             await this.receipt(replyTarget, `已回复：${parsedAnswer.text}`);
-            this.settleAnswer(target, { selected: [], custom: parsedAnswer.text });
+            this.settleAnswer(target, { selected: [], custom: parsedAnswer.text, by: sender });
         }
         return true;
     }
@@ -485,10 +485,10 @@ export class QqUserQuestionsController {
             return { ok: false, msg: '没看到回答内容' };
         const head = target.total > 1 ? `第 ${target.index}/${target.total} 问：` : '';
         if (parsedAnswer.kind === 'option') {
-            this.settleAnswer(target, { selected: parsedAnswer.labels });
+            this.settleAnswer(target, { selected: parsedAnswer.labels, by: sender });
             return { ok: true, msg: `${head}已选择：${parsedAnswer.labels.join(' / ')}` };
         }
-        this.settleAnswer(target, { selected: [], custom: parsedAnswer.text });
+        this.settleAnswer(target, { selected: [], custom: parsedAnswer.text, by: sender });
         return { ok: true, msg: `${head}已回复：${parsedAnswer.text}` };
     }
     /** interaction 回调: data = q:<qid>:<token>:<idx> → 按选项 label 组 answer; 仅发起者本人可答 */
@@ -602,7 +602,7 @@ export class QqUserQuestionsController {
             this.sender.sendMarkdown(replyTarget, `已选择：${label}`).catch(() => undefined);
         }
         catch { /* ignore */ }
-        this.settleAnswer(item, { selected: [label] });
+        this.settleAnswer(item, { selected: [label], by: presser });
         return true;
     }
     /** 回执(QQ 直发, 失败不影响结算) */
@@ -679,9 +679,10 @@ export class QqUserQuestionsController {
                 : (a.custom !== undefined && a.custom !== ''
                     ? a.custom
                     : (a.selected.length > 0 ? a.selected.join(' / ') : '未选'));
-            return `「${qOf(qid, i)}」→ ${shown}`;
+            const byTag = a?.by ? (a.by === 'web' ? '（Web 浮层作答）' : `（由 <@${a.by}> 作答）`) : '';
+            return `「${qOf(qid, i)}」→ ${shown}${byTag}`;
         });
-        const text = `[提问卡片·回执] 你之前发出的提问有结果了(后台送达)：\n${lines.join('\n')}`;
+        const text = `[提问卡片·回执] 你之前发出的提问有结果了(后台送达, 已标注实际作答人)：\n${lines.join('\n')}`;
         const agent = rec.agent;
         if (!agent) {
             this.logger.warn('[qq-questions] 答案投递失败: 该会话 agent 已不可用');
@@ -743,7 +744,7 @@ export class QqUserQuestionsController {
         const label = item.opts[optIdx]?.label;
         if (!label)
             return { ok: false, msg: '无效选项' };
-        this.settleAnswer(item, { selected: [label] });
+        this.settleAnswer(item, { selected: [label], by: 'web' });
         return { ok: true, msg: `已选择：${label}` };
     }
     dispose() {

@@ -72,6 +72,7 @@ interface PendingGroup {
     answers: Map<string, {
         selected: string[];
         custom?: string;
+        by?: string;
     }>;
     resolve: (ans: unknown) => void;
     timer: ReturnType<typeof setTimeout>;

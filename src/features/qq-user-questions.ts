@@ -84,7 +84,7 @@ interface PendingGroup {
   /** 该批问题的 qid 顺序(resolve 时按此顺序出答案) */
   qids: string[];
   /** qid → 已收答案 */
-  answers: Map<string, { selected: string[]; custom?: string }>;
+  answers: Map<string, { selected: string[]; custom?: string; by?: string }>;
   resolve: (ans: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
   /** 该批占用的 pending key(收尾清理用) */
@@ -545,10 +545,10 @@ export class QqUserQuestionsController {
 
     if (parsedAnswer.kind === 'option') {
       await this.receipt(replyTarget, `已选择：${parsedAnswer.labels.join(' / ')}`);
-      this.settleAnswer(target, { selected: parsedAnswer.labels });
+      this.settleAnswer(target, { selected: parsedAnswer.labels, by: sender });
     } else {
       await this.receipt(replyTarget, `已回复：${parsedAnswer.text}`);
-      this.settleAnswer(target, { selected: [], custom: parsedAnswer.text });
+      this.settleAnswer(target, { selected: [], custom: parsedAnswer.text, by: sender });
     }
     return true;
   }
@@ -593,10 +593,10 @@ export class QqUserQuestionsController {
     if (!parsedAnswer) return { ok: false, msg: '没看到回答内容' };
     const head = target.total > 1 ? `第 ${target.index}/${target.total} 问：` : '';
     if (parsedAnswer.kind === 'option') {
-      this.settleAnswer(target, { selected: parsedAnswer.labels });
+      this.settleAnswer(target, { selected: parsedAnswer.labels, by: sender });
       return { ok: true, msg: `${head}已选择：${parsedAnswer.labels.join(' / ')}` };
     }
-    this.settleAnswer(target, { selected: [], custom: parsedAnswer.text });
+    this.settleAnswer(target, { selected: [], custom: parsedAnswer.text, by: sender });
     return { ok: true, msg: `${head}已回复：${parsedAnswer.text}` };
   }
 
@@ -702,7 +702,7 @@ export class QqUserQuestionsController {
     const label = item.opts[idx]?.label ?? '';
     if (!label) return false;
     try { this.sender.sendMarkdown(replyTarget, `已选择：${label}`).catch(() => undefined); } catch { /* ignore */ }
-    this.settleAnswer(item, { selected: [label] });
+    this.settleAnswer(item, { selected: [label], by: presser });
     return true;
   }
 
@@ -712,7 +712,7 @@ export class QqUserQuestionsController {
   }
 
   /** 结算单个问题: 写进组, 该批全部答完 → 一次交回宿主 */
-  private settleAnswer(item: PendingItem, ans: { selected: string[]; custom?: string }): void {
+  private settleAnswer(item: PendingItem, ans: { selected: string[]; custom?: string; by?: string }): void {
     for (const [k, v] of this.pending) {
       if (v === item) {
         this.pending.delete(k);
@@ -773,9 +773,10 @@ export class QqUserQuestionsController {
         : (a.custom !== undefined && a.custom !== ''
           ? a.custom
           : (a.selected.length > 0 ? a.selected.join(' / ') : '未选'));
-      return `「${qOf(qid, i)}」→ ${shown}`;
+      const byTag = a?.by ? (a.by === 'web' ? '（Web 浮层作答）' : `（由 <@${a.by}> 作答）`) : '';
+      return `「${qOf(qid, i)}」→ ${shown}${byTag}`;
     });
-    const text = `[提问卡片·回执] 你之前发出的提问有结果了(后台送达)：\n${lines.join('\n')}`;
+    const text = `[提问卡片·回执] 你之前发出的提问有结果了(后台送达, 已标注实际作答人)：\n${lines.join('\n')}`;
     const agent = rec.agent as { inject?: (m: unknown) => void; followup?: (m: unknown) => void } | undefined;
     if (!agent) {
       this.logger.warn('[qq-questions] 答案投递失败: 该会话 agent 已不可用');
@@ -835,7 +836,7 @@ export class QqUserQuestionsController {
     if (!item) return { ok: false, msg: '该问题不存在或已过期' };
     const label = item.opts[optIdx]?.label;
     if (!label) return { ok: false, msg: '无效选项' };
-    this.settleAnswer(item, { selected: [label] });
+    this.settleAnswer(item, { selected: [label], by: 'web' });
     return { ok: true, msg: `已选择：${label}` };
   }
 
