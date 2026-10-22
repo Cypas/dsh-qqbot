@@ -1,5 +1,26 @@
 ## [1.10.14] - 2026-10-20
 
+## 1.10.21 (2026-10-22)
+
+### 修复（设置页“卡在保存中” + 扫码自动保存不生效）
+
+1) **卡在「保存中…」**：账号保存函数为了支持“扫码后自动保存”加了 `listOverride` 参数，
+   而保存按钮仍是 `onClick: save` —— React 会把 **MouseEvent** 当第一个参数传进来，
+   于是 `listOverride.filter(...)` 抛 TypeError，`busy` 永远停在 save，界面无限转圈。
+   改为只接受数组（`Array.isArray`），其余一律回落到当前 `insts`。
+
+2) **扫码自动保存不生效**：`autoSaveAfterBind` 里先 `setBusy("")` 再 `save(list)`，
+   但 React state 是异步的，`save()` 开头 `if (busy) return` 读到的还是旧值 ⇒ 直接 return。
+   改为 `save(list, true)` 走 force 分支，绕过 busy 检查。
+
+3) **settings-host.js 回滚到 1.10.16 原版**：先前为接入宿主 `profileContext` 改动了
+   `resolveProfileRoot` / 惰性求值等，引入了 TDZ 与类型问题，导致保存请求挂起。
+   该文件整体退回已验证可用的版本；`index.ts` / `shared/utils.ts` 里的注入保留
+   （只写 globalThis，不参与保存链路，未来可用）。
+
+### 保留
+- 定时任务以 `source.kind = subagent-settled` 注入，前端渲染成「子任务状态更新」系统卡片。
+
 ## 1.10.20 (2026-10-22)
 
 ### 修复（issue #14 / #15：生成式安装下凭据写错 profile，表现为「一直连不上」）

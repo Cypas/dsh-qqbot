@@ -1299,7 +1299,7 @@ window.__ModuleLoader__.load({
         setTimeout(function () {
           try {
             setBusy('')
-            save(list)
+            save(list, true)
           } catch (e) {
             setMsg('扫码成功但自动保存失败: ' + (e && e.message ? e.message : e) + ' —— 请手动点保存')
           }
@@ -1671,9 +1671,13 @@ window.__ModuleLoader__.load({
         setInsts(next)
         return next
       }
-      function save(listOverride) {
-        if (busy) return
+      function save(listOverride, force) { SAVEOVERRIDE
+        if (busy && force !== true) return
         setBusy('save'); setMsg('保存中…')
+        // ⚠️ 2026-10-22 修(卡在「保存中」的根因)：保存按钮写的是 onClick: save，React 会把
+        //   MouseEvent 当第一个参数传进来；如果直接当列表用，.filter 会抛 TypeError，
+        //   busy 永远停在 save ⇒ 界面一直转圈。只接受数组，其余一律回落到当前 insts。
+        if (!Array.isArray(listOverride)) listOverride = null
         var list = (listOverride || insts || []).filter(function (x) { return x.id && (x.appId || x.appSecret || x.hasSecret || !x._new || x._bound) })
         // 空账号(全空且没绑定)不保存; 全新手动号若两凭据都空则提示(hasSecret=已保存的账号不算空)
         var blanks = list.filter(function (x) { return !x.appSecret && !x.hasSecret && !x._bound })

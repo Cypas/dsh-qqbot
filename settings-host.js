@@ -29,10 +29,6 @@ const NS = 'im-qqbot';
  * 本文件被从源码目录加载), 则扫描 ~/.dsh/profiles/* 找装着 @zaofan/dsh-qqbot 的 profile。
  */
 function resolveProfileRoot() {
-  // 2026-10-22（issue #14 建议 1）：宿主经 profileContext 直接给了 profile 目录就用它，
-  //   别再从代码位置/目录扫描去猜（生成式安装下上溯 3 级会落到 .generations/live/<gen>）。
-  const fromCtx = (globalThis.__dshProfileDir ?? '').trim();
-  if (fromCtx) { try { return fromCtx; } catch { /* 回落 */ } }
   // 2026-10-20 修(GitHub issue #14): 生成式安装(dsh-market / DSH Desktop)下,
   //   "包根上溯 3 级"得到的是 profiles/.generations/live/<pkg>, 不是 profile 根;
   //   且 Desktop 的 DSH_HOME 在 %APPDATA%dsh-desktopharness, 原兜底写死 ~/.dsh 扫不到。
@@ -59,31 +55,24 @@ function resolveProfileRoot() {
   roots.push(join(homedir(), '.dsh', 'profiles'));
   for (const base of roots) {
     try {
-      // 2026-10-22 修(GitHub issue #15)：原来"第一个有 cordis.patch.yml 的就用"——
-      //   readdirSync 是字母序，desktop-safe-mode 排在 web 前且也有 patch ⇒ 面板把凭据
-      //   写进了没在运行的 profile（web 才是真跑的那个），表现就是"一直连不上"。
-      //   改为**两轮扫描：先只认装了本插件的 profile**，都没有才退回 patch 判据。
-      const names = readdirSync(base);
-      const dirs = [];
-      for (const name of names) {
+      for (const name of readdirSync(base)) {
         const prof = resolve(base, name);
-        try { if (statSync(prof).isDirectory()) dirs.push(prof); } catch { /* 跳过 */ }
-      }
-      // 第一轮：装了 @zaofan/dsh-qqbot 的 profile（= 真正在跑插件的那个）
-      for (const prof of dirs) {
+        try {
+          if (!statSync(prof).isDirectory()) continue;
+        } catch { continue; }
+        try {
+          if (existsSync(join(prof, 'cordis.patch.yml'))) return prof;
+        } catch { /* 走下一判据 */ }
         try {
           if (existsSync(join(prof, 'node_modules', '@zaofan', 'dsh-qqbot'))) return prof;
-        } catch { /* 下一判据 */ }
+        } catch { /* 走下一判据 */ }
         try {
           const pkg = JSON.parse(readFileSync(join(prof, 'package.json'), 'utf8'));
           const blob = JSON.stringify(pkg.dsh?.profile?.bundles ?? []) + JSON.stringify(pkg.dependencies ?? {});
           if (blob.includes('@zaofan/dsh-qqbot')) return prof;
-        } catch { /* 无 package.json */ }
+        } catch { /* 无 package.json, 跳过 */ }
       }
-      // 第二轮：退化为"有 cordis.patch.yml"（老行为，仅当第一轮全落空时）
-      for (const prof of dirs) {
-        try { if (existsSync(join(prof, 'cordis.patch.yml'))) return prof; } catch { /* 跳过 */ }
-      }    } catch { /* 该 profiles 根不存在 */ }
+    } catch { /* 该 profiles 根不存在 */ }
   }
   return byLocation;
 }
