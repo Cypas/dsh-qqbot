@@ -48,7 +48,7 @@ window.__ModuleLoader__.load({
         padding: size === 'sm' ? '2px 10px' : '4px 14px', fontSize: size === 'sm' ? 12 : 13, lineHeight: '20px', whiteSpace: 'nowrap',
         transition: 'background .15s, border-color .15s, color .15s',
       }
-      if (variant === 'primary') return { ...base, background: T.primaryBg, color: T.primary, borderColor: T.primaryBorder, fontWeight: 600 }
+      if (variant === 'primary') return { ...base, background: T.primaryBg, color: 'var(--qqs-primary-fg,#6b5ae6)', borderColor: T.primaryBorder, fontWeight: 600 }
       if (variant === 'danger') return { ...base, background: T.dangerBg, color: T.danger, borderColor: '#f7656044', fontWeight: 600 }
       if (variant === 'ghost') return { ...base, background: 'transparent', color: T.text2 }
       return { ...base, background: T.card, color: T.text }
@@ -1936,7 +1936,7 @@ var QQS_THEME_CSS = [
   '--qqs-text:#1f2329;--qqs-text2:#4e5560;--qqs-text3:#8a919c;',
   '--qqs-panel:#ffffff;--qqs-toolbar:#f7f8fa;--qqs-input:#ffffff;',
   '--qqs-dock-panel:#ffffff;--qqs-dock-body:#f5f6f8;--qqs-bubble-in:#ffffff;',
-  '--qqs-primary-bg:#7c6cf01a;--qqs-primary-border:#7c6cf04d;--qqs-warn-bg:#fff5f0;',
+  '--qqs-primary-bg:#7c6cf01a;--qqs-primary-border:#7c6cf04d;--qqs-primary-fg:#6b5ae6;--qqs-warn-bg:#fff5f0;',
   '}',
   // 暗色：宿主 ThemePresenter 在 scheme==='dark' 时给 body 加这个属性、切主题时自动增删
   'body[data-ds-dark-theme]{',
@@ -1945,7 +1945,7 @@ var QQS_THEME_CSS = [
   '--qqs-text:#e8eaf0;--qqs-text2:#c3cad6;--qqs-text3:#a3abb9;',
   '--qqs-panel:#232834;--qqs-toolbar:#272d3a;--qqs-input:#2b3140;',
   '--qqs-dock-panel:#232834;--qqs-dock-body:#1e232e;--qqs-bubble-in:#2b3140;',
-  '--qqs-primary-bg:#7c6cf033;--qqs-primary-border:#7c6cf080;--qqs-warn-bg:#3a2a20;',
+  '--qqs-primary-bg:#7c6cf033;--qqs-primary-border:#7c6cf080;--qqs-primary-fg:#ffffff;--qqs-warn-bg:#3a2a20;',
   '}',
 ].join('')
     function ensureCss() { try { if (!document.getElementById('qqs-css')) { var st = document.createElement('style'); st.id = 'qqs-css'; st.textContent = QQS_CSS + QQS_THEME_CSS; document.head.appendChild(st) } } catch (e) {} }
