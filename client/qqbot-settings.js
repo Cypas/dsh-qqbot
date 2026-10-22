@@ -1293,7 +1293,19 @@ window.__ModuleLoader__.load({
         setTargets(list)
       }
       // 保存: 整表(行→分组已实时同步)全量 patch
-      function save() {
+      // 2026-10-22（主人定）：扫码拿到凭据后自动保存，用户不用再手动点「保存」
+      function autoSaveAfterBind(list) {
+        setMsg('💾 自动保存中…')
+        setTimeout(function () {
+          try {
+            setBusy('')
+            save(list)
+          } catch (e) {
+            setMsg('扫码成功但自动保存失败: ' + (e && e.message ? e.message : e) + ' —— 请手动点保存')
+          }
+        }, 150)
+      }
+      function save(listOverride) {
         setMsg('保存中…')
         var v = cfg || {}
         var patch = {
@@ -1450,7 +1462,10 @@ window.__ModuleLoader__.load({
           jobs !== null && jobs.length === 0 ? h('p', { style: { color: '#888', padding: 14, textAlign: 'center', fontSize: T.fsSm } }, '还没有这类提醒。去 QQ 里让她安排一个,就会出现在这里。') : null,
           (jobs || []).map(function (j) {
             var disabled = busyId === j.id
-            var deadGroup = j.scope === 'group' && !isGroupAlive(j.peerId)
+            // 2026-10-22 修：台账（groups.json / known-chats）只是本地缓存，可能为空或滞后，
+            //   查不到 openid ≠ 群不存在（实测：群正常、定时任务照发，却被标红“群已失效”）。
+            //   故不再据此标失效；真要判定需调 QQ API 探测。
+            var deadGroup = false
             return h('div', { key: j.id, style: { border: '1px solid ' + (deadGroup ? T.danger + '88' : (j.enabled ? T.border : '#ffa94d66')), borderRadius: T.radius, padding: '8px 10px', margin: '6px 0', background: '#fff', opacity: j.enabled ? 1 : 0.72 } },
               h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
                 chip(j.kind),
@@ -1652,12 +1667,14 @@ window.__ModuleLoader__.load({
         var used = new Set((insts || []).map(function (x) { return x.id }))
         var n = 2
         while (used.has(base + '-' + n)) n += 1
-        setInsts(function (list) { return (list || []).concat([{ id: base + '-' + n, appId: cred.appId, appSecret: cred.appSecret, preset: '', cwd: '', disabled: false, _bound: true }]) })
+        var next = (insts || []).concat([{ id: base + '-' + n, appId: cred.appId, appSecret: cred.appSecret, preset: '', cwd: '', disabled: false, _bound: true }])
+        setInsts(next)
+        return next
       }
-      function save() {
+      function save(listOverride) {
         if (busy) return
         setBusy('save'); setMsg('保存中…')
-        var list = (insts || []).filter(function (x) { return x.id && (x.appId || x.appSecret || x.hasSecret || !x._new || x._bound) })
+        var list = (listOverride || insts || []).filter(function (x) { return x.id && (x.appId || x.appSecret || x.hasSecret || !x._new || x._bound) })
         // 空账号(全空且没绑定)不保存; 全新手动号若两凭据都空则提示(hasSecret=已保存的账号不算空)
         var blanks = list.filter(function (x) { return !x.appSecret && !x.hasSecret && !x._bound })
         if (blanks.length && !window.confirm('有 ' + blanks.length + ' 个账号没填 appSecret(不填的会被保存为只有骨架的实例, 可能启动就弹扫码)。继续?')) { setBusy(''); return }
@@ -1696,8 +1713,9 @@ window.__ModuleLoader__.load({
             fetch(API_BIND + '/poll?id=' + encodeURIComponent(b.id)).then(function (r) { return r.json() }).then(function (p) {
               if (p.status === 'done') {
                 clearInterval(pollRef.current); pollRef.current = null
-                addBound({ appId: p.appId, appSecret: p.appSecret })
-                setMsg('🎉 扫码绑定成功! 平台下发的 AppID/Secret 已填好, 起个名字保存即可')
+                var nextList = addBound({ appId: p.appId, appSecret: p.appSecret })
+                setTimeout(function () { autoSaveAfterBind(nextList) }, 200)
+                setMsg('🎉 扫码成功, 正在自动保存…')
                 setBind(null)
               } else if (p.status === 'error') {
                 clearInterval(pollRef.current); pollRef.current = null

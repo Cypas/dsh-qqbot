@@ -910,7 +910,7 @@ export async function bootstrapGateway(
             scheduleInFlight.add(job.id);
             void (async () => {
               try {
-                const ok = await manager.injectToPeer(job.scope, job.peerId, `[定时任务] ${job.prompt}`);
+                const ok = await manager.injectToPeer(job.scope, job.peerId, `[定时任务] ${job.prompt}`, 'subagent-settled');
                 if (ok) {
                   scheduleMissed.delete(job.id);
                   store.markDone(job.id);

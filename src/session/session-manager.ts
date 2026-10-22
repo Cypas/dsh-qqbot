@@ -1369,14 +1369,14 @@ export class SessionManager {
    * 定时/主动注入: 向某会话塞一条新消息(像收到新消息, AI 带上下文处理并回复到 QQ)。
    * 会话当前不在(被回收/未建立)→ 返回 false, 由调用方决定(计数/跳过)。
    */
-  async injectToPeer(scope: ChatScope, peerId: string, text: string): Promise<boolean> {
+  async injectToPeer(scope: ChatScope, peerId: string, text: string, sourceKind?: string): Promise<boolean> {
     const key = this.sessionKey(scope, peerId);
     const record = this.sessions.get(key);
     if (!record) return false;
     try {
       const message = createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'user' },
+        source: (sourceKind && sourceKind !== 'user' ? { kind: sourceKind } : { kind: 'user' }) as never,
       });
       record.agent.followup(message);
       record.lastActivity = Date.now();

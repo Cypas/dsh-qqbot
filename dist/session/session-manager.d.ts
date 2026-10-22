@@ -197,7 +197,7 @@ export declare class SessionManager {
      * 定时/主动注入: 向某会话塞一条新消息(像收到新消息, AI 带上下文处理并回复到 QQ)。
      * 会话当前不在(被回收/未建立)→ 返回 false, 由调用方决定(计数/跳过)。
      */
-    injectToPeer(scope: ChatScope, peerId: string, text: string): Promise<boolean>;
+    injectToPeer(scope: ChatScope, peerId: string, text: string, sourceKind?: string): Promise<boolean>;
     remove(scope: ChatScope, peerId: string): Promise<void>;
     disposeAll(): Promise<void>;
     get size(): number;
