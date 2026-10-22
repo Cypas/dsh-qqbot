@@ -1927,7 +1927,7 @@ window.__ModuleLoader__.load({
         props && props.close ? h('button', { className: 'qqs-btn', onClick: props.close, style: { float: 'right', marginTop: 6 } }, '完成') : null)
     }
 
-var QQS_CSS = ".qqs-btn{font:inherit;color:var(--qqs-text,#1f2329);background:var(--qqs-card,#fff);border:1px solid var(--qqs-border,#d0d5dd);border-radius:9px;padding:5px 13px;cursor:pointer;transition:all .15s}.qqs-btn:hover{background:var(--qqs-card-hi,#fafafa);border-color:#7c6cf0;color:#7c6cf0}.qqs-btn:active{transform:translateY(1px)}.qqs-inp,.qqs-area{font:inherit;color:var(--qqs-text,#1f2329);background:var(--qqs-input,#fff);border:1px solid var(--qqs-border,#d0d5dd);border-radius:9px;padding:5px 10px;outline:none;transition:border-color .15s}.qqs-inp::placeholder,.qqs-area::placeholder{color:var(--qqs-text3,#9aa1ab)}.qqs-inp:focus,.qqs-area:focus{border-color:#7c6cf0;box-shadow:0 0 0 2px #7c6cf033}.qqs-cb{accent-color:#7c6cf0;width:15px;height:15px}.qqs-card{transition:box-shadow .15s,border-color .15s}.qqs-card:hover{box-shadow:0 2px 10px #0002}.qqs-panel{background:var(--qqs-panel,#fff);border:1px solid var(--qqs-border,#e2e5ea);border-radius:16px;padding:16px;box-shadow:0 10px 34px #0002}.qqs-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--qqs-toolbar,#f7f8fa);border:1px solid var(--qqs-border,#e2e5ea);border-radius:12px;padding:8px 10px;margin-bottom:10px}.qqs-modal{background:var(--qqs-panel,#fff);color:var(--qqs-text,#1f2329)}"
+var QQS_CSS = ".qqs-btn{font:inherit;color:var(--qqs-text,#1f2329);background:var(--qqs-card,#fff);border:1px solid var(--qqs-border,#d0d5dd);border-radius:9px;padding:5px 13px;cursor:pointer;transition:all .15s}.qqs-btn:hover{background:var(--qqs-card-hi,#fafafa);border-color:#7c6cf0;color:#7c6cf0}.qqs-btn:active{transform:translateY(1px)}.qqs-inp,.qqs-area{font:inherit;color:var(--qqs-text,#1f2329);background:var(--qqs-input,#fff);border:1px solid var(--qqs-border,#d0d5dd);border-radius:9px;padding:5px 10px;outline:none;transition:border-color .15s}.qqs-inp::placeholder,.qqs-area::placeholder{color:var(--qqs-text3,#9aa1ab)}.qqs-inp:focus,.qqs-area:focus{border-color:#7c6cf0;box-shadow:0 0 0 2px #7c6cf033}.qqs-cb{accent-color:#7c6cf0;width:15px;height:15px}.qqs-card{transition:box-shadow .15s,border-color .15s}.qqs-card:hover{box-shadow:0 2px 10px #0002}.qqs-panel{background:var(--qqs-panel,#fff);border:1px solid var(--qqs-border,#e2e5ea);border-radius:16px;padding:16px;box-shadow:0 10px 34px #0002;color:var(--qqs-text,#1f2329)}.qqs-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--qqs-toolbar,#f7f8fa);border:1px solid var(--qqs-border,#e2e5ea);border-radius:12px;padding:8px 10px;margin-bottom:10px}.qqs-modal{background:var(--qqs-panel,#fff);color:var(--qqs-text,#1f2329)}"
 var QQS_THEME_CSS = [
   // 亮色（默认）：挂在 body 上，宿主切换主题时不需要我们做任何 JS
   'body{',
@@ -1937,6 +1937,10 @@ var QQS_THEME_CSS = [
   '--qqs-panel:#ffffff;--qqs-toolbar:#f7f8fa;--qqs-input:#ffffff;',
   '--qqs-dock-panel:#ffffff;--qqs-dock-body:#f5f6f8;--qqs-bubble-in:#ffffff;',
   '--qqs-primary-bg:#7c6cf01a;--qqs-primary-border:#7c6cf04d;--qqs-primary-fg:#6b5ae6;--qqs-warn-bg:#fff5f0;',
+  // 兜底：插件容器内所有继承文字都用 token 色（原来 h2/h3/b 继承浏览器默认黑）
+  '.qqs-panel,.qqs-toolbar,.qqs-modal,.qqs-card,.qqs-grp{color:var(--qqs-text,#1f2329)}',
+  // 暗色下再把「默认色」也掰过来，防止有元素挂在 qqs-* 容器之外
+  'body[data-ds-dark-theme] .qqs-panel,body[data-ds-dark-theme] .qqs-toolbar,body[data-ds-dark-theme] .qqs-modal,body[data-ds-dark-theme] .qqs-card{color:var(--qqs-text,#e8eaf0)}',
   '}',
   // 暗色：宿主 ThemePresenter 在 scheme==='dark' 时给 body 加这个属性、切主题时自动增删
   'body[data-ds-dark-theme]{',
