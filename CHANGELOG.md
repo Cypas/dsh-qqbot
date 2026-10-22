@@ -1,5 +1,28 @@
 ## [1.10.14] - 2026-10-20
 
+## 1.10.22 (2026-10-22)
+
+### 修复 issue #14 / #15（生成式安装 / 多 profile 下“找不到 cordis.patch.yml”“一直连不上”）
+
+换了一条**不碰保存链路**的实现方式：
+
+`index.ts` 启动时从宿主拿 `ctx.get("profileContext")`，把结果**回写成环境变量**：
+
+```js
+process.env.DSH_PROFILE = pc.name;        // -> "web"
+process.env.DSH_PROFILE_DIR = pc.dir;     // -> C:\Users\<u>\.dsh\profiles\web
+```
+
+因为 `resolveProfileRoot()` 与 `resolveProfileName()` 的**第一优先级本来就是读这两个环境变量**，
+所以 `settings-host.js` 一行逻辑都不用改（已回滚到 1.10.16 原版），
+却能在生成式安装（`.generations/live/...`）与多 profile 并存（`desktop-safe-mode` 抢位）时命中正确 profile。
+
+宿主没有 `profileContext`（老版本）时静默跳过，行为与之前完全一致。
+
+### 说明
+- 上一版（1.10.18-1.10.20）曾直接改 `settings-host.js` 的 profile 推断，引入过 TDZ 与类型问题，
+  导致保存请求挂起；那些改动已全部回滚，本版只动启动期的一次性写入。
+
 ## 1.10.21 (2026-10-22)
 
 ### 修复（设置页“卡在保存中” + 扫码自动保存不生效）

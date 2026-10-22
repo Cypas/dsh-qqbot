@@ -47,6 +47,16 @@ export async function apply(ctx, config) {
             if (pc.name)
                 globalThis.__dshProfileName = pc.name;
             const dir = pc.dir || pc.root || pc.path;
+            // ★ 关键：把宿主给的值回写成环境变量 —— resolveProfileRoot() / resolveProfileName() 的
+            //   **第一优先级就是这两个环境变量**，所以不用改 settings-host.js 任何一行逻辑，
+            //   老宿主/新宿主都能命中正确 profile（生成式安装下也不会再落到 .generations 或 desktop-safe-mode）。
+            try {
+                if (pc.name)
+                    process.env.DSH_PROFILE = String(pc.name);
+                if (dir)
+                    process.env.DSH_PROFILE_DIR = String(dir);
+            }
+            catch { /* 环境变量只读时忽略 */ }
             if (dir)
                 globalThis.__dshProfileDir = dir;
             logger.debug?.('[profile] 来自宿主 profileContext: name=' + (pc.name || '?') + ' dir=' + (dir || '?'));
