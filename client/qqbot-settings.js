@@ -1870,10 +1870,10 @@ window.__ModuleLoader__.load({
           '② Agent 预设(人格库)',
           h('button', { className: 'qqs-btn', style: { fontSize: 12, padding: '2px 10px', borderColor: '#2b8a3e99', color: 'var(--qqs-text,#171a21)' }, onClick: function () { setCopy({ fromStandard: true, sourceId: 'standard' }); setCopyId(''); setCopyName('') } }, '➕ 从标准模式新建(带QQ工具)')),
         h('p', { style: { fontSize: 12, color: 'var(--qqs-text2,#888)' } }, PRESET_HINT),
-        h('p', { style: { fontSize: 12, color: '#364fc7', background: '#edf2ff', borderRadius: 6, padding: '6px 10px' } }, '💡 QQ 工具(send_media/发图等)现在由机器人会话自动挂载(2026-09-06 起), 不再依赖预设是否带标记——任意预设都能在 QQ 用; 「从标准模式新建」的副本仍会自带标记供识别。'),
+        h('p', { style: { fontSize: 12, color: 'var(--qqs-text,#364fc7)', background: 'var(--qqs-preset-bg,#edf2ff)', borderRadius: 6, padding: '6px 10px' } }, '💡 QQ 工具(send_media/发图等)现在由机器人会话自动挂载(2026-09-06 起), 不再依赖预设是否带标记——任意预设都能在 QQ 用; 「从标准模式新建」的副本仍会自带标记供识别。'),
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: 10, margin: '8px 0' } },
           presets.map(function (p) {
-            return h('div', { key: p.id, style: { border: '1px solid #00000026', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,.5)' } },
+            return h('div', { key: p.id, style: { border: '1px solid var(--qqs-preset-border,#c7dbff)', borderRadius: 10, padding: '10px 12px', background: 'var(--qqs-preset-bg,#eef4ff)' } },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
                 h('span', { style: { fontWeight: 800, color: 'var(--qqs-text,#171a21)' } }, p.name),
                 h('span', { style: { fontSize: 10, padding: '1px 6px', borderRadius: 8, color: '#fff', background: p.hasChannelTools ? '#2b8a3e' : '#5b9dff' } }, p.hasChannelTools ? 'QQ工具' : '会话自动挂载')),
@@ -1937,6 +1937,7 @@ var QQS_THEME_CSS = [
   '--qqs-panel:#ffffff;--qqs-toolbar:#f7f8fa;--qqs-input:#ffffff;',
   '--qqs-dock-panel:#ffffff;--qqs-dock-body:#f5f6f8;--qqs-bubble-in:#ffffff;',
   '--qqs-primary-bg:#7c6cf01a;--qqs-primary-border:#7c6cf04d;--qqs-primary-fg:#6b5ae6;--qqs-warn-bg:#fff5f0;',
+  '--qqs-preset-bg:#eef4ff;--qqs-preset-border:#c7dbff;',
   // 兜底：插件容器内所有继承文字都用 token 色（原来 h2/h3/b 继承浏览器默认黑）
   '.qqs-panel,.qqs-toolbar,.qqs-modal,.qqs-card,.qqs-grp{color:var(--qqs-text,#1f2329)}',
   // 暗色下再把「默认色」也掰过来，防止有元素挂在 qqs-* 容器之外
@@ -1950,6 +1951,7 @@ var QQS_THEME_CSS = [
   '--qqs-panel:#232834;--qqs-toolbar:#272d3a;--qqs-input:#2b3140;',
   '--qqs-dock-panel:#232834;--qqs-dock-body:#1e232e;--qqs-bubble-in:#2b3140;',
   '--qqs-primary-bg:#7c6cf033;--qqs-primary-border:#7c6cf080;--qqs-primary-fg:#ffffff;--qqs-warn-bg:#3a2a20;',
+  '--qqs-preset-bg:#1e2b3f;--qqs-preset-border:#2f4463;',
   '}',
 ].join('')
     function ensureCss() { try { if (!document.getElementById('qqs-css')) { var st = document.createElement('style'); st.id = 'qqs-css'; st.textContent = QQS_CSS + QQS_THEME_CSS; document.head.appendChild(st) } } catch (e) {} }
