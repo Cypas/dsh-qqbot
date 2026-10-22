@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
     var wideStyle = { ...inputStyle, width: 260 }
     var fullStyle = { ...inputStyle, width: '92%', display: 'block', margin: '4px 0 8px' }
     var boxStyle = { border: '1px solid var(--qqs-border,#e5e6eb)', borderRadius: 8, padding: '10px 14px 12px', margin: '8px 0', background: 'var(--qqs-card,#fff)' }
-    var sectionTitle = { fontWeight: 600, margin: '10px 0 4px', fontSize: 14, color: '#1f2329' }
+    var sectionTitle = { fontWeight: 600, margin: '10px 0 4px', fontSize: 14, color: 'var(--qqs-text,#1f2329)' }
 
     // ── 迷你设计系统(2026-09-05 专家团定稿; 深色柔和适配宿主, 不刺眼) ──
     // 宿主 dsh web 为深色主题 → 卡片用半透明深色、文字浅色、主色用低饱和紫(贴合 #9775fa 系)
@@ -1855,7 +1855,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { fontSize: 12, color: '#888' } }, '点加号选: 扫码绑定 或 手动填凭据'),
           (addMenu
             ? h('div', { style: { position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 60, minWidth: 280, background: 'var(--qqs-card,#fff)', border: '1px solid var(--qqs-border,#d9c6ff)', borderRadius: 10, boxShadow: '0 10px 28px rgba(60,40,140,.18)', padding: 6, display: 'flex', flexDirection: 'column', gap: 4 } },
-                h('button', { className: 'qqs-btn', style: { display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', padding: '8px 10px', justifyContent: 'flex-start', background: '#f3f0ff', borderColor: '#d0bfff' }, onClick: function () { setAddMenu(false); startBind() } },
+                h('button', { className: 'qqs-btn', style: { display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', padding: '8px 10px', justifyContent: 'flex-start', background: 'var(--qqs-card-hi,#f3f0ff)', borderColor: 'var(--qqs-border,#d0bfff)' }, onClick: function () { setAddMenu(false); startBind() } },
                   h('span', { style: { fontSize: 20 } }, '📱'),
                   h('span', null,
                     h('b', { style: { color: '#171a21' } }, '扫码绑定新机器人'),
@@ -1896,7 +1896,7 @@ window.__ModuleLoader__.load({
             h('h3', { style: { marginTop: 0 } }, '✏️ 人格编辑器 — ' + editP.name + ' (' + editP.id + ')'),
             h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', margin: '2px 0 6px', flexWrap: 'wrap' } },
               h('label', { style: { fontSize: 13 } }, '文件: '),
-              h('select', { className: 'qqs-inp', style: { padding: '4px 8px', color: '#1f2329', maxWidth: 360 }, value: editFile, onChange: function (e) { pickEditFile(e.target.value) } },
+              h('select', { className: 'qqs-inp', style: { padding: '4px 8px', color: 'var(--qqs-text,#1f2329)', maxWidth: 360 }, value: editFile, onChange: function (e) { pickEditFile(e.target.value) } },
                 editFiles.map(function (fl) { return h('option', { key: fl.name, value: fl.name }, fl.name + ' (' + Math.max(1, Math.ceil(fl.size / 1024)) + 'KB)') })),
               h('span', { style: { fontSize: 12, color: editP.writable === false ? '#ffa94d' : '#7fd8a8' } }, editP.writable === false ? '🔒 只读(内置预设, 请先复制一份再改)' : (editP.writable ? '✅ 可编辑(你的副本)' : '⏳ 读取权限中…'))),
             h('p', { style: { fontSize: 12, color: '#9fb0c9', margin: '2px 0 6px' } }, '提示: agent.cordis.yml 里 persona 插件 config.text 就是人设正文; 直接整文件编辑, 保存后新会话生效。'),
