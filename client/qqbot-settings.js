@@ -1484,7 +1484,7 @@ window.__ModuleLoader__.load({
               j.prompt ? h('div', { style: { fontSize: T.fsSm, color: '#cfd3dc', background: '#ffffff0a', border: '1px solid #ffffff14', borderRadius: T.radius, padding: '4px 8px', marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-all' } }, j.prompt) : null)
           }),
           msg ? h('p', { style: { fontSize: T.fsSm, color: T.success } }, msg) : null))
-      return h('div', { style: { width: '100%' } },
+      return h('div', { style: { width: '100%', color: 'var(--qqs-text,#1f2329)' } },
         h('div', { style: { display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' } }, leftCol, rightCol),
         props && props.close ? h('button', { className: 'qqs-btn', onClick: props.close, style: { float: 'right', marginTop: 6 } }, '完成') : null)
     }
@@ -1557,7 +1557,7 @@ window.__ModuleLoader__.load({
       var acctLine = (accts && accts.length > 1) || (accts && accts.length === 1)
       return h('div', { style: { width: '100%' } },
         // ── 一级: 账号选择条(身份带) ──
-        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '2px 0 10px', padding: '6px 10px', border: '1px solid #b197fc55', borderRadius: 12, background: 'linear-gradient(90deg,#b197fc22,#b197fc0a)' } },
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '2px 0 10px', padding: '6px 10px', border: '1px solid #b197fc55', borderRadius: 12, background: 'linear-gradient(90deg,#b197fc22,#b197fc0a)', color: 'var(--qqs-text,#1f2329)' } },
           h('span', { style: { fontSize: 13, fontWeight: 800, color: '#171a21', whiteSpace: 'nowrap' } }, '🤖 正在查看:'),
           accts && accts.length > 0
             ? h('select', { className: 'qqs-inp', style: { padding: '4px 8px', fontWeight: 700 }, value: ac ? ac.id : '', onChange: function (e) { chooseAcct(e.target.value) } },
@@ -1806,7 +1806,7 @@ window.__ModuleLoader__.load({
         }).catch(function (e) { setEditBusy(false); setEditMsg('保存异常: ' + e.message) })
       }
       var st = { width: '100%', padding: '5px 8px', boxSizing: 'border-box' }
-      return h('div', { style: { maxWidth: 860, background: 'var(--qqs-card,#fff)', border: '1px solid var(--qqs-border,#e2e5ea)', borderRadius: 12, padding: '14px 16px' } },
+      return h('div', { style: { maxWidth: 860, background: 'var(--qqs-card,#fff)', border: '1px solid var(--qqs-border,#e2e5ea)', borderRadius: 12, padding: '14px 16px', color: 'var(--qqs-text,#1f2329)' } },
         h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 } },
           h('h2', { style: { margin: 0 } }, '账号与预设'),
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
@@ -1823,7 +1823,7 @@ window.__ModuleLoader__.load({
           if (selInvalid) opts.unshift({ id: it.preset, label: '⚠️ ' + it.preset + '(预设不存在, 请重选)' })
           // 默认收起: 老账号折叠, 新建(_new/_bound)展开待填; 用户手动切换后以 collapsed 为准
           var folded = collapsed[it.id] !== undefined ? !!collapsed[it.id] : (!it._new && !it._bound)
-          return h('div', { key: it.id, style: { border: '1px solid ' + (it.disabled ? '#ffa94d66' : '#00000026'), borderRadius: 10, padding: '8px 12px', margin: '8px 0', background: 'var(--qqs-card-hi,#fafafa)' } },
+          return h('div', { key: it.id, style: { border: '1px solid ' + (it.disabled ? '#ffa94d66' : '#00000026'), borderRadius: 10, padding: '8px 12px', margin: '8px 0', background: 'var(--qqs-card-hi,#fafafa)', color: 'var(--qqs-text,#1f2329)' } },
             h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
               h('button', { className: 'qqs-btn', title: folded ? '展开设置' : '收起设置', onClick: function () { toggleCollapse(it.id) }, style: { padding: '1px 7px', fontSize: 13, lineHeight: '16px', background: '#0000000d', borderColor: '#00000026' } }, folded ? '▸' : '▾'),
               h('span', { style: { fontWeight: 800, color: '#171a21', cursor: 'pointer', userSelect: 'none' }, onClick: function () { toggleCollapse(it.id) } }, it._bound ? '📱 扫码绑定' : (it._new ? '🆕 新账号' : '🤖 账号')),
