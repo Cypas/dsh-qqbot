@@ -1,5 +1,25 @@
 ## [1.10.14] - 2026-10-20
 
+## 1.10.20 (2026-10-22)
+
+### 修复（issue #14 / #15：生成式安装下凭据写错 profile，表现为「一直连不上」）
+
+实测证据（用诊断扩展工具在真机打到宿主）：
+
+    env.ctx.get("profileContext")  ->  { name: "web",
+                                        dir: "C:\\Users\\<user>\\.dsh\\profiles\\web",
+                                        patchPath: "...\\cordis.patch.yml", ... }
+    process.env.DSH_PROFILE        ->  不存在（宿主从来不传这个环境变量）
+    argv                           ->  node.exe ...\\@deepseek-ai\\dsh\\lib\\bin.js web
+
+- 优先使用宿主 profileContext：index.ts 启动时取 name / dir / patchPath 写进 globalThis；
+  resolveProfileName()（读写凭据用）与 settings-host.js 的 resolveProfileRoot()（面板写凭据用）
+  都先读它，读不到才回落原有推断链（环境变量 -> 代码位置 -> 目录扫描）。
+- 根因回顾：面板侧原来按「profiles 目录里第一个有 cordis.patch.yml 的」选 profile，
+  readdirSync 字母序让 desktop-safe-mode 抢在 web 前面，于是凭据写进了没在运行的 profile。
+- 启动误报「安装不完整」：URL.pathname 不解码，路径含空格变成 %20，existsSync 必然 false；
+  改用 fileURLToPath。
+
 ## 1.10.19 (2026-10-22)
 
 ### 改进（issue #14 建议 1）
