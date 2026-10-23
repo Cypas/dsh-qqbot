@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 /**
  * no-wake-on-child-quote.mjs — 示例入站中间件：引用「子会话转发」的消息时不按 @ 处理
  * （2026-10-12 升级：**同时演示早/晚两个挂点**；晚挂点那段逻辑一个字没改）
@@ -156,7 +157,9 @@ async function loadLib() {
  * ⇒ 真机上完全静默、无法定位。" 本扩展此前一直用 `ctx.logger.debug` ⇒ 等于瞎的，
  * 导致"引用回流没投递"排查了三轮全靠猜。此后所有关键判定一律 `appendDiag` 落盘。
  */
-const DIAG_FILE = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/no-wake-diag.log';
+// ★ 2026-10-24 修复（issue #17）: 原来写死 Windows 路径(D:/…) —— Linux/容器/手机上会被当成
+//   相对路径，在家目录里生成一个叫 "D:" 的畸形目录，日志全丢。改成跟着本文件走。
+const DIAG_FILE = fileURLToPath(new URL('../data/no-wake-diag.log', import.meta.url));
 
 async function appendDiag(line) {
   try {

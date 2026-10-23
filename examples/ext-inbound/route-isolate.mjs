@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 /**
  * route-isolate.mjs — 入站中间件：**二档绑定的路由消息，不进父会话上下文（彻底隔绝）**
  *
@@ -42,7 +43,9 @@
 export const name = 'route-isolate';
 
 /** ★ 诊断必须**落盘**：logger 没人注入过，只往 logger 写等于瞎的 */
-const DIAG_FILE = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/route-isolate-diag.log';
+// ★ 2026-10-24 修复（issue #17）: 原来写死 Windows 路径(D:/…) —— Linux/容器/手机上会被当成
+//   相对路径，在家目录里生成一个叫 "D:" 的畸形目录，日志全丢。改成跟着本文件走。
+const DIAG_FILE = fileURLToPath(new URL('../data/route-isolate-diag.log', import.meta.url));
 let LOG = null;
 
 async function note(msg) {

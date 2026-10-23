@@ -777,7 +777,9 @@ async function forwardToQq(entry, text) {
  *   "一开始只往 logger 写，而**从来没人注入过 logger** ⇒ 真机上完全静默、无法定位。"
  *   本库涉及"转发到 QQ"，静默一次就是一条内容永久丢失，必须能事后追。
  */
-const SW_DIAG_FILE = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/session-watch-diag.log';
+// ★ 2026-10-24 修复（issue #17）: 原来写死 Windows 路径(D:/…) —— Linux/容器/手机上会被当成
+//   相对路径，在家目录里生成一个叫 "D:" 的畸形目录，日志全丢。改成跟着本文件走。
+const SW_DIAG_FILE = fileURLToPath(new URL('../../data/session-watch-diag.log', import.meta.url));
 
 async function swDiag(line) {
   try {
