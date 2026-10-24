@@ -18,19 +18,28 @@ import { resolve } from 'node:path';
  * 这里做兜底：不管上游给什么，都尽量还原成绝对路径，避免再让坏值流到 create/join。
  */
 export function absCwdOf(p: unknown): string {
-  let s = String(p ?? '').trim();
-  if (!s) return '';
-  // 反斜杠统一成正斜杠：Windows 上两种 Node 都认，但混用会让 join/split 出怪结果
-  s = s.replace(/\\/g, '/');
-  // ① 已经是绝对路径：Windows 盘符 / UNC / POSIX
-  if (/^[A-Za-z]:\//.test(s) || s.startsWith('//') || s.startsWith('/')) return s;
-  // ② POSIX（Linux / Android）：补回被丢掉的前导 '/'
+  const raw = String(p ?? '').trim();
+  if (!raw) return '';
+
+  // ⚠️ 已经是绝对路径 → 【原样返回，一个字符都不动】。
+  //    为什么不能顺手把反斜杠归一成正斜杠：session-manager:670 用
+  //    `prevCfg.cwd !== wantCwd` 做**字符串精确比较**来判断「cwd 改没改」，
+  //    改形式会让 Windows 老用户升级后判定 cwd 变了，白白触发一次
+  //    fork 热迁移 / 弃旧开新（历史虽然会继承，但那是多余的档案分裂）。
+  //    → 只在「相对路径」这一种真正会出事的情况下动手。
+  if (/^[A-Za-z]:[\\/]/.test(raw)) return raw; // D:\a\b 或 D:/a/b
+  if (raw.startsWith('\\') || raw.startsWith('//')) return raw; // UNC \\server\share
+  if (raw.startsWith('/')) return raw; // POSIX 绝对路径
+
+  // ── 以下只处理相对路径（issue #18 的坏值就长这样：storage\emulated\0\大肥鱼）──
+  const s = raw.replace(/\\/g, '/');
+  // POSIX（Linux / Android）：补回被 dsh 编码时丢掉的前导 '/'
   if (process.platform !== 'win32') return '/' + s;
-  // ③ Windows 相对路径没法可靠还原原意，退化成相对进程 cwd 解析（至少是个绝对路径）
+  // Windows 相对路径没法可靠还原原意，退化成相对进程 cwd 解析（至少是个绝对路径）
   try {
     return resolve(s).replace(/\\/g, '/');
   } catch {
-    return s;
+    return raw;
   }
 }
 
