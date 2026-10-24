@@ -6944,8 +6944,13 @@ var QQS_THEME_CSS = [
         errBox: { fontSize: 12.5, color: '#c33', padding: '10px 12px', border: '1px solid #c335', borderRadius: 8, marginBottom: 10 },
         // ── 扩展设置弹层（2026-10-24）──
         chipClickable: { fontSize: 11.5, padding: '2px 8px', borderRadius: 5, border: '1px solid ' + C.accent, background: 'transparent', cursor: 'pointer' },
-        modalMask: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2147483000 },
-        modalBox: { background: 'var(--dsw-alias-bg-primary, #252528)', color: 'var(--dsw-alias-text-primary, #e8e8ea)', colorScheme: 'dark', borderRadius: 12, padding: '18px 20px', minWidth: 460, maxWidth: 640, maxHeight: '82vh', overflow: 'auto', boxShadow: '0 16px 56px rgba(0,0,0,.5)', border: '1px solid ' + C.border },
+        // 2026-10-24 修「安卓上扩展自定义设置界面被截断、填不了」：
+        //   原来是 minWidth:460 —— 手机视口只有 360~400px，盒子硬撑到 460 就横向溢出，
+        //   右半边（输入框 / 保存按钮）直接被切掉。
+        //   改成 minWidth:0 + width:100%（由 maxWidth 兜桌面宽度）+ 遮罩加 padding，
+        //   maxHeight 用 calc(100vh - 24px) 对齐 padding，上下也不再各切一截。
+        modalMask: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12, boxSizing: 'border-box', zIndex: 2147483000 },
+        modalBox: { background: 'var(--dsw-alias-bg-primary, #252528)', color: 'var(--dsw-alias-text-primary, #e8e8ea)', colorScheme: 'dark', borderRadius: 12, padding: '18px 20px', minWidth: 0, width: '100%', maxWidth: 640, maxHeight: 'calc(100vh - 24px)', overflow: 'auto', boxSizing: 'border-box', boxShadow: '0 16px 56px rgba(0,0,0,.5)', border: '1px solid ' + C.border },
         modalHead: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14, gap: 12 },
         modalTitle: { fontSize: 15.5, fontWeight: 600, color: 'var(--dsw-alias-text-primary, #e8e8ea)' },
         modalSub: { fontSize: 11.5, color: C.sub, marginTop: 3, fontFamily: 'ui-monospace, Consolas, monospace', wordBreak: 'break-all' },
