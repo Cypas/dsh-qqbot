@@ -13,6 +13,7 @@
  * 挂载 preset（工具集、prompt sections 等），实现场景化配置。
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { absCwdOf } from '../util/abs-path.js';
 import { describeExtCommandReload, describeExtInboundReload, describeExtOutboundReload, reloadExtCommands, reloadExtInbound, reloadExtOutbound } from '../features/ext-reload.js';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
@@ -102,9 +103,16 @@ export class SessionManager {
     this.channelSender = sender;
   }
 
+  /**
+   * 最近一次"建会话"失败的原始错误（2026-10-24 加，issue #18）。
+   * 起因：create 抛的错只在 logger 里留一行，命令层统一回「请稍后再试」，
+   * 手机上完全没法自助排查（cwd 相对路径就是这么被藏住的）。
+   */
+  public lastCreateError = '';
+
   /** 本实例工作目录(多账号独立; 缺省进程 cwd) */
   public get cwd(): string {
-    return this.config.cwd || process.cwd();
+    return absCwdOf(this.config.cwd) || process.cwd();
   }
 
   /** 插件数据根(表情包/.qqbot/扩展统一挂其下; config.dataRoot 缺省=cwd) */
@@ -258,6 +266,7 @@ export class SessionManager {
         this.logger.info(`startNewSession: 无活跃记录 → 已另起新档 key=${key}${presetId ? ` preset=${presetId}` : ''}`);
         return 'rotated';
       } catch (err) {
+        this.lastCreateError = err instanceof Error ? err.message : String(err);
         this.logger.warn(`startNewSession(rotated) failed: key=${key} err=${err instanceof Error ? err.message : String(err)}`);
         return 'failed';
       }
@@ -440,7 +449,7 @@ export class SessionManager {
       sessionId: childId,
       ...(seed ? { seed } : {}),
       meta: {
-        cwd: this.config.cwd || process.cwd(),
+        cwd: absCwdOf(this.config.cwd) || process.cwd(),
         parentSession: record.sessionId,
         ...(seed ? { seedLength: seed.length } : {}),
         ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}),
@@ -649,7 +658,7 @@ export class SessionManager {
     opts?: { forceNew?: boolean },
   ): Promise<SessionRecord> {
     const key = this.sessionKey(scope, peerId);
-    const wantCwd = this.config.cwd || process.cwd();
+    const wantCwd = absCwdOf(this.config.cwd) || process.cwd();
     const prevCfg = this.modelResolver.getSessionCfg(key);
 
     // ── cwd 指纹校验(2026-09-08, 响应上游 issue #43: cwd 改了要能换会话) ──
@@ -740,7 +749,7 @@ export class SessionManager {
         const created = await this.agents.create({
           sessionId,
           meta: {
-            cwd: this.config.cwd || process.cwd(),
+            cwd: absCwdOf(this.config.cwd) || process.cwd(),
             ...(agentPreset ? { agentPreset } : {}),
           },
           ...(route ? { agentOptions: route } : {}),

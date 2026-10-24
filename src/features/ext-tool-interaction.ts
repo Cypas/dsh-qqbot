@@ -21,6 +21,8 @@
  *   · ack 统一由 bootstrap 的交互处理器做（本控制器不碰 `PUT /interactions/{id}`）。
  */
 import type { Logger } from '../types.js';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { loadExtensionTools, loadExtensionCommands } from './extension-store.js';
@@ -31,7 +33,13 @@ import { lookupExtToolCard, parseExtToolButtonData } from './ext-tool-cards.js';
  * 目的：主人点按钮后就能直接看出 —— 事件到没到、注册表命中没、找到工具/命令没、钩子调没调。
  * 只记录、绝不影响派发结果（任何异常都吞掉）。
  */
-const DISPATCH_DIAG = 'D:/newwenjianjia/aiwork/鲸鱼娘/dshqqbot/.qqbot-extensions/data/派发-diag.log';
+/**
+ * 派发诊断日志落点（2026-10-24 修：原来硬编码 D:/newwenjianjia/... —— Linux/Android 上会
+ * 在家目录里造一个名为 "D:" 的目录，issue #17 就是别人踩到这个来的）。
+ * 优先用环境变量覆盖，否则落到 ~/.dsh 下。
+ */
+const DISPATCH_DIAG = process.env.QQBOT_DISPATCH_DIAG
+  || join(homedir(), '.dsh', 'qqbot-dispatch-diag.log');
 function dlog(msg: string): void {
   try {
     mkdirSync(dirname(DISPATCH_DIAG), { recursive: true });

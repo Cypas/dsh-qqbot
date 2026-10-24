@@ -21,6 +21,12 @@ export declare class SessionManager {
     private liveSettingsReader;
     /** 注入 QQ 通道发送能力(供通道工具)；bootstrap 调用 */
     installChannelSender(sender: QQBotSender): void;
+    /**
+     * 最近一次"建会话"失败的原始错误（2026-10-24 加，issue #18）。
+     * 起因：create 抛的错只在 logger 里留一行，命令层统一回「请稍后再试」，
+     * 手机上完全没法自助排查（cwd 相对路径就是这么被藏住的）。
+     */
+    lastCreateError: string;
     /** 本实例工作目录(多账号独立; 缺省进程 cwd) */
     get cwd(): string;
     /** 插件数据根(表情包/.qqbot/扩展统一挂其下; config.dataRoot 缺省=cwd) */

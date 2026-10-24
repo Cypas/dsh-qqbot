@@ -281,7 +281,14 @@ function ensureSweeper(): void {
  *   于是又撞一次 code=21（实测踩过：重试仍然失败，看着像"重试没用"，其实是清理没跑完）。
  */
 function killByProfile(profileDir: string): void {
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32') {
+    // POSIX（Linux/Android/macOS）：按命令行里的 profile 路径杀残留进程。
+    // 原来这里直接 return —— 残留浏览器会继续锁住 profile，下次启动仍是 code=21。
+    try {
+      spawnSync('pkill', ['-f', profileDir], { stdio: 'ignore', timeout: 20000 });
+    } catch { /* 没有 pkill 就放弃，不影响主流程 */ }
+    return;
+  }
   try {
     const safe = profileDir.replace(/'/g, "''");
     const cmd = 'Get-CimInstance Win32_Process -Filter "Name=\'msedge.exe\'"'

@@ -11,6 +11,7 @@
  */
 import { existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { absCwdOf } from '../util/abs-path.js';
 import type { ImQQBotConfig } from '../config.js';
 import type { Logger } from '../types.js';
 
@@ -31,7 +32,9 @@ export const DEFAULT_DATA_SUBDIR = 'dshqqbot';
 export function dataRootOf(config: ImQQBotConfig): string {
   const r = config.dataRoot ? resolve(config.dataRoot) : '';
   if (r) return r;
-  return join(config.cwd || process.cwd(), DEFAULT_DATA_SUBDIR);
+  // ⚠️ cwd 必须绝对化：安卓/设置页可能给出 "storage\emulated\0\大肥鱼" 这种相对路径，
+  //    直接 join 会被解析到 process.cwd() 下，凭空多出一套幽灵数据根（issue #18）。
+  return join(absCwdOf(config.cwd) || process.cwd(), DEFAULT_DATA_SUBDIR);
 }
 
 /** 图库/台账/活性计数等通用数据目录: config.sticker.dataDir 覆盖 > {dataRoot}/表情包 */

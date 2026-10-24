@@ -19,6 +19,7 @@
  * 热刷(不重启)留给 P4.2 dock 管理 UI。
  */
 import { readdirSync, statSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { absCwdOf } from '../util/abs-path.js';
 import { scanExtFiles } from './ext-packs.js';
 import { join, extname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -129,7 +130,7 @@ export function extensionCommandsDir(cwd) {
 }
 /** 扩展工具目录路径(dock/工具展示用) */
 export function extensionToolsDir(cwd) {
-    return cwd ? join(cwd, EXT_TOOLS_SUBDIR) : join(process.cwd(), EXT_TOOLS_SUBDIR);
+    return cwd ? join(absCwdOf(cwd) || cwd, EXT_TOOLS_SUBDIR) : join(process.cwd(), EXT_TOOLS_SUBDIR);
 }
 function normalizeToolModule(mod, file, logger) {
     try {

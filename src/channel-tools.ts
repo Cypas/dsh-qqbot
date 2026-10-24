@@ -2972,8 +2972,8 @@ export async function askAiToWriteSamples(
   })();
   const prompt = [
     '【样例库维护】主人点了面板上的「让ai写(有聊天记录最好)」, 请你来维护本地小模型的"开口标准"样例库。',
-    `· 样例库(你要写的): ${root}\\.qqbot\\value-samples.jsonl —— 一行一条 {"m":"群消息文本","y":1} / y=0; 1=你会想接话, 0=你不会理`,
-    `· 评分记录(你来读): ${root}\\.qqbot\\value-scores.jsonl —— 一行一行 JSON, 字段: text=消息原文, score=本地小模型给的分, worth=是否判值得接, min=本会话门槛, gate=当时生效的模式(block=低分不唤醒/log=只记录不拦), conf=置信度(越接近1越有把握), mention=是否被@, top=最近邻样例, agg=聚合条数`,
+    `· 样例库(你要写的): ${root}/.qqbot/value-samples.jsonl —— 一行一条 {"m":"群消息文本","y":1} / y=0; 1=你会想接话, 0=你不会理`,
+    `· 评分记录(你来读): ${root}/.qqbot/value-scores.jsonl —— 一行一行 JSON, 字段: text=消息原文, score=本地小模型给的分, worth=是否判值得接, min=本会话门槛, gate=当时生效的模式(block=低分不唤醒/log=只记录不拦), conf=置信度(越接近1越有把握), mention=是否被@, top=最近邻样例, agg=聚合条数`,
     '做法: ①读评分记录最近 100~200 条(用文件工具) ②挑出标注可疑的 —— 尤其 conf<0.5(地图上没这类样本)、mention=true 却 worth=false(被点名却没打算回)、内容与分数明显不符的',
     '③对照真人群聊语境, 提炼 20~40 条新样例 ④用文件工具把它们**追加**写入样例库(不要覆盖整库) ⑤回报加了几条、都补了哪类。',
     '样例写法(一行一条 JSON): {"m":"消息文本","y":1或0} —— y=1 她会想接话(提问/求助/@她/她接得住的梗) / y=0 她不会理(群友互聊/短应答/表情)。',

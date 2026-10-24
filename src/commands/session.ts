@@ -33,7 +33,7 @@ export function newCommand({ manager }: CommandDeps): SlashCommand {
       const r = await manager.startNewSession(scope, peerId, false, undefined, { replyTarget: target, senderId: triggererId });
       if (r === 'forked') return '已开启新会话 ✓(旧会话已存档)';
       if (r === 'rotated') return '已开启新会话 ✓(原会话档无法加载或不存在, 已直接另起新档; 坏档文件保留在磁盘)';
-      return '开新会话失败, 请稍后再试(可先聊一句再试 /bot-new)';
+      return '开新会话失败: ' + (manager.lastCreateError || '请稍后再试(可先聊一句再试 /bot-new)');
     },
   };
 }
@@ -52,7 +52,7 @@ export function newPresetCommand({ manager }: CommandDeps): SlashCommand {
         const r = await manager.startNewSession(scope, peerId, false, undefined, { replyTarget: target, senderId: triggererId });
         if (r === 'forked') return '已开启新会话 ✓(使用当前默认人格)';
         if (r === 'rotated') return '已开启新会话 ✓(原会话档无法加载或不存在, 已直接另起新档)';
-        return '开新会话失败, 请稍后再试';
+        return '开新会话失败: ' + (manager.lastCreateError || '请稍后再试');
       }
       // 精确匹配 preset id(先验存在, 避免未知 id 建错会话)
       const list = await manager.listPresets();
@@ -67,7 +67,7 @@ export function newPresetCommand({ manager }: CommandDeps): SlashCommand {
       const r = await manager.startNewSession(scope, peerId, false, hit.id, { replyTarget: target, senderId: triggererId });
       if (r === 'forked') return `✅ 已用人格「${hit.id}」开启新会话(旧会话存档可回看)`;
       if (r === 'rotated') return `✅ 已用人格「${hit.id}」另起新档(原会话档无法加载或不存在)`;
-      return '开新会话失败, 请稍后再试(可先聊一句再试 /new)';
+      return '开新会话失败: ' + (manager.lastCreateError || '请稍后再试(可先聊一句再试 /new)');
     },
   };
 }

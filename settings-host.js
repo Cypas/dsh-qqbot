@@ -1273,8 +1273,13 @@ export function apply(ctx) {
       if (segs.length === 0) return '';
       const decoded = segs.map((s) => s.replace(/~([0-9A-F]{4})/g, (_m, hex) => String.fromCharCode(parseInt(hex, 16))));
       // 首段是盘符(D / C) → 补冒号; 其余段拼回路径分隔
-      const head = /^[A-Za-z]$/.test(decoded[0]) ? decoded[0] + ':' : decoded[0];
-      return [head].concat(decoded.slice(1)).join('\\');
+      // ① Windows 盘符：首段是单个字母 → X:\a\b
+      if (/^[A-Za-z]$/.test(decoded[0])) {
+        const sep = '\\';
+        return decoded[0] + ':' + (decoded.length > 1 ? sep + decoded.slice(1).join(sep) : sep);
+      }
+      // ② POSIX（Linux/Android）：编码时丢了前导 '/'，这里补回来
+      return '/' + decoded.join('/');
     } catch { return ''; }
   }
   route(ctx, 'GET', '/api/qqbot-settings/workspaces', async (_req, res) => {
