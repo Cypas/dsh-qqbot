@@ -259,47 +259,32 @@ const OWN_SETTINGS_DIR = join(DSH_HOME_DIR, 'qqbot-settings');
  * （要求其父目录名为 `profiles`，挡住源码 checkout 目录）→ 落 `_default`。改一处务必同步另一处。
  */
 function resolveProfileName() {
-  // ① 环境变量最可靠 —— 但 Desktop 宿主下**模块加载那一刻它是空的**
-  //    （宿主只在每次 shell / 工具调用时临时注入），所以下面几层兜底是必须的。
+  // ── 按维护手册 §「profile 定位的正解：回写环境变量，别改推断逻辑」 ──
+  //    宿主的 profileContext 是权威答案，src/index.ts 的 apply() 已经把它回写到：
+  //      process.env.DSH_PROFILE / DSH_PROFILE_DIR
+  //      globalThis.__dshProfileName / __dshProfileContext
+  //    这里只要**读**它，别自己猜路径。
+
+  // ① 环境变量（apply 阶段回写，最直接）
   const env = String(process.env.DSH_PROFILE || '').trim();
   if (env) return env;
 
-  // ② PROFILE_ROOT 的父目录正好叫 profiles → 取它自己的目录名
+  // ② apply() 落下的全局变量 —— **这是关键补的一层**：
+  //    settings-host.js 有可能在 apply() 之前就被加载（模块顶层求值），
+  //    那时环境变量还没回写；但真正用到 profile 名是在请求处理阶段（惰性化后），
+  //    那时 __dshProfileName 早就有了。
+  try {
+    const g = globalThis.__dshProfileName;
+    if (typeof g === 'string' && g.trim()) return g.trim();
+  } catch { /* 下一层 */ }
+
+  // ③ 老宿主没有 profileContext 服务 → 只能从 PROFILE_ROOT 目录名反推
   try {
     if (basename(dirname(PROFILE_ROOT)) === 'profiles') {
       const n = basename(PROFILE_ROOT);
       if (n && n !== 'profiles') return n;
     }
-  } catch { /* 走下一层 */ }
-
-  // ③ PROFILE_ROOT 里出现 /profiles/<name>/ 片段 → 取 <name>
-  //    （生成式安装会落到 profiles/.generations/live/xxx，② 那层判不出来）
-  try {
-    const m = String(PROFILE_ROOT).split(/[\\/]profiles[\\/]/i);
-    if (m.length > 1) {
-      const seg = m[1].split(/[\\/]/)[0];
-      if (seg && seg !== '.generations') return seg;
-    }
-  } catch { /* 走下一层 */ }
-
-  // ④ 【2026-10-25 修 issue #20】最硬的一层：直接看存档目录的实际形状。
-  //    凭据就存在 qqbot-settings/<profile>/<ns>.json ——
-  //    如果那里只有一个真实子目录，那它就是当前 profile，猜都不用猜。
-  //
-  //    原实现（环境变量 → PROFILE_ROOT 目录名）在 Desktop 宿主下三层全空，
-  //    落成 `_default` → readOwnSettings 读到 {} → nsBot() 拿不到 appId/appSecret
-  //    直接 return null → 评分/群管理/图库面板全空白，而 bot 收发消息完全正常，
-  //    极易被误判成"评分没跑起来"。issue #20 就是这个。
-  //    ⚠️ 只在「恰好只有一个真实 profile 目录」时才认 —— **不猜**。
-  //    一台机器上可能同时有 desktop/ 和 web/（实测本机就有这两个），
-  //    按 prefer 猜会让 web 用户读到 desktop 的凭据，比原来更糟。
-  //    而那个场景下第 1 层环境变量本来就有值，根本轮不到这里。
-  try {
-    const subs = readdirSync(OWN_SETTINGS_DIR, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && d.name !== '_default')
-      .map((d) => d.name);
-    if (subs.length === 1) return subs[0];
-  } catch { /* 目录还不存在（首次启动） */ }
+  } catch { /* 放弃 */ }
 
   return '';
 }
@@ -312,35 +297,11 @@ function resolveProfileName() {
  *   （真实存档在 qqbot-settings/desktop/xxx.json）⇒ 凭据读不到 ⇒ nsBot() null。
  *   改成每次调用时现算（开销是几次字符串/目录读，API 请求级，可忽略）。
  */
-function nsProfileDir(ns) {
+function nsProfileDir() {
+  // 惰性求值（issue #20 的核心修复）：原来这是个模块顶层 const，
+  // 算的时候 apply() 还没回写 DSH_PROFILE → 永远落 _default。
   const n = String(resolveProfileName()).trim().replace(/[^A-Za-z0-9_-]/g, '_');
   if (n) return n;
-
-  // ── 目录级兜底（只在上面几层全空时走到这儿）──
-  //    2026-10-25 修 issue #20 + 主人追问「同时装了 desktop 和 web 怎么办」：
-  //    一台机器上 qqbot-settings/ 可能同时有 web/ 和 desktop/，
-  //    这时**不能猜**（猜错 = 读到别人的凭据），要用事实来判断。
-  try {
-    const subs = readdirSync(OWN_SETTINGS_DIR, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && d.name !== '_default')
-      .map((d) => d.name);
-
-    // ① 只有一个 profile 目录 → 就是它
-    if (subs.length === 1) return subs[0];
-
-    // ② 多个目录 → 看哪个目录里**真的存着这个 ns 的配置**
-    //    （凭据就在 <profile>/<ns>.json，谁有谁就是当前 profile）
-    if (ns) {
-      const f = safeNsOf(ns) + '.json';
-      const hits = subs.filter((name) => {
-        try { return existsSync(join(OWN_SETTINGS_DIR, name, f)); } catch { return false; }
-      });
-      if (hits.length === 1) return hits[0];
-      // 两个 profile 都配过同一个 ns → 不猜，走 _default。
-      // 这种「共用一个 settingsNs」的情况本来就会被 writer.json 的 NS_CONFLICT 拦住。
-    }
-  } catch { /* 目录还不存在（首次启动） */ }
-
   return '_default';
 }
 function safeNsOf(ns) {
