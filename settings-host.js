@@ -243,6 +243,9 @@ function viewOf(settings, ns) {
  * 位置：{DSH_HOME}/qqbot-settings/<instanceNs>.json
  */
 const OWN_SETTINGS_DIR = join(DSH_HOME_DIR, 'qqbot-settings');
+/** appSecret 的回显掩码：前端看到它 / 空值 = 保留原值（不覆盖）。
+ *  2026-10-25 提到模块级：/read 与 /accounts 都要用。 */
+const SECRET_MASK = '********';
 
 /**
  * 路径按 profile 隔离（2026-10-11；规则必须与 `src/features/ns-guard.ts` 的 `nsPathsOf()` 保持一致，改一处同步另一处）：
@@ -579,6 +582,15 @@ export function apply(ctx) {
     const own = readOwnSettings(ns);
     // 自有存储优先：它就是用户在设置页保存的那份
     const value = Object.assign({}, base.value || {}, own);
+    // ── 2026-10-25 修「保存一次 appSecret 就变成旧值」──────────────────────
+    //   原来把 appSecret 明文一起回给前端。value = Object.assign(base.value, own)，
+    //   而 base 来自 cordis.patch.yml（**历史旧值**，2026-09-24 起就不再写它了）。
+    //   一旦 own 里缺 appSecret，patch 的旧值就露出来；前端把它当"当前值"，
+    //   下次保存原样提交回来 → 盖掉用户存的那份 → 每次保存都被顶回去。
+    //   修法：这个接口永远只回掩码，前端已有的「掩码/空 = 保留原值」逻辑会正确处理。
+    if (value && typeof value === 'object' && value.appSecret) {
+      value.appSecret = SECRET_MASK;
+    }
     // 2026-10-11: 顺手把"这个槽是谁在写"告诉前端 —— 被**别的 profile**占用时设置页能一眼看到（判据同 writeOwnSettings）
     const w = readNsWriter(ns);
     const conflict = nsConflictOf(ns);
@@ -1246,7 +1258,7 @@ export function apply(ctx) {
   // 账号列表(多账号: 每条带 settings ns 与数据目录, 供二级 UI 按账号读写)
   // 借鉴 zhengjy01/dsh-qqbot-panel(2026-09-06): appSecret 只回显掩码(不泄露明文),
   // 并带 hasSecret 供前端区分"已保存"与"真空"; 保存时空值/掩码 = 保留原 secret。
-  const SECRET_MASK = '********';
+
   route(ctx, 'GET', '/api/qqbot-settings/accounts', async (_req, res) => {
     try {
       const { bots, hasFile } = parsePatch();
@@ -2188,6 +2200,18 @@ export function apply(ctx) {
   function mergeOwnIntoCfg(cfg, nsLike) {
     let own = {};
     try { own = readOwnSettings(String(nsLike)) || {}; } catch { own = {}; }
+    // ── 2026-10-25 修「保存一次密钥就变」的另一半 ──────────────────────
+    //   patch 里的 appSecret 是**历史旧值**（2026-09-24 起已不再写 patch）。
+    //   原来自有存储缺 appSecret 时就一直回退到 patch ⇒ patch 一旦被写脏，
+    //   用户怎么保存都会被它顶回去。改成：**只在自有存储没有时继承一次并落盘**，
+    //   之后永远以自有存储为准。
+    try {
+      if ((!own || !own.appSecret) && cfg && cfg.appSecret) {
+        const seeded = Object.assign({}, own, { appSecret: String(cfg.appSecret) });
+        writeOwnSettings(String(nsLike), seeded);
+        own = seeded;
+      }
+    } catch { /* 继承失败不影响本次读取 */ }
     const pick = (k) => {
       const o = own[k];
       if (o !== undefined && o !== '') return o;      // ← 自有存储优先（用户最新保存的）
