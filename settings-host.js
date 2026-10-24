@@ -312,16 +312,42 @@ function resolveProfileName() {
  *   （真实存档在 qqbot-settings/desktop/xxx.json）⇒ 凭据读不到 ⇒ nsBot() null。
  *   改成每次调用时现算（开销是几次字符串/目录读，API 请求级，可忽略）。
  */
-function nsProfileDir() {
+function nsProfileDir(ns) {
   const n = String(resolveProfileName()).trim().replace(/[^A-Za-z0-9_-]/g, '_');
   if (n) return n;
+
+  // ── 目录级兜底（只在上面几层全空时走到这儿）──
+  //    2026-10-25 修 issue #20 + 主人追问「同时装了 desktop 和 web 怎么办」：
+  //    一台机器上 qqbot-settings/ 可能同时有 web/ 和 desktop/，
+  //    这时**不能猜**（猜错 = 读到别人的凭据），要用事实来判断。
+  try {
+    const subs = readdirSync(OWN_SETTINGS_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name !== '_default')
+      .map((d) => d.name);
+
+    // ① 只有一个 profile 目录 → 就是它
+    if (subs.length === 1) return subs[0];
+
+    // ② 多个目录 → 看哪个目录里**真的存着这个 ns 的配置**
+    //    （凭据就在 <profile>/<ns>.json，谁有谁就是当前 profile）
+    if (ns) {
+      const f = safeNsOf(ns) + '.json';
+      const hits = subs.filter((name) => {
+        try { return existsSync(join(OWN_SETTINGS_DIR, name, f)); } catch { return false; }
+      });
+      if (hits.length === 1) return hits[0];
+      // 两个 profile 都配过同一个 ns → 不猜，走 _default。
+      // 这种「共用一个 settingsNs」的情况本来就会被 writer.json 的 NS_CONFLICT 拦住。
+    }
+  } catch { /* 目录还不存在（首次启动） */ }
+
   return '_default';
 }
 function safeNsOf(ns) {
   return String(ns || NS).replace(/[^A-Za-z0-9_-]/g, '_') || 'im-qqbot';
 }
 function ownSettingsDir(ns) {
-  return join(OWN_SETTINGS_DIR, nsProfileDir());
+  return join(OWN_SETTINGS_DIR, nsProfileDir(ns));
 }
 function ownSettingsPath(ns) {
   return join(ownSettingsDir(ns), safeNsOf(ns) + '.json');
