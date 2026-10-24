@@ -40,8 +40,9 @@
  * 但"加载成 SlashCommand / ExtensionToolDef"的归一化完全不是一回事 —— 钩子是"启动就跑的模块"，
  * 归一到 `run()/dispose()` 就够了，所以单独一个文件，不往 extension-store 里塞第四种形状。
  */
-import { readdirSync, statSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { statSync } from 'node:fs';
+import { scanExtFiles } from './ext-packs.js';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { EXT_HOOKS_SUBDIR } from './extension-store.js';
 import { makeExtCaps } from './ext-capabilities.js';
@@ -154,24 +155,16 @@ export async function runStartupHooks(opts) {
         ? Number(opts.timeoutMs)
         : DEFAULT_HOOK_TIMEOUT_MS;
     const empty = { total: 0, ok: 0, failed: 0, timedOut: 0, skipped: 0, results: [] };
-    const dir = extHooksDir(dataRoot);
-    let files;
-    try {
-        // 只取**直接子文件**：子目录不扫描（与 tools/ 的既有约定一致；lib/ 之类可安全存放私有模块）
-        files = readdirSync(dir, { withFileTypes: true })
-            .filter((e) => e.isFile() && ALLOWED_EXT.has(extname(e.name).toLowerCase()))
-            .map((e) => e.name)
-            .sort();
-    }
-    catch {
-        return empty; // 目录不存在 → 完全安静
-    }
-    if (files.length === 0)
-        return empty; // 空目录 → 同样安静
+    // ★ 2026-10-24：内置目录 + 所有扩展包（只取直接子文件）
+    const hits = scanExtFiles(dataRoot, 'hooks', ALLOWED_EXT);
+    if (hits.length === 0)
+        return empty;
+    const files = hits.map((h) => h.name);
     logger.info(`[ext-hook] 发现 ${files.length} 个启动钩子，开始执行（单钩子超时 ${timeoutMs}ms）`);
     const summary = { total: 0, ok: 0, failed: 0, timedOut: 0, skipped: 0, results: [] };
-    for (const f of files) {
-        const abs = join(dir, f);
+    for (const hit of hits) {
+        const f = hit.name;
+        const abs = hit.abs;
         const started = Date.now();
         try {
             // Windows 绝对路径必须转 file:// URL；cache-bust 用 mtime（与 extension-store 同款，别改回时间戳）

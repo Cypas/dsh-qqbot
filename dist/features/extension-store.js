@@ -19,6 +19,7 @@
  * 热刷(不重启)留给 P4.2 dock 管理 UI。
  */
 import { readdirSync, statSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { scanExtFiles } from './ext-packs.js';
 import { join, extname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 /** 扩展命令目录名(相对 cwd) */
@@ -78,6 +79,8 @@ function normalizeModule(mod, file, logger) {
             name: finalNames.length > 1 ? finalNames : finalNames[0],
             description: String(obj.description ?? '自定义扩展命令'),
             handler: obj.handler,
+            // 2026-10-24：记住来源文件，供执行时把「该扩展自己的设置」塞进 ctx.config
+            __file: file,
         };
         if (obj.usage)
             cmd.usage = obj.usage;
@@ -97,18 +100,13 @@ function normalizeModule(mod, file, logger) {
  * fail-soft: 单个文件坏/抛错只记日志, 不影响其它扩展与插件本体。
  */
 export async function loadExtensionCommands(cwd, logger) {
-    const dir = cwd ? join(cwd, EXT_COMMANDS_SUBDIR) : join(process.cwd(), EXT_COMMANDS_SUBDIR);
-    let files = [];
-    try {
-        files = readdirSync(dir).filter((f) => ALLOWED_EXT.has(extname(f).toLowerCase()));
-    }
-    catch {
-        // 目录不存在 → 无扩展, 正常
-        return [];
-    }
+    // ★ 2026-10-24：内置 commands 目录 + 所有扩展包的 commands/
+    const base = cwd || process.cwd();
+    const hits = scanExtFiles(base, 'commands', ALLOWED_EXT);
     const out = [];
-    for (const f of files.sort()) {
-        const abs = join(dir, f);
+    for (const hit of hits) {
+        const f = hit.name;
+        const abs = hit.abs;
         try {
             // Windows 绝对路径必须转 file:// URL 再动态 import(版本号=mtime, 见 fileVersion)
             const url = pathToFileURL(abs).href + `?v=${fileVersion(abs)}`;
@@ -162,17 +160,13 @@ function normalizeToolModule(mod, file, logger) {
 }
 /** 扫描并加载扩展工具目录(P4.2; 由 channel-tools 在注册时调用) */
 export async function loadExtensionTools(cwd, logger) {
-    const dir = cwd ? join(cwd, EXT_TOOLS_SUBDIR) : join(process.cwd(), EXT_TOOLS_SUBDIR);
-    let files = [];
-    try {
-        files = readdirSync(dir).filter((f) => ALLOWED_EXT.has(extname(f).toLowerCase()));
-    }
-    catch {
-        return [];
-    }
+    // ★ 2026-10-24：内置 tools 目录 + 所有扩展包的 tools/（cwd 实参 = 插件数据根 dataRoot）
+    const base = cwd || process.cwd();
+    const hits = scanExtFiles(base, 'tools', ALLOWED_EXT);
     const out = [];
-    for (const f of files.sort()) {
-        const abs = join(dir, f);
+    for (const hit of hits) {
+        const f = hit.name;
+        const abs = hit.abs;
         try {
             const url = pathToFileURL(abs).href + `?v=${fileVersion(abs)}`;
             const mod = await import(url);

@@ -5,8 +5,8 @@
  */
 import { readFileSync, writeFileSync, appendFileSync, rmSync, mkdirSync, existsSync, readdirSync, statSync, cpSync, renameSync, openSync, readSync, closeSync, createWriteStream } from 'node:fs';
 import { basename, extname, join, resolve, dirname, normalize, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawn, execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { getStickerStore } from '@zaofan/dsh-qqbot/sticker-store';
@@ -4843,6 +4843,954 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
       const r = typeof mod.decideQuestionByWebAny === 'function' ? mod.decideQuestionByWebAny(key, optIdx) : { ok: false, msg: '提问模块不可用' };
       writeJson(res, r.ok ? 200 : 404, r);
     } catch (e) { writeJson(res, 500, { error: String((e && e.message) || e) }); }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 「QQ机器人扩展」面板数据源（2026-10-24 主人定）
+  //
+  // 两类扩展来源：
+  //   ① 内置目录  {dataRoot}/.qqbot-extensions/{tools,commands,botplay,hooks,inbound,outbound}/
+  //   ② 扩展包    {dataRoot}/extension-packs/{包名}/{同样六个子目录}/
+  //      包名目录里可放 qqbot-pack.json：{ name, author, desc, version, homepage }
+  //      没有清单也能用，只是面板里显示为「未命名扩展包」
+  //
+  // 为什么要扩展包：插件作者的扩展不该被迫塞进 .qqbot-extensions（那是用户自己的目录），
+  // 放独立目录既能整包分发/更新，也能在面板里按作者分组显示。
+  // ═══════════════════════════════════════════════════════════════════════════
+  const EXT_KINDS = ['tools', 'commands', 'botplay', 'hooks', 'inbound', 'outbound'];
+
+  /** 扫一个 kind 目录，返回文件清单（只扫根下直接子文件，与宿主扫描口径一致） */
+  function scanExtKind(dir, dataRoot) {
+    const out = [];
+    let names = [];
+    try { names = readdirSync(dir); } catch { return out; }
+    for (const name of names) {
+      if (!/\.(mjs|js|cjs)$/i.test(name)) continue;
+      const full = join(dir, name);
+      let st = null;
+      try { st = statSync(full); } catch { continue; }
+      if (!st.isFile()) continue;
+      // 读文件头，看有没有声明「设置页」（约定：文件里出现 qqbotSettingsPage 或 export const settingsPage）
+      let hasSettings = false;
+      let title = '';
+      try {
+        const head = readFileSync(full, 'utf8').slice(0, 4096);
+        hasSettings = /qqbotSettingsPage|export\s+const\s+settingsPage/.test(head);
+        const m = /qqbotSettingsPage[\s\S]{0,200}?title\s*:\s*['"]([^'"]+)['"]/.exec(head);
+        if (m) title = m[1];
+      } catch { /* 读不了就当没有 */ }
+      out.push({
+        __abs: full,   // 真实绝对路径，供 extensions 接口标 disabled
+        name,
+        id: name.replace(/\.(mjs|js|cjs)$/i, ''),
+        size: st.size,
+        mtime: st.mtimeMs,
+        hasSettings,
+        settingsTitle: title,
+        disabled: false,   // 启停状态在 extensions 路由里统一补（scanExtKind 是顶层函数，拿不到闭包）
+      });
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  }
+
+  /** 扫一个扩展根（含六个 kind 子目录），返回 { kinds:{tools:[...]}, total } */
+  function scanExtRoot(root, dataRoot) {
+    const kinds = {};
+    let total = 0;
+    for (const k of EXT_KINDS) {
+      const list = scanExtKind(join(root, k));
+      kinds[k] = list;
+      total += list.length;
+    }
+    return { root, kinds, total };
+  }
+
+  /**
+   * 某个工作区真实对应的 dataRoot（2026-10-24 补：尊重 bot 配置里的 dataRoot）
+   *
+   * 优先级（主人指出必须先看配置）：
+   *   ① 该工作区 bot 显式配置的 cfg.dataRoot
+   *   ② 该工作区 bot 配置的 cfg.cwd + 'dshqqbot'
+   *   ③ 传入的 cwd + 'dshqqbot'
+   *   ④ 首个未禁用 bot 的 dataRoot / cwd（= 老的 resolveContextlessDataRoot 行为）
+   *
+   * 返回 { dataRoot, source }，source 说明是哪一级命中的，便于面板上排查。
+   */
+  function resolveDataRootForWorkspace(cwdHint) {
+    const hint = String(cwdHint || '').trim();
+    const norm = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
+    let bots = [];
+    try { const parsed = parsePatch(); bots = (parsed && Array.isArray(parsed.bots)) ? parsed.bots : []; } catch { bots = []; }
+
+    // ①/② 找「属于这个工作区」的 bot（先按 cwd 精确匹配）
+    if (hint) {
+      const target = norm(hint);
+      for (const b of bots) {
+        const cfg = (b && b.cfg) || {};
+        const bcwd = norm(cfg.cwd);
+        if (!bcwd || bcwd !== target) continue;
+        if (cfg.dataRoot) return { dataRoot: String(cfg.dataRoot), source: 'bot.dataRoot' };
+        return { dataRoot: join(String(cfg.cwd), 'dshqqbot'), source: 'bot.cwd' };
+      }
+    }
+
+    // ③ 传入的 cwd（该工作区没绑 bot 时，扩展目录仍在它自己的 dshqqbot 下）
+    if (hint) return { dataRoot: join(hint, 'dshqqbot'), source: 'workspace' };
+
+    // ④ 兜底：老的推断
+    for (const b of bots) {
+      const cfg = (b && b.cfg) || {};
+      if (b && b.disabled) continue;
+      if (cfg.dataRoot) return { dataRoot: String(cfg.dataRoot), source: 'default.bot' };
+      if (cfg.cwd) return { dataRoot: join(String(cfg.cwd), 'dshqqbot'), source: 'default.bot' };
+    }
+    return { dataRoot: resolveContextlessDataRoot(), source: 'default' };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 扩展自定义设置面板（2026-10-24）
+  //
+  // 契约：扩展文件里 export 一个 qqbotSettingsPage：
+  //   export const qqbotSettingsPage = {
+  //     title: '我的设置',
+  //     schema: [
+  //       { key: 'enabled', type: 'bool',   label: '启用' },
+  //       { key: 'dirs',    type: 'list',   label: '目录列表' },
+  //       { key: 'apiKey',  type: 'string', label: 'API Key', secret: true },
+  //       { key: 'mode',    type: 'select', label: '模式', options: ['a','b'] },
+  //     ],
+  //   }
+  //
+  // 配置落盘：{dataRoot}/.qqbot-extensions/.state/ext-config/{扩展id}.json
+  // 扩展自己在代码里可用 readExtConfig 的方式拿到（暂未内置 API，先读那个 json 即可）。
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** 扩展配置文件路径 */
+  function extConfigPath(dataRoot, extId) {
+    const safe = String(extId || '').replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]/g, '_');
+    if (!safe) return '';
+    return join(dataRoot, '.qqbot-extensions', '.state', 'ext-config', safe + '.json');
+  }
+
+  /** 读某个扩展的 qqbotSettingsPage 声明（动态 import 扩展文件，失败返回 null） */
+  /**
+   * 从扩展**源码**里解析 qqbotSettingsPage（2026-10-24，绕开宿主里 import 拿不到导出的问题）
+   *
+   * 为什么不 import：
+   *   同一个 file:// URL 在 Node CLI 里 import 能拿到导出，但在 dsh 宿主进程里
+   *   （插件模块内部再 await import 另一个 .mjs）拿不到 —— 机制不明，实测踩到。
+   *   而 qqbotSettingsPage 只是个纯数据对象 { title, desc, schema:[...] }，
+   *   完全没必要执行整个模块；直接抠源码更稳，也顺带避免执行第三方代码。
+   *
+   * 做法：定位 "export const qqbotSettingsPage = {" 然后做**括号配对**截取对象字面量，
+   *       再用 new Function 求值（只执行这个字面量，不跑模块其余部分）。
+   *       求值失败一律返回 null，绝不抛。
+   */
+  function parseSettingsPageFromSource(absFile) {
+    let src = '';
+    try { src = readFileSync(absFile, 'utf8'); } catch { return null; }
+
+    // 找起点的几种写法：export const / const + 后续 export
+    const patterns = [
+      /export\s+(?:const|let|var)\s+qqbotSettingsPage\s*=\s*/,
+      /(?:const|let|var)\s+qqbotSettingsPage\s*=\s*/,
+    ];
+    let start = -1;
+    for (const re of patterns) {
+      const m = re.exec(src);
+      if (m) { start = m.index + m[0].length; break; }
+    }
+    if (start < 0) return null;
+    if (src[start] !== '{') return null;
+
+    // 括号配对（跳过字符串/模板/注释里的括号）
+    let depth = 0;
+    let i = start;
+    let inStr = '';
+    let inLineComment = false;
+    let inBlockComment = false;
+    let end = -1;
+    while (i < src.length) {
+      const ch = src[i];
+      const nxt = src[i + 1];
+
+      if (inLineComment) { if (ch === '\n') inLineComment = false; i++; continue; }
+      if (inBlockComment) { if (ch === '*' && nxt === '/') { inBlockComment = false; i += 2; continue; } i++; continue; }
+      if (inStr) {
+        if (ch === '\\') { i += 2; continue; }
+        if (ch === inStr) inStr = '';
+        i++; continue;
+      }
+      if (ch === '/' && nxt === '/') { inLineComment = true; i += 2; continue; }
+      if (ch === '/' && nxt === '*') { inBlockComment = true; i += 2; continue; }
+      if (ch === '"' || ch === "'" || ch === '`') { inStr = ch; i++; continue; }
+
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { end = i + 1; break; }
+      }
+      i++;
+    }
+    if (end < 0) return null;
+
+    const literal = src.slice(start, end);
+    let page = null;
+    try {
+      // 只求值这个对象字面量；扩展本来就允许执行任意代码（handler），这里不引入新风险
+      page = new Function('return (' + literal + ')')();
+    } catch {
+      return null;
+    }
+    if (!page || typeof page !== 'object') return null;
+    return {
+      title: String(page.title || ''),
+      desc: String(page.desc || ''),
+      schema: Array.isArray(page.schema) ? page.schema : [],
+      _src: true,
+    };
+  }
+
+  async function readExtSettingsPage(absFile) {
+    // 诊断落盘（宿主进程里 import 扩展拿不到导出时用）
+    const diag = (msg) => {
+      try {
+        const p = join(process.env.USERPROFILE || process.env.HOME || homedir(), 'qqbot-extpanel-diag.log');
+        appendFileSync(p, new Date().toISOString() + ' ' + msg + '\n');
+      } catch { /* ignore */ }
+    };
+    // ① 先走源码解析（最稳，不依赖宿主 import 行为）
+    try {
+      const parsed = parseSettingsPageFromSource(absFile);
+      diag('source-parse ' + (parsed ? ('ok schemaLen=' + parsed.schema.length) : 'miss'));
+      if (parsed && parsed.schema.length > 0) return parsed;
+    } catch (e) {
+      diag('source-parse ERROR ' + String((e && e.message) || e));
+    }
+
+    // ② 源码里没有 schema，再退回执行模块
+    try {
+      const url = pathToFileURL(absFile).href + '?v=' + Date.now();
+      diag('import start abs=' + absFile + ' url=' + url.slice(0, 160));
+      const mod = await import(url);
+      const keys = mod && typeof mod === 'object' ? Object.keys(mod) : [];
+      diag('import ok keys=[' + keys.join(',') + '] typeofDefault=' + typeof (mod && mod.default));
+      const page = mod && (mod.qqbotSettingsPage || (mod.default && mod.default.qqbotSettingsPage));
+      diag('page=' + (page ? ('object schemaLen=' + (Array.isArray(page.schema) ? page.schema.length : 'notArray')) : String(page)));
+      if (!page || typeof page !== 'object') {
+        // 文件里没有 qqbotSettingsPage：把实际导出键回传，前端能直接看出问题
+        const keys = mod && typeof mod === 'object' ? Object.keys(mod) : [];
+        return { title: '', desc: '', schema: [], _miss: true, _keys: keys };
+      }
+      return {
+        title: String(page.title || ''),
+        desc: String(page.desc || ''),
+        schema: Array.isArray(page.schema) ? page.schema : [],
+      };
+    } catch (e) {
+      diag('import ERROR: ' + String((e && e.stack) || e).slice(0, 500));
+      return { title: '', desc: '', schema: [], _err: String((e && e.message) || e) };
+    }
+  }
+
+  /**
+   * GET /api/qqbot-settings/ext-panel?kind=&file=&cwd=
+   *   读某个扩展的设置声明 + 当前值
+   * POST /api/qqbot-settings/ext-panel
+   *   body: { kind, file, cwd, values }
+   *   写回配置
+   */
+  /**
+   * 在「内置目录 + 所有扩展包」里找某个扩展文件（2026-10-24 修）
+   *
+   * 原实现只 join(dataRoot, '.qqbot-extensions', kind, file) —— 扩展包里的扩展根本找不到，
+   * 面板点开会显示「没有声明配置项」（主人实测发现）。
+   */
+  function findExtFileInAnyRoot(dataRoot, kind, file) {
+    const name = basename(String(file || ''));
+    if (!name) return '';
+    const roots = [join(dataRoot, '.qqbot-extensions', kind)];
+    const packsRoot = join(dataRoot, 'extension-packs');
+    let packs = [];
+    try { packs = readdirSync(packsRoot); } catch { packs = []; }
+    for (const p of packs) {
+      const d = join(packsRoot, p, kind);
+      try { if (statSync(d).isDirectory()) roots.push(d); } catch { /* 没这个 kind */ }
+    }
+    for (const dir of roots) {
+      const abs = join(dir, name);
+      try { if (statSync(abs).isFile()) return abs; } catch { /* 继续找 */ }
+    }
+    return '';
+  }
+
+  /**
+   * 递归查找（兜底）：有些扩展可能放在更深层（如 tools/lib/ 下的辅助模块）
+   */
+  function findExtFileDeep(dataRoot, kind, file) {
+    const name = basename(String(file || ''));
+    if (!name) return '';
+    const bases = [join(dataRoot, '.qqbot-extensions', kind), join(dataRoot, 'extension-packs')];
+    function walk(dir, depth) {
+      if (depth > 4) return '';
+      let entries = [];
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return ''; }
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isFile() && e.name === name) return full;
+      }
+      for (const e of entries) {
+        if (!e.isDirectory()) continue;
+        const r = walk(join(dir, e.name), depth + 1);
+        if (r) return r;
+      }
+      return '';
+    }
+    for (const b of bases) {
+      const r = walk(b, 0);
+      if (r) return r;
+    }
+    return '';
+  }
+
+  route(ctx, ['GET', 'POST'], '/api/qqbot-settings/ext-panel', async (req, res) => {
+    try {
+      const q = new URL(req.url, 'http://localhost').searchParams;
+      let kind = '';
+      let file = '';
+      let cwdParam = '';
+      let values = null;
+
+      if (req.method === 'GET') {
+        kind = String(q.get('kind') || '').trim();
+        file = String(q.get('file') || '').trim();
+        cwdParam = String(q.get('cwd') || '').trim();
+      } else {
+        const body = await readJsonBody(req);
+        if (!body || typeof body !== 'object') return writeJson(res, 400, { error: 'bad body' });
+        kind = String(body.kind || '').trim();
+        file = String(body.file || '').trim();
+        cwdParam = String(body.cwd || '').trim();
+        values = body.values && typeof body.values === 'object' ? body.values : {};
+      }
+
+      if (!kind || !file) return writeJson(res, 400, { error: 'kind 与 file 必填' });
+
+      // 定位文件（只允许 EXT_KINDS 内的六类，防路径逃逸）
+      const { dataRoot } = resolveDataRootForWorkspace(cwdParam);
+      if (!dataRoot) return writeJson(res, 500, { error: '推不出 dataRoot' });
+      // 内置目录 + 所有扩展包里找（扩展包的扩展不在 .qqbot-extensions 下）
+      let abs = findExtFileInAnyRoot(dataRoot, kind, file);
+      if (!abs) abs = findExtFileDeep(dataRoot, kind, file);
+      if (!abs) {
+        return writeJson(res, 404, { error: '扩展文件不存在：' + file + '（已在内置目录与 extension-packs 下查找）' });
+      }
+
+      const extId = String(file).replace(/\.(mjs|js|cjs)$/i, '');
+
+      if (req.method === 'GET') {
+        const page = await readExtSettingsPage(abs);
+        // 当前值
+        let current = {};
+        const cfgPath = extConfigPath(dataRoot, extId);
+        try { if (cfgPath && existsSync(cfgPath)) current = JSON.parse(readFileSync(cfgPath, 'utf8')); } catch { current = {}; }
+        return writeJson(res, 200, {
+          ok: true,
+          extId,
+          foundAt: abs,
+          file: abs,
+          page: page || { title: '', desc: '', schema: [] },
+          values: current,
+          configPath: cfgPath,
+        });
+      }
+
+      // POST：写回
+      const cfgPath = extConfigPath(dataRoot, extId);
+      if (!cfgPath) return writeJson(res, 400, { error: 'extId 不合法' });
+      try {
+        mkdirSync(dirname(cfgPath), { recursive: true });
+        writeFileSync(cfgPath, JSON.stringify(values, null, 2), 'utf8');
+      } catch (e) {
+        return writeJson(res, 500, { error: '写入失败: ' + String((e && e.message) || e) });
+      }
+      return writeJson(res, 200, { ok: true, configPath: cfgPath });
+    } catch (e) {
+      writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+    }
+  });
+
+  /**
+   * 工作区转义目录名 → 真实路径（与扩展 commands/会话列表.mjs 的 wsPath 同款规则）
+   *   --D-newwenjianjia-aiwork-~9CB8~9C7C~5A18--  ⇒  D:\newwenjianjia\aiwork\鲸鱼娘
+   *   '-' = 分隔符；'~XXXX' = 一个 UTF-16 码元；首段单字母 = 盘符
+   */
+  function wsPathFromDir(dir) {
+    const t = String(dir || '').replace(/^--/, '').replace(/--$/, '');
+    const parts = [];
+    let cur = '';
+    let i = 0;
+    while (i < t.length) {
+      const ch = t[i];
+      if (ch === '-') { parts.push(cur); cur = ''; i += 1; continue; }
+      const m = /^~([0-9A-Fa-f]{4})/.exec(t.slice(i, i + 5));
+      if (m) { cur += String.fromCharCode(parseInt(m[1], 16)); i += 5; continue; }
+      cur += ch; i += 1;
+    }
+    parts.push(cur);
+    const segs = parts.filter((p) => p !== '');
+    if (segs.length && /^[A-Za-z]$/.test(segs[0])) segs[0] = segs[0] + ':';
+    return segs.join('\\\\');
+  }
+
+  /**
+   * 用 sessionId 反查它属于哪个工作区（DSH 把会话存在 ~/.dsh/sessions/{工作区转义}/{会话id}/）
+   * 返回工作区真实路径；找不到返回 ''。
+   */
+  function resolveWorkspaceBySid(sid) {
+    const id = String(sid || '').trim();
+    if (!id) return '';
+    const home = process.env.USERPROFILE || process.env.HOME || homedir();
+    const root = join(home, '.dsh', 'sessions');
+    let wsDirs = [];
+    try { wsDirs = readdirSync(root); } catch { return ''; }
+    // 会话目录名可能是纯 uuid，也可能带 'session-' 前缀，两种都认
+    const candidates = [id, 'session-' + id];
+    for (const ws of wsDirs) {
+      if (!ws.startsWith('--')) continue;
+      const wsDir = join(root, ws);
+      let subs = [];
+      try { subs = readdirSync(wsDir); } catch { continue; }
+      for (const sub of subs) {
+        if (candidates.includes(sub)) return wsPathFromDir(ws);
+      }
+    }
+    return '';
+  }
+
+  /**
+   * 扩展启停开关（2026-10-24）
+   * POST /api/qqbot-settings/ext-toggle
+   *   body: { cwd?, kind, file, enabled }
+   *   写 {dataRoot}/.qqbot-extensions/.state/ext-disabled.json
+   */
+  route(ctx, 'POST', '/api/qqbot-settings/ext-toggle', async (req, res) => {
+    try {
+      const body = await readJsonBody(req);
+      if (!body || typeof body !== 'object') return writeJson(res, 400, { error: 'bad body' });
+      const kind = String(body.kind || '').trim();
+      const file = String(body.file || '').trim();
+      const enabled = body.enabled !== false;
+      const cwdParam = String(body.cwd || '').trim();
+      if (!kind || !file) return writeJson(res, 400, { error: 'kind 与 file 必填' });
+
+      const { dataRoot } = resolveDataRootForWorkspace(cwdParam);
+      if (!dataRoot) return writeJson(res, 500, { error: '推不出 dataRoot' });
+
+      let abs = findExtFileInAnyRoot(dataRoot, kind, file);
+      if (!abs) abs = findExtFileDeep(dataRoot, kind, file);
+      if (!abs) return writeJson(res, 404, { error: '扩展文件不存在：' + file });
+
+      const { readDisabledKeys, writeDisabledKeys, extDisabledKey } = await import('./dist/features/ext-packs.js');
+      const key = extDisabledKey(dataRoot, abs);
+      const set = readDisabledKeys(dataRoot);
+      if (enabled) set.delete(key); else set.add(key);
+      writeDisabledKeys(dataRoot, [...set]);
+
+      // ★ 2026-10-24：立刻热重载，不用重启宿主
+      //   ext-reload.ts 是项目里现成的重载注册表（middleware-setup 启动时注册了各 reloader），
+      //   走它就不用自己碰 manager/闭包。工具（tools/）由 SessionManager.reloadAllChannelTools
+      //   负责，这里够不到，所以 tools 的启停仍需 /tools-reload 或重启（回执里说明）。
+      const reloaded = { commands: '', inbound: '', outbound: '', tools: '' };
+      try {
+        const mod = await import('./dist/features/ext-reload.js');
+        if (typeof mod.reloadExtCommands === 'function') {
+          const r = await mod.reloadExtCommands();
+          reloaded.commands = (r && r.error) ? ('失败: ' + r.error) : ((r && r.names) ? r.names.length + ' 个' : 'ok');
+        }
+        if (typeof mod.reloadExtInbound === 'function') {
+          const r = await mod.reloadExtInbound();
+          reloaded.inbound = (r && r.error) ? ('失败: ' + r.error) : 'ok';
+        }
+        if (typeof mod.reloadExtOutbound === 'function') {
+          const r = await mod.reloadExtOutbound();
+          reloaded.outbound = (r && r.error) ? ('失败: ' + r.error) : 'ok';
+        }
+      } catch (e) {
+        reloaded.error = String((e && e.message) || e);
+      }
+
+      // 工具注册表归 SessionManager，只能借 middleware-setup 登记在 globalThis 的 reloader
+      try {
+        const reg = globalThis.__qqbotReloaders;
+        const fn = reg instanceof Map ? (reg.get(dataRoot) || [...reg.values()][0]) : undefined;
+        if (typeof fn === 'function') {
+          const summary = await fn();
+          reloaded.tools = '已重载';
+          reloaded.toolsSummary = String(summary || '').slice(0, 300);
+        } else {
+          reloaded.tools = '需 /tools-reload（没找到 reloader）';
+        }
+      } catch (e) {
+        reloaded.tools = '失败: ' + String((e && e.message) || e);
+      }
+
+      writeJson(res, 200, { ok: true, key, enabled, disabled: [...set], reloaded });
+    } catch (e) {
+      writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 插件市场（2026-10-24）
+  //
+  // 索引仓库：zaofan-make/dsh-qqbot-plugins，根目录 index.json：
+  //   {
+  //     "version": 1,
+  //     "updated": "2026-10-24",
+  //     "plugins": [
+  //       { "id":"demo-author", "name":"示例扩展包", "author":"做早饭", "version":"1.0.0",
+  //         "description":"…", "homepage":"…", "repo":"zaofan-make/dsh-qqbot-plugins",
+  //         "path":"packs/demo-author", "tags":["示例"], "kinds":["tools","commands"] }
+  //     ]
+  //   }
+  //
+  // 安装 = 用 GitHub API 递归拉 path 下所有文件，落到 {dataRoot}/extension-packs/{id}/
+  //   （不用 zip：Node 没内置解压，tar 不认 zip；API 递归最稳，还能挑文件）
+  // 卸载 = 删目录（先确认它在 extension-packs 下，防误删）
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // 索引地址：国内直连 raw.githubusercontent.com 常年不通（主人实测 fetch failed），
+  // 所以按顺序试多个源，第一个成功的就用；回执里会带上用的是哪个。
+  const MARKET_REPO = 'zaofan-make/dsh-qqbot-plugins';
+  const MARKET_BRANCH = 'main';
+  // 索引源顺序（2026-10-24 改）：**实时源优先**
+  //   jsDelivr 对 @main 有缓存，刚合并的提交在它那儿看不到（实测面板一直只有 1 个插件，
+  //   而 raw 上已经是 3 个）。所以索引不能把 jsDelivr 放第一位 ——
+  //   它只留作最后的兜底（CDN 稳，但内容可能滞后）。
+  //   注意：**插件文件**下载仍然用 jsDelivr（文件内容不变，缓存无害，且墙内稳定）。
+  const MARKET_SOURCES = [
+    'https://gh-proxy.com/https://raw.githubusercontent.com/' + MARKET_REPO + '/' + MARKET_BRANCH + '/index.json',
+    'https://raw.githubusercontent.com/' + MARKET_REPO + '/' + MARKET_BRANCH + '/index.json',
+    'https://ghproxy.net/https://raw.githubusercontent.com/' + MARKET_REPO + '/' + MARKET_BRANCH + '/index.json',
+    'https://cdn.jsdelivr.net/gh/' + MARKET_REPO + '@' + MARKET_BRANCH + '/index.json',
+  ];
+  const MARKET_INDEX_URL = MARKET_SOURCES[0];   // 兼容旧引用（展示用）
+
+  /** 依次试多个索引源，返回 { json, source } */
+  async function fetchMarketIndex() {
+    const errs = [];
+    for (const url of MARKET_SOURCES) {
+      try {
+        const txt = await fetchText(url, 8000);
+        const j = JSON.parse(txt);
+        if (!Array.isArray(j.plugins)) j.plugins = [];
+        return { json: j, source: url };
+      } catch (e) {
+        errs.push(url.split('/')[2] + ': ' + String((e && e.message) || e));
+      }
+    }
+    throw new Error('所有索引源都失败 → ' + errs.join(' | '));
+  }
+
+  /**
+   * jsDelivr 文件地址（2026-10-24）
+   * 墙内 raw.githubusercontent.com / api.github.com / data.jsdelivr.com 都连不上，
+   * 实测只有 cdn.jsdelivr.net 通 —— 文件内容也走它。
+   */
+  function jsdelivrFileUrl(repo, branch, relPath) {
+    const segs = String(relPath).replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
+    return 'https://cdn.jsdelivr.net/gh/' + repo + '@' + (branch || 'main') + '/' + segs;
+  }
+
+  /** 把 GitHub raw / API 下载链换成可用镜像（封面图等前端直接用） */
+  function mirrorUrl(url) {
+    if (!url) return url;
+    const s = String(url);
+    if (s.indexOf('raw.githubusercontent.com/') >= 0) {
+      const tail = s.split('raw.githubusercontent.com/')[1];     // owner/repo/branch/path
+      return 'https://cdn.jsdelivr.net/gh/' + tail;
+    }
+    return s;
+  }
+
+  /**
+   * 市场代理配置（2026-10-24 主人要求）
+   *
+   * 背景：墙内 raw.githubusercontent.com / api.github.com / data.jsdelivr.com 全连不上，
+   *   而 Node 原生 fetch **不读 HTTP_PROXY 环境变量**（Node 18+ 就这么设计的），
+   *   面板里点了安装就是一句干巴巴的 "fetch failed"。
+   *   这里给一个手动填代理的口子，填了就所有市场请求都走它。
+   *
+   * 落盘：{dataRoot}/.qqbot-extensions/.state/market-config.json
+   *   { "proxy": "http://127.0.0.1:29290" }
+   *
+   * 实现：用 curl 子进程（Windows 10+ 自带 curl.exe；比手写 CONNECT 稳）。
+   *   没配代理时仍走原生 fetch（大陆 CDN 如 cdn.jsdelivr.net 通常直连没问题）。
+   */
+  function marketConfigPath(dataRoot) {
+    return join(dataRoot, '.qqbot-extensions', '.state', 'market-config.json');
+  }
+
+  function readMarketConfig(dataRoot) {
+    try {
+      const p = marketConfigPath(dataRoot);
+      if (!existsSync(p)) return {};
+      const j = JSON.parse(readFileSync(p, 'utf8'));
+      return j && typeof j === 'object' ? j : {};
+    } catch { return {}; }
+  }
+
+  function writeMarketConfig(dataRoot, cfg) {
+    try {
+      const p = marketConfigPath(dataRoot);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');
+      return true;
+    } catch { return false; }
+  }
+
+  /** 用 curl 走代理取文本（同步执行，简单可靠） */
+  function curlText(url, proxy, timeoutMs) {
+    // execFileSync 已在文件顶部 import（ESM 里不能用 require）
+    const args = ['-sS', '--max-time', String(Math.ceil((timeoutMs || 15000) / 1000)), '-L'];
+    if (proxy) args.push('-x', proxy);
+    args.push('-H', 'User-Agent: dsh-qqbot-plugin-market', url);
+    const out = execFileSync('curl', args, { encoding: 'buffer', maxBuffer: 32 * 1024 * 1024 });
+    return out.toString('utf8');
+  }
+
+  /** 取 GitHub raw 文本（带超时与 UA，GitHub 要 UA） */
+  async function fetchText(url, timeoutMs) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), timeoutMs || 12000);
+    try {
+      const r = await fetch(url, {
+        signal: ac.signal,
+        headers: { 'User-Agent': 'dsh-qqbot-plugin-market', 'Accept': 'application/vnd.github+json' },
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.text();
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  /** 取 GitHub API JSON */
+  async function fetchJson(url, timeoutMs) {
+    const txt = await fetchText(url, timeoutMs);
+    return JSON.parse(txt);
+  }
+
+  /** 递归列出一个仓库子目录下的所有文件（GitHub contents API） */
+  async function listRepoFiles(repo, dir, apiBase) {
+    const out = [];
+    const base = apiBase || 'https://api.github.com';
+    async function walk(d, depth) {
+      if (depth > 6) return;
+      const items = await fetchJson(base + '/repos/' + repo + '/contents/' + encodeURI(d));
+      if (!Array.isArray(items)) return;
+      for (const it of items) {
+        if (it.type === 'file' && it.download_url) out.push({ path: it.path, url: it.download_url, size: it.size || 0 });
+        else if (it.type === 'dir') await walk(it.path, depth + 1);
+      }
+    }
+    await walk(dir, 0);
+    return out;
+  }
+
+  /**
+   * GET /api/qqbot-settings/market?cwd=
+   *   → { ok, index:{plugins:[…]}, installed:['demo-author'…], packsRoot, indexUrl }
+   */
+  route(ctx, 'GET', '/api/qqbot-settings/market', async (req, res) => {
+    try {
+      const q = new URL(req.url, 'http://localhost').searchParams;
+      const cwdParam = String(q.get('cwd') || '').trim();
+      const { dataRoot } = resolveDataRootForWorkspace(cwdParam);
+      if (!dataRoot) return writeJson(res, 500, { error: '推不出 dataRoot' });
+      const packsRoot = join(dataRoot, 'extension-packs');
+      const mcfg = readMarketConfig(dataRoot);
+      const curProxy = String(mcfg.proxy || '');
+
+      let index = { plugins: [] };
+      let indexErr = '';
+      let indexSource = '';
+      try {
+        const r = curProxy
+          ? { json: JSON.parse(curlText(MARKET_SOURCES[0], curProxy, 15000)), source: MARKET_SOURCES[0] + '（走代理 ' + curProxy + '）' }
+          : await fetchMarketIndex();
+        index = r.json;
+        indexSource = r.source;
+        // 封面等图片地址换成镜像，否则前端在墙内显示不出来
+        for (const p of index.plugins) if (p && p.cover) p.cover = mirrorUrl(p.cover);
+      } catch (e) {
+        indexErr = String((e && e.message) || e);
+      }
+
+      // installed 带上本地版本，前端才能判断「有没有新版可升」
+      let installed = [];
+      try {
+        installed = readdirSync(packsRoot)
+          .filter((n) => statSync(join(packsRoot, n)).isDirectory())
+          .map((n) => {
+            let version = '';
+            try {
+              const mf = join(packsRoot, n, 'qqbot-pack.json');
+              if (existsSync(mf)) version = String(JSON.parse(readFileSync(mf, 'utf8')).version || '');
+            } catch {}
+            return { id: n, version };
+          });
+      } catch { installed = []; }
+
+      writeJson(res, 200, { ok: true, index, indexErr, indexSource, proxy: curProxy, installed, packsRoot, indexUrl: MARKET_INDEX_URL + '（多源，实际用: ' + (indexSource || '无') + '）' });
+    } catch (e) {
+      writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+    }
+  });
+
+  /**
+   * POST /api/qqbot-settings/market/install
+   *   body: { cwd?, id }
+   *   按索引里的 repo/path 拉全部文件，写到 extension-packs/{id}/
+   */
+  /**
+   * POST /api/qqbot-settings/market/config
+   *   body: { cwd?, proxy }
+   *   存市场配置（目前只有 proxy）
+   */
+  route(ctx, 'POST', '/api/qqbot-settings/market/config', async (req, res) => {
+    try {
+      const body = await readJsonBody(req);
+      const cwdParam = String((body && body.cwd) || '').trim();
+      const { dataRoot } = resolveDataRootForWorkspace(cwdParam);
+      if (!dataRoot) return writeJson(res, 500, { error: '推不出 dataRoot' });
+      const cfg = readMarketConfig(dataRoot);
+      if (body && typeof body.proxy === 'string') cfg.proxy = body.proxy.trim();
+      const ok = writeMarketConfig(dataRoot, cfg);
+      writeJson(res, ok ? 200 : 500, { ok, config: cfg, path: marketConfigPath(dataRoot) });
+    } catch (e) {
+      writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+    }
+  });
+
+  route(ctx, 'POST', '/api/qqbot-settings/market/install', async (req, res) => {
+    try {
+      const rawType = String((req.headers && req.headers['content-type']) || '');
+      const body = await readJsonBody(req);
+      const id = String((body && body.id) || '').trim();
+      const cwdParam = String((body && body.cwd) || '').trim();
+      if (!body || typeof body !== 'object') {
+        return writeJson(res, 400, { stage: 'parse', error: '请求体解析失败（body 为空或不是 JSON）', contentType: rawType });
+      }
+      if (!id) {
+        return writeJson(res, 400, { stage: 'id', error: 'id 必填', got: body });
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+        return writeJson(res, 400, { stage: 'id-format', error: 'id 只允许字母数字-_', got: id });
+      }
+
+      const { dataRoot } = resolveDataRootForWorkspace(cwdParam);
+      if (!dataRoot) return writeJson(res, 500, { error: '推不出 dataRoot' });
+
+      // 拉索引找到这一条
+      const idxR = await fetchMarketIndex();
+      const idx = idxR.json;
+      const item = (idx.plugins || []).find((p) => p && p.id === id);
+      if (!item) return writeJson(res, 404, { error: '索引里没有这个插件: ' + id, indexSource: idxR.source, ids: (idx.plugins || []).map((x) => x && x.id) });
+      if (!item.repo || !item.path) return writeJson(res, 400, { stage: 'repo-path', error: '索引条目缺 repo/path', item });
+
+      // 文件清单来自索引的 files 字段 —— 不走 GitHub 目录 API（墙内连不上）。
+      const list = Array.isArray(item.files) ? item.files : [];
+      if (!list.length) {
+        return writeJson(res, 400, {
+          stage: 'files',
+          error: '索引条目缺 files 清单',
+          indexSource: idxR.source,
+          itemKeys: Object.keys(item),
+          item,
+        });
+      }
+
+      const dest = join(dataRoot, 'extension-packs', id);
+      mkdirSync(dest, { recursive: true });
+      const branch = item.branch || 'main';
+      const destNorm = dest.replace(/\\/g, '/');
+
+      // 并发下载（原来串行 + 每个文件起一个 curl 进程，几 KB 也要好几秒）
+      const mcfg2 = readMarketConfig(dataRoot);
+      const px = String(mcfg2.proxy || '');
+      const jobs = list.map(async (rel) => {
+        const relPath = String(rel).replace(/^\.?\/+/, '');
+        if (!relPath) return { ok: false, rel, err: '空路径' };
+        const abs = join(dest, relPath);
+        if (!abs.replace(/\\/g, '/').startsWith(destNorm + '/')) return { ok: false, rel, err: '路径越界' };
+        try {
+          mkdirSync(dirname(abs), { recursive: true });
+          const url = jsdelivrFileUrl(item.repo, branch, String(item.path) + '/' + relPath);
+          const content = px ? curlText(url, px, 20000) : await fetchText(url, 20000);
+          writeFileSync(abs, content, 'utf8');
+          return { ok: true, rel };
+        } catch (e) {
+          return { ok: false, rel, err: String((e && e.message) || e) };
+        }
+      });
+      const results = await Promise.all(jobs);
+      let written = 0; const failed = [];
+      for (const r of results) {
+        if (r.ok) written++;
+        else failed.push(r.rel + ': ' + (r.err || '未知'));
+      }
+
+      writeJson(res, 200, { ok: written > 0, written, total: files.length, failed, dest });
+    } catch (e) {
+      writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+    }
+  });
+
+  /**
+   * POST /api/qqbot-settings/market/remove
+   *   body: { cwd?, id }
+   */
+  route(ctx, 'POST', '/api/qqbot-settings/market/remove', async (req, res) => {
+    try {
+      const body = await readJsonBody(req);
+      const id = String((body && body.id) || '').trim();
+      const cwdParam = String((body && body.cwd) || '').trim();
+      if (!id) return writeJson(res, 400, { error: 'id 必填' });
+      if (!/^[a-zA-Z0-9_-]+$/.test(id)) return writeJson(res, 400, { error: 'id 只允许字母数字-_' });
+
+      const { dataRoot } = resolveDataRootForWorkspace(cwdParam);
+      if (!dataRoot) return writeJson(res, 500, { error: '推不出 dataRoot' });
+      const packsRoot = join(dataRoot, 'extension-packs');
+      const target = join(packsRoot, id);
+      const norm = (p) => p.replace(/\\/g, '/');
+      if (!norm(target).startsWith(norm(packsRoot) + '/')) return writeJson(res, 400, { error: '路径越界' });
+      if (!existsSync(target)) return writeJson(res, 404, { error: '没装: ' + id });
+
+      rmSync(target, { recursive: true, force: true });
+      writeJson(res, 200, { ok: true, removed: target });
+    } catch (e) {
+      writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+    }
+  });
+
+  route(ctx, 'GET', '/api/qqbot-settings/extensions', async (req, res) => {
+    try {
+      // ★ 2026-10-24 修：优先用 ?cwd=（当前会话的工作区），扩展目录跟着工作区走
+      //   原先只用 resolveContextlessDataRoot()（=首个 bot 实例的 dataRoot），
+      //   切换会话到别的工作区后面板还指向老工作区，主人实测发现。
+      // 工作区来源优先级：?cwd= ＞ ?sid= 反查 ＞ 默认 dataRoot
+      let cwdParam = '';
+      let sidParam = '';
+      try {
+        const q = new URL(req.url, 'http://localhost').searchParams;
+        cwdParam = String(q.get('cwd') || '').trim();
+        sidParam = String(q.get('sid') || '').trim();
+      } catch { /* ignore */ }
+      let wsResolvedBy = cwdParam ? 'cwd' : '';
+      if (!cwdParam && sidParam) {
+        const bySid = resolveWorkspaceBySid(sidParam);
+        if (bySid) { cwdParam = bySid; wsResolvedBy = 'sid'; }
+      }
+      // ★ 尊重 bot 配置里的 dataRoot（主人 2026-10-24 指出）
+      const _dr = resolveDataRootForWorkspace(cwdParam);
+      const dataRoot = _dr.dataRoot;
+      if (!dataRoot) return writeJson(res, 200, { ok: false, error: '推不出 dataRoot（还没绑过机器人？）' });
+
+      const builtinRoot = join(dataRoot, '.qqbot-extensions');
+      const builtin = scanExtRoot(builtinRoot, dataRoot);
+
+      // ① 内置目录
+      const result = {
+        ok: true,
+        dataRoot,
+        workspaceCwd: cwdParam || '',
+        workspaceFrom: wsResolvedBy || 'default',
+        dataRootFrom: _dr.source,
+        builtinRoot,
+        builtin,
+        packsRoot: join(dataRoot, 'extension-packs'),
+        packs: [],
+      };
+
+      // ② 扩展包：扫 packsRoot 下每个子目录
+      const packsRoot = result.packsRoot;
+      let packNames = [];
+      try { packNames = readdirSync(packsRoot); } catch { packNames = []; }
+      for (const name of packNames) {
+        const dir = join(packsRoot, name);
+        let st = null;
+        try { st = statSync(dir); } catch { continue; }
+        if (!st.isDirectory()) continue;
+
+        // 清单文件（可选）
+        let meta = {};
+        for (const f of ['qqbot-pack.json', 'pack.json', 'package.json']) {
+          const mf = join(dir, f);
+          if (!existsSync(mf)) continue;
+          try {
+            const j = JSON.parse(readFileSync(mf, 'utf8'));
+            meta = {
+              name: j.name || j.displayName || '',
+              author: j.author || (j.author && j.author.name) || '',
+              desc: j.description || j.desc || '',
+              version: j.version || '',
+              homepage: j.homepage || j.repository || '',
+            };
+            break;
+          } catch { /* 清单坏了就当没有 */ }
+        }
+
+        const scanned = scanExtRoot(dir, dataRoot);
+        if (scanned.total === 0) continue;   // 空目录不显示
+        result.packs.push({
+          dirName: name,
+          dir,
+          meta,
+          kinds: scanned.kinds,
+          total: scanned.total,
+        });
+      }
+      result.packs.sort((a, b) => a.dirName.localeCompare(b.dirName));
+
+      // ③ 汇总：哪几个扩展声明了设置页
+      const settingsPages = [];
+      const collect = (list, from) => {
+        for (const it of list) {
+          if (it.hasSettings) settingsPages.push({ from, id: it.id, title: it.settingsTitle || it.id });
+        }
+      };
+      for (const k of EXT_KINDS) collect(builtin.kinds[k], 'builtin');
+      for (const p of result.packs) {
+        for (const k of EXT_KINDS) collect(p.kinds[k], p.meta.name || p.dirName);
+      }
+      result.settingsPages = settingsPages;
+
+      // ★ 2026-10-24：统一补启停状态（scanExtKind 是顶层函数，拿不到路由里的 disabledSet）
+      let _ds = new Set();
+      try {
+        const m = await import('./dist/features/ext-packs.js');
+        _ds = m.readDisabledKeys(dataRoot);
+      } catch { /* 拿不到就当全启用 */ }
+      const _root = String(dataRoot).split('\\').join('/').split('/').join('/');
+      const _mark = (list) => {
+        for (const it of list) {
+          const abs = it.__abs || '';
+          const rel = abs.split('\\').join('/').split('/').join('/');
+          const key = rel.indexOf(_root + '/') === 0 ? rel.slice(_root.length + 1) : abs;
+          it.disabled = _ds.has(key);
+        }
+      };
+      for (const k of EXT_KINDS) _mark(builtin.kinds[k] || []);
+      for (const pk of result.packs) for (const k of EXT_KINDS) _mark((pk.kinds && pk.kinds[k]) || []);
+
+
+      writeJson(res, 200, result);
+    } catch (e) {
+      writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+    }
   });
 
   // ── 🚀 群发任务「后台自动推进」(2026-09-10 修: 原设计靠 client 每次 list 驱动, 页面不动就永久卡 queued) ──

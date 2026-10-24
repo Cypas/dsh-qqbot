@@ -2927,6 +2927,19 @@ const toolDefs: Array<{ name: string; tool: unknown }> = [
         extDiag(`注册失败: ${def.name} → ${msg}`);
       }
     }
+  // ★ 2026-10-24（主人实测驱动）：回收「本轮没扫到」的旧工具。
+  //   原实现只在 for(def of defs) 里按名字替换 —— 停用/删除的扩展**不在 defs 里**，
+  //   于是它上次注册的 disposer 永远躺在 myDisposers 里不被调用 ⇒ 工具残留在 AI 侧，
+  //   表现就是"能热启动、不能热关闭"。这里循环结束后统一比对，多余的统统 dispose。
+  try {
+    const current = new Set(defs.map((d) => d.name));
+    for (const [name, dispose] of [...myDisposers]) {
+      if (current.has(name)) continue;
+      try { dispose(); } catch { /* 旧句柄已失效 */ }
+      myDisposers.delete(name);
+      extDiag('回收停用/删除的扩展工具: ' + name);
+    }
+  } catch { /* 清理失败不影响主流程 */ }
   } catch (err) {
     ctx.logger?.warn?.(`[channel-tools] 扩展工具加载异常(已忽略): ${err instanceof Error ? err.message : String(err)}`);
     extDiag(`加载异常: ${err instanceof Error ? err.message : String(err)}`);
@@ -3692,6 +3705,62 @@ function toolsOfScope(agentCtx: unknown): { restrict?: (f: unknown) => unknown }
  *   ② `restrict()` 的返回值是**函数**，释放必须走 {@link liftRestriction}。
  * 幂等：同一作用域状态没变化就直接 return，不重复设/撤 restriction（避免无谓变更通知与抖动）。
  */
+/**
+ * 扩展工具启停：用 per-scope restrict 剪枝（2026-10-24）
+ *
+ * 为什么不能只靠"扫描时跳过"：
+ *   hotReloadChannelTools 的实现是 **重新 apply**（只注册新工具），
+ *   而工具注册表按名字覆盖 —— **停用的工具因为这次没注册，就留在原地不动**。
+ *   所以"关掉开关"对 AI 侧无效，必须显式让它不可见。
+ *
+ * DSH 自己的做法就是这个（见 session-manager 里 ensureContextToolsGlobal 那段注释）：
+ *   工具全局注册一次、永不注销，再用 ctx.tools.restrict({ deny }) 按会话剪枝。
+ *   我们照抄：停用的扩展工具名进 deny 列表。
+ *
+ * 幂等：restrict 返回 dispose；每次 apply 先撤销上一次的，再按当前 disabled 重挂。
+ */
+let __extRestrictDispose: (() => void) | undefined;
+
+export function applyExtDisabledRestrict(agentCtx: unknown, dataRoot: string, extToolNames: string[]): void {
+  try {
+    // 先把上一次的剪枝撤掉（否则换开关后会叠加）
+    if (__extRestrictDispose) { __extRestrictDispose(); __extRestrictDispose = undefined; }
+    if (!agentCtx || !dataRoot || extToolNames.length === 0) return;
+
+    const toolsObj = toolsOfScope(agentCtx);
+    const restrict = toolsObj?.restrict as ((o: { deny: string[] }) => unknown) | undefined;
+    if (typeof restrict !== 'function') return;
+
+    // 读「已停用」集合，与每个扩展工具的真实路径比对，得出要 deny 的名字
+    let disabled = new Set<string>();
+    try {
+      const mod = require('../features/ext-packs.js') as { readDisabledKeys?: (d: string) => Set<string> };
+      if (typeof mod.readDisabledKeys === 'function') disabled = mod.readDisabledKeys(dataRoot);
+    } catch { /* 拿不到就当全启用 */ }
+    if (disabled.size === 0) return;
+
+    // extToolNames 里我们放的是 "toolName\u0000absPath"
+    const deny: string[] = [];
+    const norm = (p: string) => String(p).split('\\').join('/');
+    const root = norm(dataRoot);
+    for (const entry of extToolNames) {
+      const [name, abs] = entry.split('\u0000');
+      if (!name || !abs) continue;
+      const rel = norm(abs);
+      const key = rel.indexOf(root + '/') === 0 ? rel.slice(root.length + 1) : rel;
+      if (disabled.has(key)) deny.push(name);
+    }
+    if (deny.length === 0) return;
+
+    const d = restrict.call(toolsObj, { deny });
+    if (typeof d === 'function') __extRestrictDispose = d as () => void;
+    else if (d && typeof (d as { dispose?: unknown }).dispose === 'function') {
+      const dd = d as { dispose: () => void };
+      __extRestrictDispose = () => { dd.dispose(); };
+    }
+  } catch { /* 剪枝失败不影响主流程：工具会多留一个，但不是致命错 */ }
+}
+
 export function restrictContextTools(agentCtx: unknown, shouldHave: boolean, env?: { dataRoot?: string; sessionKey?: string }): void {
   try {
     if (!agentCtx || typeof agentCtx !== 'object') return;

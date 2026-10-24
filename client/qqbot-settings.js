@@ -6019,6 +6019,949 @@ var QQS_THEME_CSS = [
       closePanel()
     }
 
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 「QQ机器人扩展」会话页签（2026-10-24）
+    //
+    // 会话页顶部与「对话 / 轨迹 / 记忆 / 白板看板」并列，进会话就能看到当前工作区
+    // 装了哪些扩展，不用切到设置页。数据来源 GET /api/qqbot-settings/extensions。
+    //
+    // 两块来源：
+    //   · 内置扩展   {dataRoot}/.qqbot-extensions/{tools,commands,...}/
+    //   · 扩展包     {dataRoot}/extension-packs/{包名}/{同样的子目录}/
+    //     包目录里放 qqbot-pack.json 可声明 name/author/desc/version
+    // ═════════════════════════════════════════════════════════════════════════
+    var _lastCwd = ''
+    var _lastSid = ''
+    // 当前会话工作区（跟随 GUI 切换工作区）：与 dsh-auto-memory 的 currentWs() 同一套取法
+    // sessions.list.getSnapshot().byId[current].cwd 是官方 buildListSnapshot 投影出来的权威字段
+    /** 取当前会话 id（cwd 拿不到时后端靠它反查工作区） */
+    function curSessionId() {
+      try {
+        var svc = _extSessionsSvc
+        if (svc && svc.list && typeof svc.list.getSnapshot === 'function') {
+          var snap = svc.list.getSnapshot()
+          if (snap && snap.current) return String(snap.current)
+        }
+      } catch (e) {}
+      try {
+        var raw = localStorage.getItem('dsh.sessions.current')
+        if (raw) { var o = JSON.parse(raw); if (o && o.sessionId) return String(o.sessionId) }
+      } catch (e) {}
+      return ''
+    }
+
+    function curWorkspaceCwd() {
+      try {
+        var svc = _extSessionsSvc
+        if (svc && svc.list && typeof svc.list.getSnapshot === 'function') {
+          var snap = svc.list.getSnapshot()
+          if (!snap) return ''
+          var id = snap.current
+          if (id === undefined || id === null) return ''
+          var row = snap.byId && snap.byId[id]
+          if (row && typeof row.cwd === 'string') return row.cwd
+        }
+      } catch (e) {}
+      // 兜底：宿主持久化镜像（dock 球也在用这个键）
+      try {
+        var raw = localStorage.getItem('dsh.sessions.current')
+        if (raw) { var o = JSON.parse(raw); if (o && o.cwd) return String(o.cwd) }
+      } catch (e) {}
+      return ''
+    }
+
+    var EXT_KIND_META = [
+      { key: 'tools',     label: '扩展工具', icon: '🔧', hint: '模型可调用的工具' },
+      { key: 'commands',  label: '斜杠命令', icon: '⌘',  hint: '/ 开头的命令' },
+      { key: 'botplay',   label: '游戏裁判', icon: '🎲', hint: '群内小游戏' },
+      { key: 'hooks',     label: '事件钩子', icon: '🪝', hint: '生命周期回调' },
+      { key: 'inbound',   label: '入站处理', icon: '📥', hint: '消息进模型前' },
+      { key: 'outbound',  label: '出站处理', icon: '📤', hint: '模型输出后' },
+    ]
+
+    function ExtPanel() {
+      var _a = useState(null), data = _a[0], setData = _a[1]
+      var _b = useState(true), loading = _b[0], setLoading = _b[1]
+      var _c = useState(''), err = _c[0], setErr = _c[1]
+      var _d = useState('builtin'), tab = _d[0], setTab = _d[1]
+      var _e = useState(0), tick = _e[0], setTick = _e[1]
+      var _sel = useState(null), sel = _sel[0], setSel = _sel[1]   // 正在编辑哪个扩展的设置
+      function openSettings(info) { setSel(info) }
+      // 首次进市场页签 -> 拉一次索引
+      useEffect(function () { if (tab === 'market' && !market && !loadingMarket) loadMarket() }, [tab])
+      var _filter = useState(''), filter = _filter[0], setFilter = _filter[1]
+      var _tog = useState(false), toggling = _tog[0], setToggling = _tog[1]
+      function toggleExt(info) {
+        setToggling(true)
+        var body = { kind: info.kind, file: info.file, enabled: info.enabled }
+        var cw = curWorkspaceCwd()
+        if (cw) body.cwd = cw
+        fetch('/api/qqbot-settings/ext-toggle', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (!d || d.ok === false) { console.warn('[ext-toggle] 失败', d); }
+            else if (d.reloaded) {
+              var r = d.reloaded
+              var bits = []
+              if (r.commands) bits.push('命令 ' + r.commands)
+              if (r.inbound) bits.push('入站 ' + r.inbound)
+              if (r.outbound) bits.push('出站 ' + r.outbound)
+              var tail = r.tools ? '；工具' + r.tools : ''
+              console.log('[ext-toggle] 热重载:', bits.join(' / ') + tail)
+              if (typeof window !== 'undefined' && window.__qqsExtToast) window.__qqsExtToast(bits.join(' / ') + tail)
+            }
+            setTick(function (n) { return n + 1 })
+          })
+          .catch(function (e) { console.warn('[ext-toggle] 异常', e) })
+          .then(function () { setToggling(false) })
+      }
+      // ── 插件市场（2026-10-24）──
+      var _market = useState(null), market = _market[0], setMarket = _market[1]
+      var _loadingMarket = useState(false), loadingMarket = _loadingMarket[0], setLoadingMarket = _loadingMarket[1]
+      var _searchMarket = useState(''), searchMarket = _searchMarket[0], setSearchMarket = _searchMarket[1]
+      var _busyId = useState(''), busyId = _busyId[0], setBusyId = _busyId[1]
+      var marketCount = (market && market.index && market.index.plugins) ? market.index.plugins.length : 0
+
+      function loadMarket() {
+        setLoadingMarket(true)
+        var cw = curWorkspaceCwd()
+        var qs = cw ? ('?cwd=' + encodeURIComponent(cw)) : ''
+        fetch('/api/qqbot-settings/market' + qs, { credentials: 'same-origin' })
+          .then(function (r) { return r.json() })
+          .then(function (d) { if (d && d.ok) setMarket(d); else console.warn('[market] 读取失败', d) })
+          .catch(function (e) { console.warn('[market] 异常', e) })
+          .then(function () { setLoadingMarket(false) })
+      }
+      function marketPost(path, body) {
+        var cw = curWorkspaceCwd()
+        if (cw) body.cwd = cw
+        return fetch(path, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })   // 返回原始 Response：调用方要看 r.ok 判断 HTTP 状态，并自己 r.text()
+      }
+      function onInstall(info) {
+        setBusyId(info.id)
+        marketPost('/api/qqbot-settings/market/install', { id: info.id })
+          .then(function (r) {
+            return r.text().then(function (txt) {
+              var d = null
+              try { d = JSON.parse(txt) } catch (e) { d = { error: String(txt).slice(0, 200) } }
+              if (!r.ok || !d || d.ok === false) {
+                console.warn('[market] 安装失败 HTTP', r.status, d)
+                var why = (d && (d.error || '')) || ('HTTP ' + r.status)
+                var tag = (d && d.stage) ? ('［' + d.stage + '］') : ''
+                if (window.__qqsExtToast) window.__qqsExtToast('安装失败' + tag + '：' + why)
+                return
+              }
+              if (window.__qqsExtToast) window.__qqsExtToast('已安装 ' + info.id + '（' + d.written + '/' + d.total + ' 个文件）')
+            })
+          })
+          .catch(function (e) { console.warn('[market] 安装异常', e); if (window.__qqsExtToast) window.__qqsExtToast('安装异常：' + e) })
+          .then(function () { setBusyId(''); loadMarket(); setTick(function (n) { return n + 1 }) })
+      }
+      // ── 市场代理配置（2026-10-24 主人要求：墙内要能填代理）──
+      var _proxyInput = useState(''), proxyInput = _proxyInput[0], setProxyInput = _proxyInput[1]
+      var _savingProxy = useState(false), savingProxy = _savingProxy[0], setSavingProxy = _savingProxy[1]
+      var _proxyInited = useState(false), proxyInited = _proxyInited[0], setProxyInited = _proxyInited[1]
+      useEffect(function () {
+        if (market && !proxyInited) { setProxyInput(market.proxy || ''); setProxyInited(true) }
+      }, [market])
+      function onSaveProxy() {
+        setSavingProxy(true)
+        var cw = curWorkspaceCwd()
+        var body = { proxy: String(proxyInput || '').trim() }
+        if (cw) body.cwd = cw
+        fetch('/api/qqbot-settings/market/config', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (!d || d.ok === false) {
+              if (window.__qqsExtToast) window.__qqsExtToast('代理保存失败：' + ((d && d.error) || '未知'))
+            } else {
+              if (window.__qqsExtToast) window.__qqsExtToast(body.proxy ? ('代理已设为 ' + body.proxy + '，重新拉索引…') : '已切回直连，重新拉索引…')
+              setProxyInited(false)
+              setMarket(null)
+              loadMarket()
+            }
+          })
+          .catch(function (e) { if (window.__qqsExtToast) window.__qqsExtToast('保存异常：' + e) })
+          .then(function () { setSavingProxy(false) })
+      }
+
+      function onRemove(info) {
+        setBusyId(info.id)
+        marketPost('/api/qqbot-settings/market/remove', { id: info.id })
+          .then(function (r) {
+            return r.text().then(function (txt) {
+              var d = null
+              try { d = JSON.parse(txt) } catch (e) { d = { error: String(txt).slice(0, 200) } }
+              if (!r.ok || !d || d.ok === false) {
+                var why = (d && (d.error || '')) || ('HTTP ' + r.status)
+                if (window.__qqsExtToast) window.__qqsExtToast('卸载失败：' + why)
+                return
+              }
+              if (window.__qqsExtToast) window.__qqsExtToast('已卸载 ' + info.id)
+            })
+          })
+          .catch(function (e) { console.warn('[market] 卸载异常', e) })
+          .then(function () { setBusyId(''); loadMarket(); setTick(function (n) { return n + 1 }) })
+      }
+
+      // 工作区切换后自动重载：cwd 一变就刷新
+      useEffect(function () {
+        var nowCwd = curWorkspaceCwd()
+        var nowSid = curSessionId()
+        if ((nowCwd && nowCwd !== _lastCwd) || (nowSid && nowSid !== _lastSid)) {
+          _lastCwd = nowCwd; _lastSid = nowSid
+          setTick(function (n) { return n + 1 })
+        }
+      })
+
+      useEffect(function () {
+        var dead = false
+        setLoading(true)
+        var _cwd = curWorkspaceCwd()
+        var _sid = curSessionId()
+        var _qs = []
+        if (_cwd) _qs.push('cwd=' + encodeURIComponent(_cwd))
+        if (_sid) _qs.push('sid=' + encodeURIComponent(_sid))
+        var _url = '/api/qqbot-settings/extensions' + (_qs.length ? ('?' + _qs.join('&')) : '')
+        fetch(_url, { credentials: 'same-origin' })
+          .then(function (r) { return r.json() })
+          .then(function (d) { if (!dead) { setData(d); setErr(d && d.ok === false ? (d.error || '未知错误') : ''); } })
+          .catch(function (e) { if (!dead) setErr(String((e && e.message) || e)) })
+          .then(function () { if (!dead) setLoading(false) })
+        return function () { dead = true }
+      }, [tick])
+
+      var S = extStyles()
+
+      if (loading && !data) return h('div', { style: S.wrap }, h('div', { style: S.hint }, '正在读取扩展…'))
+      if (err) return h('div', { style: S.wrap },
+        h('div', { style: S.errBox }, '读取失败：' + err),
+        h('button', { style: S.btn, onClick: function () { setTick(tick + 1) } }, '重试'))
+      if (!data) return h('div', { style: S.wrap }, h('div', { style: S.hint }, '暂无数据'))
+
+      // 汇总计数
+      var builtinTotal = data.builtin ? data.builtin.total : 0
+      var packList = data.packs || []
+      var packTotal = packList.reduce(function (n, p) { return n + (p.total || 0) }, 0)
+      var settingsCount = (data.settingsPages || []).length
+
+      // 当前 tab 的内容块列表
+      var groups = []
+      if (tab === 'builtin') {
+        groups = [{ title: '内置扩展', subtitle: data.builtinRoot || '', kinds: (data.builtin || {}).kinds || {}, isPack: false }]
+      } else if (tab === 'packs') {
+        groups = packList.map(function (p) {
+          var meta = p.meta || {}
+          return {
+            title: meta.name || p.dirName,
+            subtitle: [meta.author ? ('作者 ' + meta.author) : '', meta.version ? ('v' + meta.version) : '', meta.desc || ''].filter(Boolean).join(' · ') || p.dir,
+            kinds: p.kinds || {},
+            isPack: true,
+            raw: p,
+          }
+        })
+      } else {
+        // 设置页 tab
+        groups = []
+      }
+
+      function kindRows(kinds, kindMeta, onOpen) {
+        var list = (kinds && kinds[kindMeta.key]) || []
+        if (!list.length) return null
+        return h('div', { key: kindMeta.key, style: S.kindBlock },
+          h('div', { style: S.kindHead },
+            h('span', { style: S.kindIcon }, kindMeta.icon),
+            h('span', { style: S.kindLabel }, kindMeta.label),
+            h('span', { style: S.kindCount }, String(list.length)),
+            h('span', { style: S.kindHint }, kindMeta.hint)),
+          h('div', { style: S.chipWrap },
+            list.map(function (it) {
+              return h('span', {
+                key: it.id,
+                style: it.hasSettings ? S.chipClickable : S.chip,
+                title: it.name + '  ·  ' + Math.round(it.size / 102.4) / 10 + ' KB' + (it.hasSettings ? '（点击打开设置）' : ''),
+                onClick: it.hasSettings ? function () { onOpen({ kind: kindMeta.key, file: it.name }) } : undefined,
+              }, it.id, it.hasSettings ? h('span', { style: S.gear }, ' ⚙') : null)
+            })))
+      }
+
+      return h('div', { style: S.wrap },
+        // 头部
+        h('div', { style: S.head },
+          h('div', null,
+            h('div', { style: S.title }, 'QQ 机器人扩展'),
+            h('div', { style: S.sub }, '当前工作区已装的扩展；放独立目录的扩展包也能在这里看到')),
+          h('button', { style: S.btn, onClick: function () { setTick(tick + 1) } }, loading ? '刷新中…' : '刷新')),
+
+        // 统计卡
+        h('div', { style: S.stats },
+          statCard(S, '内置扩展', builtinTotal, '个文件'),
+          statCard(S, '扩展包', packList.length, '个包 · 共 ' + packTotal + ' 个扩展'),
+          statCard(S, '带设置页', settingsCount, '个扩展可配置')),
+
+        // 路径提示
+        h('div', { style: S.pathBox },
+          h('div', { style: S.pathRow }, h('span', { style: S.pathKey }, '当前工作区'), h('code', { style: S.code }, (data.workspaceCwd || curWorkspaceCwd() || '（未识别，回退到默认数据根）'),
+            data.workspaceFrom && data.workspaceFrom !== 'default'
+              ? h('span', { style: { fontSize: 10.5, opacity: .6, marginLeft: 6 } }, 'via ' + data.workspaceFrom)
+              : null)),
+          h('div', { style: S.pathRow }, h('span', { style: S.pathKey }, '内置目录'), h('code', { style: S.code }, data.builtinRoot || '—')),
+          h('div', { style: S.pathRow }, h('span', { style: S.pathKey }, '扩展包目录'), h('code', { style: S.code }, data.packsRoot || '—'))),
+
+        // 页签
+        h('div', { style: S.tabs },
+          tabBtn(S, '内置扩展', 'builtin', tab, setTab, builtinTotal),
+          tabBtn(S, '扩展包', 'packs', tab, setTab, packList.length),
+          tabBtn(S, '设置中心', 'settings', tab, setTab, settingsCount),
+          tabBtn(S, '市场', 'market', tab, setTab, marketCount)),
+
+        // 内容
+        tab === 'market'
+          ? renderMarket(S, market, loadingMarket, searchMarket, setSearchMarket, onInstall, onRemove, busyId, proxyInput, setProxyInput, onSaveProxy, savingProxy)
+          : tab === 'settings'
+          ? renderSettingsCenter(S, data, filter, setFilter, openSettings, toggleExt, toggling)
+          : (groups.length
+            ? groups.map(function (g, gi) {
+                var hasAny = EXT_KIND_META.some(function (k) { return ((g.kinds || {})[k.key] || []).length > 0 })
+                return h('div', { key: gi, style: S.group },
+                  h('div', { style: S.groupHead },
+                    h('span', { style: S.groupTitle }, g.title),
+                    h('span', { style: S.groupSub }, g.subtitle)),
+                  hasAny
+                    ? EXT_KIND_META.map(function (k) { return kindRows(g.kinds, k, openSettings) })
+                    : h('div', { style: S.empty }, '这个' + (g.isPack ? '包' : '目录') + '里还没放扩展'))
+              })
+            : h('div', { style: S.empty }, tab === 'packs' ? '还没有扩展包。在 ' + (data.packsRoot || '') + ' 下建一个子文件夹，里面按 tools/commands/… 放扩展即可。' : '没有扩展'))
+        ,
+        sel ? h(ExtSettings, { kind: sel.kind, file: sel.file, cwd: (data && data.workspaceCwd) || '', onClose: function () { setSel(null) } }) : null
+      )
+    }
+
+    /**
+     * 扩展自定义设置面板（2026-10-24）
+     *
+     * 扩展在文件里声明：
+     *   export const qqbotSettingsPage = {
+     *     title: '我的设置',
+     *     schema: [
+     *       { key:'enabled', type:'bool',   label:'启用' },
+     *       { key:'dirs',    type:'list',   label:'目录列表' },
+     *       { key:'apiKey',  type:'string', label:'API Key', secret:true },
+     *       { key:'mode',    type:'select', label:'模式', options:['a','b'] },
+     *     ],
+     *   }
+     * 面板自动渲染表单，值存 {dataRoot}/.qqbot-extensions/.state/ext-config/{扩展id}.json
+     */
+    function ExtSettings(props) {
+      var kind = props.kind, file = props.file, cwd = props.cwd, onClose = props.onClose
+      var _a = useState(null), data = _a[0], setData = _a[1]
+      var _b = useState({}), vals = _b[0], setVals = _b[1]
+      var _c = useState(true), loading = _c[0], setLoading = _c[1]
+      var _d = useState(''), msg = _d[0], setMsg = _d[1]
+      var _e = useState(''), err = _e[0], setErr = _e[1]
+
+      useEffect(function () {
+        var dead = false
+        setLoading(true); setErr('')
+        var qs = '?kind=' + encodeURIComponent(kind) + '&file=' + encodeURIComponent(file)
+        if (cwd) qs += '&cwd=' + encodeURIComponent(cwd)
+        fetch('/api/qqbot-settings/ext-panel' + qs, { credentials: 'same-origin' })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (dead) return
+            if (!d || d.ok === false) { setErr((d && d.error) || '读取失败'); return }
+            setData(d)
+            setVals(d.values && typeof d.values === 'object' ? d.values : {})
+          })
+          .catch(function (e) { if (!dead) setErr(String((e && e.message) || e)) })
+          .then(function () { if (!dead) setLoading(false) })
+        return function () { dead = true }
+      }, [kind, file, cwd])
+
+      function save() {
+        setMsg(''); setErr('')
+        fetch('/api/qqbot-settings/ext-panel', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: kind, file: file, cwd: cwd, values: vals }),
+        })
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            if (d && d.ok) setMsg('已保存 → ' + (d.configPath || ''))
+            else setErr((d && d.error) || '保存失败')
+          })
+          .catch(function (e) { setErr(String((e && e.message) || e)) })
+      }
+
+      var S = extStyles()
+      var page = (data && data.page) || {}
+      var schema = page.schema || []
+      var title = page.title || (data && data.extId) || file
+
+      return h('div', { style: S.modalMask, onClick: onClose },
+        h('div', { style: S.modalBox, onClick: function (e) { e.stopPropagation() } },
+          h('div', { style: S.modalHead },
+            h('div', null,
+              h('div', { style: S.modalTitle }, title + ' · 设置'),
+              h('div', { style: S.modalSub }, kind + '/' + file)),
+            h('button', { style: S.btn, onClick: onClose }, '关闭')),
+
+          loading ? h('div', { style: S.hint }, '读取中…') :
+          err ? h('div', { style: S.errBox }, err) :
+          (schema.length === 0
+            ? h('div', null,
+                h('div', { style: S.empty },
+                  page._err ? ('读取失败：' + page._err)
+                  : page._miss ? ('文件里没有 qqbotSettingsPage。实际导出：' + (page._keys || []).join(', '))
+                  : '这个扩展没有声明配置项。'),
+                h('div', { style: S.emptyHint },
+                  page._err || page._miss
+                    ? '检查扩展文件里的 export const qqbotSettingsPage = { title, schema: [...] } 写法。'
+                    : '在它的文件里 export const qqbotSettingsPage = { title, schema: [...] } 即可在这里出现表单。'))
+            : h('div', null,
+                schema.map(function (f, i) { return renderExtField(S, f, i, vals, setVals) }),
+                h('div', { style: S.modalFoot },
+                  h('button', { style: S.btnPrimary, onClick: save }, '保存'),
+                  msg ? h('span', { style: S.savedMsg }, msg) : null,
+                  err ? h('span', { style: S.errMsg }, err) : null))),
+
+          data && data.configPath
+            ? h('div', { style: S.cfgPath }, '配置文件：', h('code', { style: S.code }, data.configPath))
+            : null))
+    }
+
+    /** 按 schema 渲染一个字段 */
+    function renderExtField(S, f, i, vals, setVals) {
+      var key = f.key || ('f' + i)
+      var val = vals[key]
+      if (val === undefined && f.default !== undefined) val = f.default
+      function upd(v) { var o = Object.assign({}, vals); o[key] = v; setVals(o) }
+      var label = f.label || key
+      var hint = f.hint || f.description || ''
+
+      var control
+      if (f.type === 'bool') {
+        control = h('input', { type: 'checkbox', checked: !!val, onChange: function (e) { upd(e.target.checked) } })
+      } else if (f.type === 'number') {
+        control = h('input', { type: 'number', style: S.fieldInput, value: val === undefined ? '' : val,
+          onChange: function (e) { var v = e.target.value; upd(v === '' ? undefined : Number(v)) } })
+      } else if (f.type === 'select') {
+        var opts = Array.isArray(f.options) ? f.options : []
+        control = h('select', { style: S.fieldInput, value: val === undefined ? '' : val,
+          onChange: function (e) { upd(e.target.value) } },
+          opts.map(function (o) {
+            var v = (o && typeof o === 'object') ? (o.value !== undefined ? o.value : o.label) : o
+            var t = (o && typeof o === 'object') ? (o.label || o.value) : o
+            return h('option', { key: String(v), value: String(v), style: { background: '#2a2a2e', color: '#e8e8ea' } }, String(t))
+          }))
+      } else if (f.type === 'list') {
+        var arr = Array.isArray(val) ? val : []
+        control = h('div', null,
+          h('textarea', { style: Object.assign({}, S.fieldInput, { minHeight: 62, resize: 'vertical' }),
+            value: arr.join('\n'),
+            placeholder: '一行一项',
+            onChange: function (e) { upd(e.target.value.split('\n').map(function (x) { return x.trim() }).filter(Boolean)) } }))
+      } else {
+        control = h('input', {
+          type: f.secret ? 'password' : 'text',
+          style: S.fieldInput,
+          value: val === undefined ? '' : String(val),
+          placeholder: f.placeholder || '',
+          onChange: function (e) { upd(e.target.value) },
+        })
+      }
+
+      return h('div', { key: key, style: S.field },
+        h('div', { style: S.fieldLabel }, label, f.secret ? h('span', { style: S.secretTag }, ' 密钥') : null),
+        control,
+        hint ? h('div', { style: S.fieldHint }, hint) : null)
+    }
+
+    /**
+     * 「设置中心」（2026-10-24 主人要求）
+     *
+     * 原「设置页」tab 只是把带 ⚙ 的扩展又列一遍、还点不动 —— 没有存在价值。
+     * 改成：列出**全部扩展**（内置 + 各扩展包），每行能
+     *   · 点「设置」打开它的设置弹层（有声明才可点）
+     *   · 开关启停（启停状态存 .state/ext-disabled.json，扫描器会跳过停用的）
+     * 顶部带搜索框。
+     */
+    function renderSettingsCenter(S, data, filter, setFilter, onOpen, onToggle, toggling) {
+      // 汇总所有扩展
+      var rows = []
+      var push = function (list, from, isPack) {
+        for (var i = 0; i < list.length; i++) {
+          var it = list[i]
+          rows.push({
+            key: from + '/' + it.name,
+            id: it.id,
+            name: it.name,
+            kind: '',
+            from: from,
+            isPack: isPack,
+            hasSettings: !!it.hasSettings,
+            settingsTitle: it.settingsTitle || '',
+            disabled: !!it.disabled,
+            size: it.size || 0,
+          })
+        }
+      }
+      var groupsForList = []
+      // 内置（按六类）
+      var bk = (data.builtin && data.builtin.kinds) ? data.builtin.kinds : {}
+      for (var ki = 0; ki < EXT_KIND_META.length; ki++) {
+        var km = EXT_KIND_META[ki]
+        var list = bk[km.key] || []
+        for (var j = 0; j < list.length; j++) {
+          var it = list[j]
+          rows.push({ key: 'builtin/' + km.key + '/' + it.name, id: it.id, name: it.name, kind: km.key, kindLabel: km.label,
+            from: '内置', isPack: false, hasSettings: !!it.hasSettings, settingsTitle: it.settingsTitle || '',
+            disabled: !!it.disabled, size: it.size || 0 })
+        }
+      }
+      // 扩展包
+      var packs = data.packs || []
+      for (var pi = 0; pi < packs.length; pi++) {
+        var p = packs[pi]
+        var pn = (p.meta && p.meta.name) || p.dirName
+        for (var k2 = 0; k2 < EXT_KIND_META.length; k2++) {
+          var km2 = EXT_KIND_META[k2]
+          var l2 = (p.kinds && p.kinds[km2.key]) || []
+          for (var m = 0; m < l2.length; m++) {
+            var it2 = l2[m]
+            rows.push({ key: 'pack/' + p.dirName + '/' + km2.key + '/' + it2.name, id: it2.id, name: it2.name,
+              kind: km2.key, kindLabel: km2.label, from: pn, isPack: true,
+              hasSettings: !!it2.hasSettings, settingsTitle: it2.settingsTitle || '',
+              disabled: !!it2.disabled, size: it2.size || 0 })
+          }
+        }
+      }
+
+      var q = String(filter || '').trim().toLowerCase()
+      var shown = q ? rows.filter(function (r) { return (r.name + ' ' + r.from + ' ' + r.kindLabel).toLowerCase().indexOf(q) >= 0 }) : rows
+
+      return h('div', null,
+        // 搜索框
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 } },
+          h('input', {
+            style: Object.assign({}, S.fieldInput, { maxWidth: 280, marginBottom: 0 }),
+            placeholder: '搜索扩展名 / 来源 / 类型…',
+            value: filter,
+            onChange: function (e) { setFilter(e.target.value) },
+          }),
+          h('span', { style: { fontSize: 11.5, color: 'var(--dsw-alias-text-secondary, #9a9aa0)' } },
+            shown.length + ' / ' + rows.length + ' 个扩展')),
+
+        shown.length === 0
+          ? h('div', { style: S.empty }, q ? ('没有匹配「' + filter + '」的扩展') : '没有扩展')
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+              shown.map(function (r) {
+                return h('div', { key: r.key, style: S.settingRow },
+                  // 名字
+                  h('span', { style: { fontWeight: 500, minWidth: 150, opacity: r.disabled ? 0.5 : 1 } }, r.id),
+                  // 类型
+                  h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-text-secondary, #9a9aa0)', minWidth: 68 } }, r.kindLabel || ''),
+                  // 来源
+                  h('span', { style: Object.assign({}, S.settingFrom, r.isPack ? { border: '1px solid ' + 'var(--dsw-alias-accent, #5b8def)' } : {}) }, r.from),
+                  // 已配置标记
+                  r.hasSettings ? h('span', { style: { fontSize: 10.5, color: 'var(--dsw-alias-accent, #5b8def)' } }, '⚙ ' + (r.settingsTitle || '可配置')) : null,
+                  // 右侧操作
+                  h('span', { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 } },
+                    r.hasSettings
+                      ? h('button', {
+                          style: { padding: '3px 12px', fontSize: 12, borderRadius: 5, border: '1px solid var(--dsw-alias-accent, #5b8def)', background: 'transparent', color: 'inherit', cursor: 'pointer' },
+                          onClick: function () { onOpen({ kind: r.kind, file: r.name }) },
+                        }, '设置')
+                      : h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-text-secondary, #9a9aa0)' } }, '—'),
+                    // 启停开关
+                    h('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, cursor: toggling ? 'wait' : 'pointer', opacity: toggling ? 0.6 : 1 } },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: !r.disabled,
+                        disabled: !!toggling,
+                        onChange: function (e) { onToggle({ kind: r.kind, file: r.name, enabled: e.target.checked }) },
+                      }),
+                      r.disabled ? h('span', { style: { color: 'var(--dsw-alias-text-secondary, #9a9aa0)' } }, '已停用') : h('span', null, '启用'))))
+              })))
+    }
+
+    /**
+     * 插件市场（2026-10-24）
+     * 索引来自 GitHub 仓库 zaofan-make/dsh-qqbot-plugins 的 index.json
+     */
+    /** 市场专用样式（2026-10-24）：内联 style 管不了 ::placeholder 和主题变量，只能插 CSS */
+    /**
+     * 判断当前是深色还是浅色主题。
+     *
+     * 为什么不用 CSS 变量：DSH 的 --dsw-alias-* 变量名没法确认，
+     * 猜错时 fallback 会在深色模式下变成黑字（2026-10-24 主人实测踩到）。
+     * 直接量一下背景亮度最可靠。
+     */
+    function qqsIsDarkTheme() {
+      try {
+        var el = document.body || document.documentElement
+        var bg = ''
+        // 往上找一个有不透明背景的祖先，body 有时是透明的
+        var node = el
+        for (var i = 0; i < 6 && node; i++) {
+          var cs = window.getComputedStyle(node)
+          var c2 = cs.backgroundColor || ''
+          var m0 = c2.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/)
+          if (m0 && (m0[4] === undefined || parseFloat(m0[4]) > 0.5)) { bg = c2; break }
+          node = node.parentElement
+        }
+        var m = String(bg).match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/)
+        if (m) {
+          var r = +m[1], g = +m[2], b = +m[3]
+          // 相对亮度（sRGB 近似）
+          var lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+          if (r + g + b > 24) return lum < 0.5
+        }
+      } catch (e) {}
+      try {
+        return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+      } catch (e) {}
+      return false
+    }
+
+    /**
+     * 市场样式（2026-10-24 整体重写，不再叠补丁）
+     *
+     * 配色原则：
+     *   · 全部走面板自己的主题变量 —— 面板在 body{} 里定义了亮色 token，
+     *     在 body[data-ds-dark-theme]{} 里定义了暗色 token（宿主 ThemePresenter 切类）。
+     *     所以用 var(--qqs-text) / var(--qqs-border) / var(--qqs-input) 就自动跟随主题，
+     *     不需要自己判断深浅（之前猜 --dsw-alias-* 变量名，猜错导致深色下黑字）。
+     *   · 主人要求：**除标题外的字也不要灰色**，所以描述/版本/标签全都用主文字色 var(--qqs-text)。
+     *   · 卡片不填色块，只有一圈边框；图片框 4:3 固定，图片 contain 完整显示、四周留白。
+     */
+    /**
+     * 市场配色：直接量页面真实颜色，把 rgb 写死进样式。
+     *
+     * 为什么不再用 CSS 变量：
+     *   ① 猜 --dsw-alias-text-primary → 不存在，深色下 fallback 变黑字；
+     *   ② 用面板的 --qqs-text → 实测取到的值和当前主题不符（浅色下拿到浅灰）。
+     * 量出来的值一定对，代价是切主题后要刷新一次。
+     */
+    /**
+     * 市场样式（2026-10-24 第四次，最终版）
+     *
+     * 三次失败的教训：
+     *   ① 猜 --dsw-alias-text-primary → 变量不存在，深色下 fallback 黑字；
+     *   ② 用 --qqs-text → 拿到的值和自己预期的主题不符；
+     *   ③ 量背景亮度写死 rgb → 又引入额外不确定性。
+     *
+     * 根本问题其实一直是**我自己写的硬编码颜色**（inline style 的 color + CSS 里的 !important 色值），
+     * 面板本身（ensureCss 注入的 qqs-css）是靠继承 DSH 主题的。
+     * 所以这一版：**一个颜色都不写**，全部 inherit，让文字跟着面板走。
+     * 只有边框给个中性灰（深浅主题下都看得见）。
+     */
+    /**
+     * 市场样式（2026-10-24 定稿）
+     *
+     * 主人拍板：**不再跟随主题，统一白底黑字**。
+     * 之前跟着主题走折腾了 5 版（猜变量 / 量亮度 / 继承 / token），
+     * 每次都在「浅色下深底、深色下黑字」之间反复，索性写死最稳。
+     *
+     * 配色（全部硬编码）：
+     *   卡片底 #fff / 文字 #1f2329 / 边框 #e2e5ea
+     *   次要文字 #5a6270 / 弱化 #8a919c
+     *   主色按钮 #7c6cf0
+     */
+    function ensureMarketCss() {
+      if (typeof document === 'undefined') return
+      if (document.getElementById('__qqsMarketCss')) return
+      var st = document.createElement('style')
+      st.id = '__qqsMarketCss'
+      st.textContent = [
+        /* ── 网格：两列等宽铺满 ── */
+        '.qqs-mk-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:stretch;width:100%;}',
+        '@media (max-width:760px){.qqs-mk-grid{grid-template-columns:1fr;}}',
+
+        /* ── 卡片：白底黑字 + 浅灰边框 ── */
+        '.qqs-mk-card{background:#ffffff!important;color:#1f2329!important;'
+          + 'border:1px solid #e2e5ea!important;border-radius:10px!important;'
+          + 'height:100%;display:flex;flex-direction:column;box-sizing:border-box;'
+          + 'padding:0 14px 14px 14px;overflow:hidden;}',
+        '.qqs-mk-card:hover{border-color:#7c6cf0!important;}',
+        '.qqs-mk-card *{color:inherit;}',
+
+        /* ── 封面：4:3 固定框，contain 完整显示，四周留白 ── */
+        '.qqs-mk-cover{width:100%;aspect-ratio:4/3;object-fit:contain;display:block;'
+          + 'box-sizing:border-box;padding:10px;background:#f4f5f8;border-radius:6px;}',
+        '.qqs-mk-cover-ph{width:100%;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;'
+          + 'box-sizing:border-box;padding:10px;font-size:12px;color:#8a919c;background:#f4f5f8;border-radius:6px;}',
+
+        /* ── 标题行 ── */
+        '.qqs-mk-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:10px 0 8px;}',
+        '.qqs-mk-name{font-size:14.5px;font-weight:600;color:#1f2329;}',
+        '.qqs-mk-meta{font-size:11.5px;color:#8a919c;}',
+
+        /* ── 描述 ── */
+        '.qqs-mk-desc{font-size:12.5px;line-height:1.65;color:#5a6270;flex:1 1 auto;'
+          + 'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin:0 0 8px 0;}',
+
+        /* ── 标签 ── */
+        '.qqs-mk-tag{font-size:10.5px;padding:1px 7px;border-radius:4px;border:1px solid #e2e5ea;color:#5a6270;}',
+
+        /* ── 按钮 ── */
+        '.qqs-mk-btn{padding:4px 14px;font-size:12px;border-radius:5px;border:1px solid #7c6cf0;'
+          + 'background:#7c6cf0;color:#fff!important;cursor:pointer;flex:0 0 auto;}',
+        '.qqs-mk-btn:hover{background:#6b5ae6;}',
+        '.qqs-mk-btn:disabled{opacity:.55;cursor:default;}',
+        '.qqs-mk-ghost{padding:4px 14px;font-size:12px;border-radius:5px;border:1px solid #d0d5dd;'
+          + 'background:#ffffff;color:#1f2329!important;cursor:pointer;flex:0 0 auto;}',
+        '.qqs-mk-ghost:hover{border-color:#7c6cf0;color:#6b5ae6!important;}',
+
+        /* ── 搜索框 / 代理框：白底黑字，看得见也能输入 ── */
+        '.qqs-mk-search{background:#ffffff!important;color:#1f2329!important;'
+          + 'border:1px solid #d0d5dd!important;box-sizing:border-box;}',
+        '.qqs-mk-search::placeholder{color:#8a919c!important;opacity:1;}',
+        '.qqs-mk-search:focus{outline:none!important;border-color:#7c6cf0!important;box-shadow:0 0 0 2px #7c6cf033!important;}',
+      ].join('\n')
+      document.head.appendChild(st)
+    }
+
+    function renderMarket(S, market, loading, search, setSearch, onInstall, onRemove, busyId, proxyInput, setProxyInput, onSaveProxy, savingProxy) {
+      ensureMarketCss()
+      var S2 = {
+        card: { border: '1px solid var(--dsw-alias-border, #3a3a40)', borderRadius: 10, overflow: 'hidden', padding: '0 0 14px 0', display: 'flex', flexDirection: 'column', gap: 8, height: '100%', boxSizing: 'border-box', background: 'var(--dsw-alias-bg-primary, #252528)' },
+        cardHead: { display: 'flex', alignItems: 'baseline', gap: 9, flexWrap: 'wrap', padding: '12px 16px 8px', borderBottom: '1px solid var(--dsw-alias-border, #3a3a40)' },
+        cardName: { fontSize: 13.5, fontWeight: 600 },
+        cardVer: { fontSize: 11 },
+        cardDesc: { fontSize: 12, lineHeight: 1.6, margin: '0 16px', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' },
+        tag: { fontSize: 10.5, padding: '1px 7px', borderRadius: 4, border: '1px solid var(--dsw-alias-border, #3a3a40)', color: 'var(--dsw-alias-text-secondary, #9a9aa0)' },
+        btnInstall: { padding: '4px 14px', fontSize: 12, borderRadius: 5, border: '1px solid var(--dsw-alias-accent, #5b8def)', background: 'var(--dsw-alias-accent, #5b8def)', color: '#fff', cursor: 'pointer' },
+        btnGhost: { padding: '4px 14px', fontSize: 12, borderRadius: 5, border: '1px solid var(--dsw-alias-border, #3a3a40)', background: 'transparent', color: 'inherit', cursor: 'pointer' },
+      }
+      if (loading) return h('div', { style: S.hint }, '正在读取市场索引…')
+      var err = market && market.indexErr
+      var list = (market && market.index && market.index.plugins) || []
+      var installed = (market && market.installed) || []
+      // 兼容旧格式（字符串数组）和新格式（{id,version}）
+      var installedIds = installed.map(function (x) { return typeof x === 'string' ? x : (x && x.id) })
+      var installedVer = {}
+      installed.forEach(function (x) { if (x && typeof x === 'object' && x.id) installedVer[x.id] = String(x.version || '') })
+      /** 版本比较：a 比 b 新返回 1，相同 0，旧 -1。非语义版本按字符串比 */
+      function cmpVer(a, b) {
+        var pa = String(a || '').split(/[.\-+]/).map(function (s) { return parseInt(s, 10) || 0 })
+        var pb = String(b || '').split(/[.\-+]/).map(function (s) { return parseInt(s, 10) || 0 })
+        var n = Math.max(pa.length, pb.length)
+        for (var i = 0; i < n; i++) {
+          var x = pa[i] || 0, y = pb[i] || 0
+          if (x > y) return 1
+          if (x < y) return -1
+        }
+        return 0
+      }
+      var q = String(search || '').trim().toLowerCase()
+      var shown = q ? list.filter(function (p) {
+        return ((p.name || '') + ' ' + (p.id || '') + ' ' + (p.author || '') + ' ' + (p.description || '') + ' ' + ((p.tags || []).join(' '))).toLowerCase().indexOf(q) >= 0
+      }) : list
+
+      return h('div', null,
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 } },
+          h('input', {
+            style: {
+              width: 320, maxWidth: '50%', boxSizing: 'border-box',
+              padding: '7px 12px', fontSize: 12.5, borderRadius: 16,
+              border: '1px solid var(--dsw-alias-border, #45454c)',
+              background: 'var(--dsw-alias-bg-primary, #252528)',
+              color: 'var(--dsw-alias-text-primary, #e8e8ea)',
+              colorScheme: 'dark', outline: 'none',
+            },
+            className: 'qqs-mk-search',
+            placeholder: '搜索插件名 / 作者 / 标签…',
+            value: search,
+            onChange: function (e) { setSearch(e.target.value) },
+          }),
+          h('span', { style: { fontSize: 11.5, color: '#a8a8b2' } },
+            shown.length + ' / ' + list.length + ' 个插件'),
+          h('span', { style: { marginLeft: 'auto', fontSize: 11, color: '#a8a8b2' } },
+            '已知 ' + installed.length + ' 个已安装')),
+
+        // 代理配置（墙内访问 GitHub 需要）
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' } },
+          h('span', { style: { fontSize: 11.5, color: '#a8a8b2' } }, '代理'),
+          h('input', {
+            className: 'qqs-mk-search qqs-mk-proxy',
+            style: { width: 280, maxWidth: '50%', padding: '6px 11px', fontSize: 12, borderRadius: 14 },
+            placeholder: 'http://127.0.0.1:29290（留空=直连）',
+            value: proxyInput,
+            onChange: function (e) { setProxyInput(e.target.value) },
+            onKeyDown: function (e) { if (e.key === 'Enter') onSaveProxy() },
+          }),
+          h('button', {
+            className: 'qqs-mk-ghost',
+            disabled: savingProxy,
+            onClick: onSaveProxy,
+          }, savingProxy ? '保存中…' : '保存并重试'),
+          market && market.proxy
+            ? h('span', { style: { fontSize: 11, color: '#7ec87e' } }, '当前：' + market.proxy)
+            : h('span', { style: { fontSize: 11, color: '#a8a8b2' } }, '当前：直连'),
+          err ? h('span', { style: { fontSize: 11, color: '#e07a7a', marginLeft: 'auto' } }, '索引读取失败') : null),
+
+        err ? h('div', { style: S.errBox }, '索引读取失败：' + err) : null,
+
+        shown.length === 0
+          ? h('div', { style: S.empty }, err ? '索引不可用' : (q ? ('没有匹配「' + search + '」的插件') : '市场里还没有插件'))
+          : h('div', { className: 'qqs-mk-grid' },
+              shown.map(function (p) {
+                var id = String(p.id || '')
+                var isIn = installedIds.indexOf(id) >= 0
+                var localVer = installedVer[id] || ''
+                var remoteVer = String(p.version || '')
+                var canUpdate = isIn && localVer && remoteVer && cmpVer(remoteVer, localVer) > 0
+                var busy = busyId === id
+                return h('div', { key: id, className: 'qqs-mk-card', style: S2.card },
+                  // 封面（可选）
+                  p.cover ? h('img', {
+                    src: String(p.cover).replace(
+                      /^https?:\/\/raw\.githubusercontent\.com\//,
+                      'https://cdn.jsdelivr.net/gh/'
+                    ),
+                    alt: String(p.coverAlt || p.name || id),
+                    loading: 'lazy',
+                    className: 'qqs-mk-cover',
+                    onError: function (e) {
+                      try {
+                        var el = e.target;
+                        var cur = String(el.src || '');
+                        if (cur.indexOf('cdn.jsdelivr.net') >= 0) {
+                          // 换 gh-proxy 再试一次
+                          el.src = cur.replace('https://cdn.jsdelivr.net/gh/', 'https://gh-proxy.com/https://raw.githubusercontent.com/');
+                        } else {
+                          el.style.display = 'none';   // 都失败就藏掉，别破版
+                        }
+                      } catch (x) {}
+                    },
+                  }) : h('div', { className: 'qqs-mk-cover-ph' }, '暂无封面'),
+                  h('div', { className: 'qqs-mk-head', style: S2.cardHead },
+                    h('span', { className: 'qqs-mk-name', style: S2.cardName }, String(p.name || id)),
+                    p.version ? h('span', { className: 'qqs-mk-meta', style: S2.cardVer }, 'v' + p.version) : null,
+                    p.author ? h('span', { className: 'qqs-mk-meta', style: S2.cardVer }, 'by ' + p.author) : null,
+                    h('span', { style: { marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' } },
+                      isIn
+                        ? h('span', { className: 'qqs-mk-tag' }, canUpdate ? ('已装 v' + localVer) : '已安装')
+                        : null,
+                      canUpdate
+                        ? h('button', { className: 'qqs-mk-btn', disabled: busy, onClick: function () { onInstall({ id: id }) } },
+                            busy ? '更新中…' : ('更新到 v' + remoteVer))
+                        : null,
+                      isIn
+                        ? h('button', { className: 'qqs-mk-ghost', disabled: busy, onClick: function () { onRemove({ id: id }) } }, busy ? '处理中…' : '卸载')
+                        : (canUpdate ? null : h('button', { className: 'qqs-mk-btn', disabled: busy, onClick: function () { onInstall({ id: id }) } }, busy ? '安装中…' : '安装')))),
+                  p.description ? h('div', { className: 'qqs-mk-desc', style: S2.cardDesc }, String(p.description)) : null,
+                  (p.tags && p.tags.length)
+                    ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                        p.tags.map(function (t, i) { return h('span', { key: i, className: 'qqs-mk-tag' }, String(t)) }))
+                    : null)
+              })))
+    }
+
+    function statCard(S, label, num, hint) {
+      return h('div', { style: S.statCard },
+        h('div', { style: S.statNum }, String(num)),
+        h('div', { style: S.statLabel }, label),
+        h('div', { style: S.statHint }, hint))
+    }
+
+    function tabBtn(S, label, key, cur, setTab, count) {
+      var on = cur === key
+      return h('button', {
+        key: key,
+        style: on ? S.tabOn : S.tabOff,
+        onClick: function () { setTab(key) },
+      }, label, count !== undefined ? h('span', { style: S.tabCount }, ' ' + count) : null)
+    }
+
+    function extStyles() {
+      var C = {
+        border: 'var(--dsw-alias-border, #8884)',
+        sub: 'var(--dsw-alias-text-secondary, #888)',
+        bg2: 'var(--dsw-alias-bg-secondary, rgba(127,127,127,.06))',
+        accent: 'var(--dsw-alias-accent, #5b8def)',
+        text: 'inherit',
+      }
+      return {
+        wrap: { padding: '18px 22px', height: '100%', overflow: 'auto', boxSizing: 'border-box', color: C.text },
+        head: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 },
+        title: { fontSize: 19, fontWeight: 600, marginBottom: 4 },
+        sub: { fontSize: 12.5, color: C.sub },
+        btn: { padding: '4px 12px', fontSize: 12.5, borderRadius: 6, border: '1px solid ' + C.border, background: 'transparent', color: 'inherit', cursor: 'pointer' },
+        stats: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 14 },
+        statCard: { border: '1px solid ' + C.border, borderRadius: 10, padding: '12px 14px', background: C.bg2 },
+        statNum: { fontSize: 24, fontWeight: 600, lineHeight: 1.2 },
+        statLabel: { fontSize: 12.5, marginTop: 2 },
+        statHint: { fontSize: 11.5, color: C.sub, marginTop: 2 },
+        pathBox: { border: '1px solid ' + C.border, borderRadius: 10, padding: '10px 14px', marginBottom: 14, fontSize: 12 },
+        pathRow: { display: 'flex', gap: 10, alignItems: 'baseline', padding: '3px 0' },
+        pathKey: { color: C.sub, minWidth: 68, fontSize: 12 },
+        code: { fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 11.5, wordBreak: 'break-all', opacity: .85 },
+        tabs: { display: 'flex', gap: 6, marginBottom: 14, borderBottom: '1px solid ' + C.border, paddingBottom: 8 },
+        tabOn: { padding: '5px 14px', fontSize: 13, borderRadius: 6, border: '1px solid ' + C.accent, background: C.accent, color: '#fff', cursor: 'pointer' },
+        tabOff: { padding: '5px 14px', fontSize: 13, borderRadius: 6, border: '1px solid ' + C.border, background: 'transparent', color: 'inherit', cursor: 'pointer' },
+        tabCount: { opacity: .75, fontSize: 11.5 },
+        group: { border: '1px solid ' + C.border, borderRadius: 10, padding: '14px 16px', marginBottom: 12 },
+        groupHead: { marginBottom: 10, display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' },
+        groupTitle: { fontSize: 14.5, fontWeight: 600 },
+        groupSub: { fontSize: 11.5, color: C.sub, wordBreak: 'break-all' },
+        kindBlock: { marginBottom: 10 },
+        kindHead: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 },
+        kindIcon: { fontSize: 12.5 },
+        kindLabel: { fontSize: 12.5, fontWeight: 500 },
+        kindCount: { fontSize: 11, color: C.sub, background: C.bg2, borderRadius: 9, padding: '0 6px' },
+        kindHint: { fontSize: 11, color: C.sub, marginLeft: 2 },
+        chipWrap: { display: 'flex', flexWrap: 'wrap', gap: 5 },
+        chip: { fontSize: 11.5, padding: '2px 8px', borderRadius: 5, border: '1px solid ' + C.border, background: C.bg2 },
+        chipWithGear: { fontSize: 11.5, padding: '2px 8px', borderRadius: 5, border: '1px solid ' + C.accent, background: 'transparent' },
+        gear: { opacity: .8, fontSize: 10.5 },
+        settingsList: { display: 'flex', flexDirection: 'column', gap: 6 },
+        settingRow: { display: 'flex', alignItems: 'baseline', gap: 10, border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 12px', fontSize: 12.5 },
+        settingTitle: { fontWeight: 500 },
+        settingFrom: { fontSize: 11, color: C.sub, background: C.bg2, borderRadius: 4, padding: '1px 6px' },
+        settingId: { fontSize: 11, color: C.sub, fontFamily: 'ui-monospace, Consolas, monospace', marginLeft: 'auto' },
+        empty: { fontSize: 12.5, color: 'var(--dsw-alias-text-secondary, #9a9aa0)', padding: '18px 4px', lineHeight: 1.7 },
+        emptyHint: { fontSize: 11.5, opacity: .8, marginTop: 4 },
+        hint: { fontSize: 12.5, color: C.sub, padding: 20 },
+        errBox: { fontSize: 12.5, color: '#c33', padding: '10px 12px', border: '1px solid #c335', borderRadius: 8, marginBottom: 10 },
+        // ── 扩展设置弹层（2026-10-24）──
+        chipClickable: { fontSize: 11.5, padding: '2px 8px', borderRadius: 5, border: '1px solid ' + C.accent, background: 'transparent', cursor: 'pointer' },
+        modalMask: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2147483000 },
+        modalBox: { background: 'var(--dsw-alias-bg-primary, #252528)', color: 'var(--dsw-alias-text-primary, #e8e8ea)', colorScheme: 'dark', borderRadius: 12, padding: '18px 20px', minWidth: 460, maxWidth: 640, maxHeight: '82vh', overflow: 'auto', boxShadow: '0 16px 56px rgba(0,0,0,.5)', border: '1px solid ' + C.border },
+        modalHead: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14, gap: 12 },
+        modalTitle: { fontSize: 15.5, fontWeight: 600, color: 'var(--dsw-alias-text-primary, #e8e8ea)' },
+        modalSub: { fontSize: 11.5, color: C.sub, marginTop: 3, fontFamily: 'ui-monospace, Consolas, monospace', wordBreak: 'break-all' },
+        modalFoot: { display: 'flex', alignItems: 'center', gap: 12, marginTop: 18, paddingTop: 14, borderTop: '1px solid ' + C.border },
+        field: { marginBottom: 14 },
+        fieldLabel: { fontSize: 12.5, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 },
+        fieldHint: { fontSize: 11, color: C.sub, marginTop: 4 },
+        fieldInput: { width: '100%', boxSizing: 'border-box', padding: '7px 10px', fontSize: 12.5, borderRadius: 6, border: '1px solid ' + C.border, background: 'var(--dsw-alias-bg-primary, #252528)', color: 'var(--dsw-alias-text-primary, #e8e8ea)', fontFamily: 'inherit', colorScheme: 'dark' },
+        secretTag: { fontSize: 10, color: C.sub, background: C.bg2, borderRadius: 4, padding: '1px 5px', fontWeight: 400 },
+        btnPrimary: { padding: '7px 18px', fontSize: 13, borderRadius: 6, border: '1px solid ' + C.accent, background: C.accent, color: '#fff', cursor: 'pointer' },
+        savedMsg: { fontSize: 12, color: '#4a4' },
+        errMsg: { fontSize: 12, color: '#e55' },
+        cfgPath: { fontSize: 11, color: C.sub, marginTop: 16, paddingTop: 12, borderTop: '1px solid ' + C.border, wordBreak: 'break-all' },
+      }
+    }
+
     function apply(ctx) {
       // 防御(与 dsh-undo-savepoint 的 safe() 同款): client 半边任一环节抛异常, 这条 entry 就会
       // 被判 FAILED, 而 dsh 0.1.7 的客户端启动审计是**致命**的 —— 整个 Web UI 只剩余下
@@ -6038,11 +6981,20 @@ var QQS_THEME_CSS = [
             function (props) { return h(QqbotHome, { close: props && props.close }) })
         })
       })
+      // 「QQ机器人扩展」会话页签（2026-10-24）：与「对话/轨迹/记忆/白板看板」并列
+      safe('conversation view', function () {
+        slots.inject('conversation.view', function () {
+          return slots.register(
+            { name: 'conversation.view', id: 'qqbot-ext', order: 81, label: 'QQ机器人扩展' },
+            ExtPanel)
+        })
+      })
       safe('approval float', startApprovalFloat)
       // sessions 服务(宿主根服务): 权威读 web 当前会话(current)与 cwd(agent id === session id)
       var sessionsSvc = null
       try { sessionsSvc = (ctx && (ctx.sessions || (ctx.get && ctx.get('sessions')))) || null } catch (e) { sessionsSvc = null }
       if (!sessionsSvc) { try { sessionsSvc = ctx.get && ctx.get('sessions') } catch (e) {} }
+      _extSessionsSvc = sessionsSvc   // 供 ExtPanel 读当前工作区 cwd
       safe('dock', function () { startQqDock(sessionsSvc) })
     }
 
@@ -6165,7 +7117,7 @@ var QQS_THEME_CSS = [
     // n = 从组头往下数的"热"会话；一碰到目标就停 ⇒ 目标已在热块内，绝不再把它往下挤
     var n = 0, k = 0;
     for (; k < group.length; k++) {
-      if (group[k].sid === sid) { console.log("[qqbot] 目标已在热块内，不动: " + sid); return true; }
+      if (group[k].sid === sid) { return true }
       if (isHot(group[k].sid, at, pinned)) { n++; continue; }
       break;
     }
@@ -6279,7 +7231,7 @@ var QQS_THEME_CSS = [
       if (!same) { j.sessionOrderByAccount[key] = next; changed = true; }
     });
 
-    if (!changed) { console.log("[qqbot] 顺序无需变化: " + sid); return; }
+    if (!changed) { return }
     j.orderBy = "manual";
     try {
       localStorage.setItem(LS_KEY, JSON.stringify(j));
@@ -6301,7 +7253,7 @@ var QQS_THEME_CSS = [
         if (!d || d.ok !== true) { console.warn("[qqbot] /workspace/sessions 不可用:", d && d.error); return; }
         var at = {};
         (d.sessions || []).forEach(function (x) { if (x && x.sessionId) at[x.sessionId] = x.at; });
-        console.log("[qqbot] 收到活跃会话 " + sid + "，时间表 " + Object.keys(at).length + " 条");
+
         applyOrder(sid, at);
       })
       .catch(function (e) { console.warn("[qqbot] 拉时间表失败:", e && e.message); });

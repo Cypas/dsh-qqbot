@@ -35,8 +35,9 @@
  *   · `last()`                 最近一次出站的 ctx（含 target，便于"往刚才那个会话发"）
  *   · `active()`               当前是否正在跑出站链
  */
-import { readdirSync, statSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { statSync } from 'node:fs';
+import { scanExtFiles } from './ext-packs.js';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 /** 扩展文件允许的扩展名（与 extension-store 的 ALLOWED_EXT 同款） */
 const ALLOWED_EXT = new Set(['.js', '.mjs', '.cjs']);
@@ -110,25 +111,17 @@ function fileVersion(p) {
  */
 export async function loadOutboundExtensions(opts) {
     const { dataRoot, logger } = opts;
-    const dir = outboundExtensionsDir(dataRoot);
-    let files;
-    try {
-        files = readdirSync(dir, { withFileTypes: true })
-            .filter((e) => e.isFile() && ALLOWED_EXT.has(extname(e.name).toLowerCase()))
-            .map((e) => e.name)
-            .sort();
-    }
-    catch {
+    // ★ 2026-10-24：内置目录 + 所有扩展包（只取直接子文件）
+    const hits = scanExtFiles(dataRoot, 'outbound', ALLOWED_EXT);
+    if (hits.length === 0) {
         loaded = [];
         return emptyResult();
     }
-    if (files.length === 0) {
-        loaded = [];
-        return emptyResult();
-    }
+    const files = hits.map((h) => h.name);
     const result = emptyResult(files);
-    for (const f of files) {
-        const abs = join(dir, f);
+    for (const hit of hits) {
+        const f = hit.name;
+        const abs = hit.abs;
         try {
             const url = pathToFileURL(abs).href + `?v=${fileVersion(abs)}`;
             const mod = await import(url);

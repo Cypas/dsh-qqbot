@@ -99,8 +99,9 @@
  *   会经 `features/ext-reload.ts` 顺带重扫一次 → **不重启也能生效**（挂载点是个读可变列表的代理，
  *   换代只是换内容，不用重挂中间件）。每次装载都**复位该扩展的熔断记录**（熔断的恢复通道）。
  */
-import { readdirSync, statSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { statSync } from 'node:fs';
+import { scanExtFiles } from './ext-packs.js';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { EXT_INBOUND_SUBDIR } from './extension-store.js';
 import { registerExtInboundReloader } from './ext-reload.js';
@@ -207,26 +208,17 @@ function fileVersion(p) {
  */
 export async function loadInboundExtensions(opts) {
     const { dataRoot, logger } = opts;
-    const dir = inboundExtensionsDir(dataRoot);
-    let files;
-    try {
-        // 只取**直接子文件**：子目录不扫描（与 tools/hooks 的既有约定一致；lib/、.state/ 之类可安全存放私有内容）
-        files = readdirSync(dir, { withFileTypes: true })
-            .filter((e) => e.isFile() && ALLOWED_EXT.has(extname(e.name).toLowerCase()))
-            .map((e) => e.name)
-            .sort();
-    }
-    catch {
+    // ★ 2026-10-24：内置目录 + 所有扩展包（只取直接子文件）
+    const hits = scanExtFiles(dataRoot, 'inbound', ALLOWED_EXT);
+    if (hits.length === 0) {
         loaded = [];
-        return emptyResult(); // 目录不存在 → 完全安静
+        return emptyResult();
     }
-    if (files.length === 0) {
-        loaded = [];
-        return emptyResult(); // 空目录 → 同样安静
-    }
+    const files = hits.map((h) => h.name);
     const result = emptyResult(files);
-    for (const f of files) {
-        const abs = join(dir, f);
+    for (const hit of hits) {
+        const f = hit.name;
+        const abs = hit.abs;
         try {
             // Windows 绝对路径必须转 file:// URL；cache-bust 用 mtime（改了才重新 import，别改回时间戳）
             const url = pathToFileURL(abs).href + `?v=${fileVersion(abs)}`;

@@ -35,6 +35,18 @@ import { faceTagResolver } from '../features/face-tags.js';
 export async function setupMiddlewares(bot, config, manager, logger, 
 /** ★ 插件的 cordis ctx —— 传给自定义命令当"内核句柄"（env.ctx），见 ext-capabilities.ts */
 pluginCtx) {
+    // ★ 2026-10-24：把「整体热重载」挂到 globalThis，供 settings-host.js（面板后端）借用。
+    //   面板的启停开关要立即生效就得调 manager.reloadAllChannelTools()，
+    //   但 settings-host 是旁路桥、拿不到 manager；这里手里就有，登记一下最省事。
+    //   重启后 setupMiddlewares 会重跑，注册表自然重建 —— 不用持久化。
+    //   key 用 dataRoot，多 bot 各存各的。
+    try {
+        const g = globalThis;
+        g.__qqbotReloaders ||= new Map();
+        const dr = manager.dataRoot || '';
+        g.__qqbotReloaders.set(dr, () => manager.reloadAllChannelTools());
+    }
+    catch { /* 挂不上不影响主流程 */ }
     // 0. 用户扩展命令(P4.1): 加载插件包外扩展目录的命令, 并入下方 cmdList/slash,
     //    群聊前置解析 cmdMap 与 SDK slash 双通道自然覆盖 → /扩展命令 重启后即用。
     // ⚠️ 2026-10-12 主人定：命令表改为**可重建**。此前扩展命令只在启动时扫一次，
@@ -441,6 +453,21 @@ pluginCtx) {
             }
         })();
         const handlerArg = { ...ctx, command: parsed };
+        // ★ 2026-10-24：把「该扩展自己的设置」塞进来（面板里填的值），扩展用 ctx.config 读
+        try {
+            const cmdFile = cmd.__file;
+            const dr = manager.dataRoot
+                || ctx.cwd
+                || '';
+            if (cmdFile && dr) {
+                const { readExtConfig } = await import('../features/ext-config.js');
+                handlerArg.config = readExtConfig(dr, cmdFile);
+                handlerArg.__file = cmdFile;
+            }
+        }
+        catch {
+            handlerArg.config = {};
+        }
         if (capsForCmd) {
             // ⚠️ 2026-10-12 修（探针实测驱动）：原判据 `!(k in handlerArg)` 只问"有没有这个键"，
             //   而中间件 ctx 里 sender / agent 这类键**存在但值是 undefined**，于是 caps 里的好值

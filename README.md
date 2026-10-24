@@ -73,8 +73,94 @@ QQ 官方**没有开放踢人接口**，所以这一块走"你自己的 QQ 号 +
 
 ![群管理·审批放行成功效果](docs/screenshots/group-admin-approval-chat.png)
 
+图⑥：**插件市场**——两列卡片、封面图、版本号、安装/更新/卸载一键搞定（数据来自扩展索引仓库，支持填代理解决墙内访问）；
+图⑦：**扩展包面板**——每个包下面直接列出它带的工具和 `/斜杠命令`，点「设置」还能配自定义参数。
+
+![插件市场（卡片网格 / 封面 / 一键安装更新）](docs/images/market.png)
+
+![扩展包面板（工具与斜杠命令按包分组展示）](docs/images/packs.png)
+
+图⑧：**设置中心**——50 个内置扩展一览，每个都能单独开关、点齿轮改配置；
+图⑨：**扩展自注册设置面板**——扩展用 `qqbotSettingsPage` 声明 schema，面板自动渲染出表单，值存成 JSON 供扩展读取。
+
+![设置中心（内置扩展一览与单条开关）](docs/images/settings-center.png)
+
+![扩展自注册设置面板（声明式 schema 自动渲染）](docs/images/ext-settings.png)
+
 ---
 
+
+---
+
+## 📦 扩展包与插件市场：把你的扩展分享给别人
+
+单个 `.mjs` 是「扩展文件」，**一个目录就是一个「扩展包」** —— 可以带工具、斜杠命令、封面、版本号，装进别人的面板里就是一张卡片。
+
+市场索引在独立仓库：[**zaofan-make/dsh-qqbot-plugins**](https://github.com/zaofan-make/dsh-qqbot-plugins)。
+
+### 目录结构
+
+```
+packs/你的插件id/              ← id 只能用字母数字-_（它就是安装后的目录名）
+  qqbot-pack.json              ← 元信息，必填
+  cover.png                    ← 可选，卡片封面（自动探测 cover.png/jpg/webp/gif）
+  tools/xxx.mjs                ← 可选，给 AI 调用的工具
+  commands/yyy.mjs             ← 可选，/斜杠命令
+```
+
+`qqbot-pack.json`：
+
+```json
+{
+  "name": "实用小工具",
+  "author": "你的名字",
+  "version": "1.0.0",
+  "description": "一句话说明，会显示在卡片上",
+  "homepage": "https://github.com/你/你的仓库",
+  "tags": ["工具", "日常"]
+}
+```
+
+`name` / `author` / `version` 必填，其余可选。
+
+### 上传流程（不需要 token，也不会冲突）
+
+```bash
+# 1. fork + clone
+git clone https://github.com/<你>/dsh-qqbot-plugins.git
+
+# 2. 只加你自己的目录
+mkdir -p packs/my-pack/tools packs/my-pack/commands
+#   写 qqbot-pack.json、tools/*.mjs、commands/*.mjs
+
+# 3. 提 PR
+```
+
+**不要改 `index.json`** —— 它由 GitHub Action 自动生成：
+
+- 提 PR → 自动跑检查（manifest 字段、`node --check` 语法、禁二进制、`inputSchema` 格式）
+- 合并到 main → Action 扫描 `packs/*/qqbot-pack.json`，重建索引（**顺便把文件清单和封面也扫出来**，你不用手写）
+- 两个人同时提 PR **也不会冲突**，因为各自只加自己的目录
+
+### ⚠️ 最容易踩的坑：`inputSchema` 不是标准 JSON Schema
+
+```js
+// ✅ 对：dsh 的扁平写法，属性名 → 类型描述
+export default {
+  name: 'pick_one',
+  description: '从列表里随机挑一个',
+  inputSchema: {
+    options: { type: 'array', items: { type: 'string' }, description: '候选选项' },
+  },
+  run: async (args) => ({ ok: true, msg: '选中：' + args.options[0] }),
+}
+
+// ❌ 错：包成标准 JSON Schema，注册时会被拒
+// inputSchema: { type: 'object', properties: { options: {...} } }
+//   → unsupported JSON schema: parameters.type must be a value schema object
+```
+
+命令的契约也不一样：工具用 **`run`**，命令用 **`handler`**（返回字符串）。
 
 ---
 
