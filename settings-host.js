@@ -259,20 +259,69 @@ const OWN_SETTINGS_DIR = join(DSH_HOME_DIR, 'qqbot-settings');
  * （要求其父目录名为 `profiles`，挡住源码 checkout 目录）→ 落 `_default`。改一处务必同步另一处。
  */
 function resolveProfileName() {
+  // ① 环境变量最可靠 —— 但 Desktop 宿主下**模块加载那一刻它是空的**
+  //    （宿主只在每次 shell / 工具调用时临时注入），所以下面几层兜底是必须的。
   const env = String(process.env.DSH_PROFILE || '').trim();
   if (env) return env;
+
+  // ② PROFILE_ROOT 的父目录正好叫 profiles → 取它自己的目录名
   try {
-    return basename(dirname(PROFILE_ROOT)) === 'profiles' ? basename(PROFILE_ROOT) : '';
-  } catch {
-    return '';
-  }
+    if (basename(dirname(PROFILE_ROOT)) === 'profiles') {
+      const n = basename(PROFILE_ROOT);
+      if (n && n !== 'profiles') return n;
+    }
+  } catch { /* 走下一层 */ }
+
+  // ③ PROFILE_ROOT 里出现 /profiles/<name>/ 片段 → 取 <name>
+  //    （生成式安装会落到 profiles/.generations/live/xxx，② 那层判不出来）
+  try {
+    const m = String(PROFILE_ROOT).split(/[\\/]profiles[\\/]/i);
+    if (m.length > 1) {
+      const seg = m[1].split(/[\\/]/)[0];
+      if (seg && seg !== '.generations') return seg;
+    }
+  } catch { /* 走下一层 */ }
+
+  // ④ 【2026-10-25 修 issue #20】最硬的一层：直接看存档目录的实际形状。
+  //    凭据就存在 qqbot-settings/<profile>/<ns>.json ——
+  //    如果那里只有一个真实子目录，那它就是当前 profile，猜都不用猜。
+  //
+  //    原实现（环境变量 → PROFILE_ROOT 目录名）在 Desktop 宿主下三层全空，
+  //    落成 `_default` → readOwnSettings 读到 {} → nsBot() 拿不到 appId/appSecret
+  //    直接 return null → 评分/群管理/图库面板全空白，而 bot 收发消息完全正常，
+  //    极易被误判成"评分没跑起来"。issue #20 就是这个。
+  //    ⚠️ 只在「恰好只有一个真实 profile 目录」时才认 —— **不猜**。
+  //    一台机器上可能同时有 desktop/ 和 web/（实测本机就有这两个），
+  //    按 prefer 猜会让 web 用户读到 desktop 的凭据，比原来更糟。
+  //    而那个场景下第 1 层环境变量本来就有值，根本轮不到这里。
+  try {
+    const subs = readdirSync(OWN_SETTINGS_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name !== '_default')
+      .map((d) => d.name);
+    if (subs.length === 1) return subs[0];
+  } catch { /* 目录还不存在（首次启动） */ }
+
+  return '';
 }
-const NS_PROFILE_DIR = String(resolveProfileName()).trim().replace(/[^A-Za-z0-9_-]/g, '_') || '_default';
+/**
+ * 当前 profile 对应的存档子目录名。
+ *
+ * ⚠️ 2026-10-25 修 issue #20：原来是个**模块顶层求值的 const** ——
+ *   Desktop 宿主在模块加载那一刻还没往环境里放 DSH_PROFILE，
+ *   算出来就是 `_default`，之后永不重算 ⇒ 读 qqbot-settings/_default/xxx.json
+ *   （真实存档在 qqbot-settings/desktop/xxx.json）⇒ 凭据读不到 ⇒ nsBot() null。
+ *   改成每次调用时现算（开销是几次字符串/目录读，API 请求级，可忽略）。
+ */
+function nsProfileDir() {
+  const n = String(resolveProfileName()).trim().replace(/[^A-Za-z0-9_-]/g, '_');
+  if (n) return n;
+  return '_default';
+}
 function safeNsOf(ns) {
   return String(ns || NS).replace(/[^A-Za-z0-9_-]/g, '_') || 'im-qqbot';
 }
 function ownSettingsDir(ns) {
-  return join(OWN_SETTINGS_DIR, NS_PROFILE_DIR);
+  return join(OWN_SETTINGS_DIR, nsProfileDir());
 }
 function ownSettingsPath(ns) {
   return join(ownSettingsDir(ns), safeNsOf(ns) + '.json');
