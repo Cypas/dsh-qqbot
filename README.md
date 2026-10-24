@@ -173,9 +173,14 @@ export default {
   run: async (args) => ({ ok: true, msg: '选中：' + args.options[0] }),
 }
 
-// ❌ 错：包成标准 JSON Schema，注册时会被拒
+// ✅ 也认 parameters 这个别名
+//    （源码 src/features/extension-store.ts:225 是 inputSchema ?? parameters ?? {}）
+//    ⚠️ 但值同样必须是扁平字段表，不能包 type/properties
+
+// ❌ 错：包成标准 JSON Schema
 // inputSchema: { type: 'object', properties: { options: {...} } }
-//   → unsupported JSON schema: parameters.type must be a value schema object
+//   → dsh 会拿这个对象的顶层键当参数名，于是模型看到的参数是 type / properties，
+//     真正的 options 藏在 properties 里 → 看不见、调不动
 ```
 
 命令的契约也不一样：工具用 **`run`**，命令用 **`handler`**（返回字符串）。
