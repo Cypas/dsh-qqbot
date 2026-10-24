@@ -4899,6 +4899,21 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
     return out;
   }
 
+  /**
+   * 把工作区路径归一成**绝对路径**（与 src/util/abs-path.ts 的 absCwdOf 同一套规则）。
+   * 绝对路径原样返回，只给相对路径补前导 `/`。
+   */
+  function absCwd(p) {
+    const raw = String(p == null ? '' : p).trim();
+    if (!raw) return '';
+    if (/^[A-Za-z]:[\\/]/.test(raw)) return raw;
+    if (raw.startsWith('\\\\') || raw.startsWith('//')) return raw;
+    if (raw.startsWith('/')) return raw;
+    const s = raw.replace(/\\/g, '/');
+    if (process.platform !== 'win32') return '/' + s;
+    return raw;
+  }
+
   /** 扫一个扩展根（含六个 kind 子目录），返回 { kinds:{tools:[...]}, total } */
   function scanExtRoot(root, dataRoot) {
     const kinds = {};
@@ -4936,12 +4951,12 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
         const bcwd = norm(cfg.cwd);
         if (!bcwd || bcwd !== target) continue;
         if (cfg.dataRoot) return { dataRoot: String(cfg.dataRoot), source: 'bot.dataRoot' };
-        return { dataRoot: join(String(cfg.cwd), 'dshqqbot'), source: 'bot.cwd' };
+        return { dataRoot: join(absCwd(cfg.cwd) || String(cfg.cwd), 'dshqqbot'), source: 'bot.cwd' };
       }
     }
 
     // ③ 传入的 cwd（该工作区没绑 bot 时，扩展目录仍在它自己的 dshqqbot 下）
-    if (hint) return { dataRoot: join(hint, 'dshqqbot'), source: 'workspace' };
+    if (hint) return { dataRoot: join(absCwd(hint) || hint, 'dshqqbot'), source: 'workspace' };
 
     // ④ 兜底：老的推断
     for (const b of bots) {
@@ -5231,22 +5246,21 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
    *   --D-newwenjianjia-aiwork-~9CB8~9C7C~5A18--  ⇒  D:\newwenjianjia\aiwork\鲸鱼娘
    *   '-' = 分隔符；'~XXXX' = 一个 UTF-16 码元；首段单字母 = 盘符
    */
+  /**
+   * `~/.dsh/sessions/{转义目录名}` → 工作区真实路径。
+   *
+   * 2026-10-24 修 issue #19：这里原来自己写了一遍解码（和 decodeSessionDirName 重复），
+   * 而且有三个叠加缺陷：
+   *   ① `segs.join(String.fromCharCode(92, 92))` —— 拼出了**两个**反斜杠字符；
+   *   ② 分隔符写死反斜杠，POSIX 上直接坏；
+   *   ③ 目录名转义时根部的 `/` 就丢了，还原后也没补。
+   * 结果 Android/Linux 上还原成 `storage\\emulated\\0\\大肥鱼` —— 相对路径，
+   * 扩展面板拿它去 readdirSync 必然落空，三块计数全 0。
+   *
+   * 现在直接复用 decodeSessionDirName（那边已经按盘符/POSIX 分支处理过）。
+   */
   function wsPathFromDir(dir) {
-    const t = String(dir || '').replace(/^--/, '').replace(/--$/, '');
-    const parts = [];
-    let cur = '';
-    let i = 0;
-    while (i < t.length) {
-      const ch = t[i];
-      if (ch === '-') { parts.push(cur); cur = ''; i += 1; continue; }
-      const m = /^~([0-9A-Fa-f]{4})/.exec(t.slice(i, i + 5));
-      if (m) { cur += String.fromCharCode(parseInt(m[1], 16)); i += 5; continue; }
-      cur += ch; i += 1;
-    }
-    parts.push(cur);
-    const segs = parts.filter((p) => p !== '');
-    if (segs.length && /^[A-Za-z]$/.test(segs[0])) segs[0] = segs[0] + ':';
-    return segs.join('\\\\');
+    return decodeSessionDirName(String(dir || ''));
   }
 
   /**
