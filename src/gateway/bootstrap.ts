@@ -636,7 +636,34 @@ export async function bootstrapGateway(
   void (async () => {
     try {
       const hooks = await import('../features/ext-hooks.js');
-      const r = await hooks.runStartupHooks({ dataRoot: dataRootOf(config), logger, ctx, config });
+      // ── 2026-10-13：把“钩子能让 AI 开口”的能力接上 ────────────────────
+      //   钩子没有“当前消息”，所以它只能点名目标会话：wakeTo(scope, peerId, text)。
+      //   实现 = 同 appendWake 那条路（agent.followup + createUserMessage）——
+      //   走**正常回合**（dsh 会先补人设），不是旁路注入，也不经过模板。
+      //   peerId → agent 由本实例的 manager 解析：天然只作用于**本机器人**，
+      //   多机器人各自 bootstrap 一次 ⇒ 各自的钩子只会唤自己名下的会话。
+      // 2026-10-25：改用 manager.injectToPeer() —— 这就是"往某会话塞一条新消息、
+      //   AI 带上下文处理并回复到 QQ"的正规入口（session-manager 里已有），
+      //   不必自己 findByPeer + createUserMessage 拼一遍（那条路在 record.agent 形态变化时会静默失效）。
+      const wakeTo = async (scope: string, peerId: string, text: string): Promise<boolean> => {
+        try {
+          return await manager.injectToPeer(scope as never, peerId, text, 'user');
+        } catch (err) {
+          logger.warn?.(`[im-qqbot] wakeTo 失败(已忽略): ${err instanceof Error ? err.message : String(err)}`);
+          return false;
+        }
+      };
+      const r = await hooks.runStartupHooks({
+        dataRoot: dataRootOf(config),
+        logger,
+        ctx,
+        config,
+        // 与 bot 实例同一份凭证/白名单：钩子不必再让用户手填一份
+        appId: config.appId,
+        appSecret: config.appSecret,
+        owners: ((config.groupAdmin as { owners?: unknown })?.owners as unknown[] | undefined)?.map(String) ?? [],
+        wakeTo,
+      });
       if (r.total > 0) {
         logger.info(`[im-qqbot] 启动钩子: ${r.total} 个（成功 ${r.ok} / 失败 ${r.failed} / 超时 ${r.timedOut}）`);
       }
@@ -867,15 +894,19 @@ export async function bootstrapGateway(
   bot.on('error', (err: unknown) => {
     logger.error(`bot error: ${err instanceof Error ? err.message : String(err)}`);
     setBotOnline(myNs, false);
+    // 2026-10-25：连接失败也落盘 —— "控制台以前有 Bot ready 现在没有了"必须能事后查。
+    try { diagWrite('qqbot-boot-diag', `bot error ns=${String(myNs)} appId=${String(config.appId)} err=${err instanceof Error ? err.message : String(err)}`); } catch { /* 忽略 */ }
   });
 
   bot.on('resumed', () => {
     setBotOnline(myNs, true);
+    try { diagWrite('qqbot-boot-diag', `bot resumed ns=${String(myNs)} appId=${String(config.appId)}`); } catch { /* 忽略 */ }
   });
 
   bot.on('ready', () => {
     setBotOnline(myNs, true);
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
+    try { diagWrite('qqbot-boot-diag', `bot ready ns=${String(myNs)} appId=${String(config.appId)}`); } catch { /* 忽略 */ }
   });
 
   // ── 生命周期 ──
@@ -888,8 +919,10 @@ export async function bootstrapGateway(
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
     .effect(() => {
       logger.info(`Starting bot (appId=${config.appId})`);
+      try { diagWrite('qqbot-boot-diag', `starting bot ns=${String(myNs)} appId=${String(config.appId)} secretTail=${String(config.appSecret).slice(-4)}`); } catch { /* 忽略 */ }
       bot.start().catch((err: unknown) => {
         logger.error(`Bot start failed: ${err instanceof Error ? err.message : String(err)}`);
+        try { diagWrite('qqbot-boot-diag', `bot start failed ns=${String(myNs)} appId=${String(config.appId)} err=${err instanceof Error ? err.message : String(err)}`); } catch { /* 忽略 */ }
       });
 
       // M3 定时唤醒调度器(与 bot 同生命周期; 任务到点 followup → 回复经出站链路主动推送)

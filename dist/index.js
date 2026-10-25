@@ -15,6 +15,7 @@ import { getProfileDir, resolveEnv, resolveProfileName } from './shared/index.js
 import { describeNsConflict, nsPathsOf, scanNsOwners } from './features/ns-guard.js';
 void getProfileDir;
 import { runQrSetup, persistCredentialsToProfile } from './setup.js';
+import { diagWrite } from './shared/diag.js';
 // 2026-09-24 关闭"启动自动扫码"后，这些符号保留给设置页路径使用；此处显式引用避免 TS 未使用报错。
 void runQrSetup;
 void persistCredentialsToProfile;
@@ -182,6 +183,24 @@ export async function apply(ctx, config) {
         Object.assign(resolvedConfig, mergeDeep(resolvedConfig, ownSettings));
         logger.info(`已加载插件自有设置(${Object.keys(ownSettings).length} 项): ${ownSettingsFile}`);
     }
+    // ── 2026-10-25：把「这次实例到底用了哪套凭据」落盘 ────────────────────────
+    //   起因：白天反复出现"设置页保存成功后机器人仍连不上 / 密码像是被换回 cordis.patch.yml 旧值"，
+    //   而现有日志只有"连不上"，看不出是①读错了 profile 的设置文件、②宿主没重启还拿着旧值、
+    //   还是③同一个 appId 被另一个 profile/实例顶掉。
+    //   这里只写 appId 与 secret 的**末 4 位**（绝不写明文），配合文件名就能一眼对上是哪份配置。
+    //   输出受 diagLog 开关控制（默认关，零开销），文件：{DSH_HOME}/qqbot-boot-diag.log
+    try {
+        let profName = '';
+        try {
+            profName = resolveProfileName();
+        }
+        catch {
+            profName = '';
+        }
+        diagWrite('qqbot-boot-diag', `ns=${String(ns)} appId=${String(appId)} secretTail=${String(appSecret).slice(-4)} len=${String(appSecret).length}`
+            + ` ownKeys=${Object.keys(ownSettings).length} file=${ownSettingsFile} hasCred=${hasCred} profile=${profName || '(空)'}`);
+    }
+    catch { /* 诊断失败绝不影响启动 */ }
     // ── 2026-10-11 新增：settingsNs 冲突自检（判据与修法见 features/ns-guard.ts 顶部注释）──
     // ns 是"全局唯一"的设置槽名，而设置文件路径 {DSH_HOME}/qqbot-settings/<ns>.json 里**没有 profile 维度**：
     // 两个 profile 各挂一个实例却填了同一个 ns 时，两边共用一份文件 → 谁最后保存谁生效，凭据/preset/cwd

@@ -6270,7 +6270,17 @@ var QQS_THEME_CSS = [
           var meta = p.meta || {}
           return {
             title: meta.name || p.dirName,
-            subtitle: [meta.author ? ('作者 ' + meta.author) : '', meta.version ? ('v' + meta.version) : '', meta.desc || ''].filter(Boolean).join(' · ') || p.dir,
+            subtitle: [
+              meta.author ? ('作者 ' + meta.author) : '',
+              meta.version ? ('v' + meta.version) : '',
+              // 2026-10-25：扩展包可声明「需要的最低插件版本」，这里直接对照当前插件版本
+              p.minPluginVersion
+                ? ((p.versionOk === false)
+                  ? ('⚠ 需要插件 ≥ v' + p.minPluginVersion + '（当前 v' + (data.pluginVersion || '?') + '）')
+                  : ('需要插件 v' + p.minPluginVersion))
+                : '',
+              meta.desc || '',
+            ].filter(Boolean).join(' · ') || p.dir,
             kinds: p.kinds || {},
             isPack: true,
             raw: p,
@@ -6323,6 +6333,8 @@ var QQS_THEME_CSS = [
               : null)),
           h('div', { style: S.pathRow }, h('span', { style: S.pathKey }, '内置目录'), h('code', { style: S.code }, data.builtinRoot || '—')),
           h('div', { style: S.pathRow }, h('span', { style: S.pathKey }, '扩展包目录'), h('code', { style: S.code }, data.packsRoot || '—'))),
+          // 2026-10-25 主人要求：面板上要能直接看到当前装的 qqbot 插件版本
+          h('div', { style: S.pathRow }, h('span', { style: S.pathKey }, '插件版本'), h('code', { style: S.code }, data.pluginVersion ? ('v' + data.pluginVersion) : '—')),
 
         // 页签
         h('div', { style: S.tabs },
@@ -6864,6 +6876,24 @@ var QQS_THEME_CSS = [
                   h('div', { className: 'qqs-mk-head', style: S2.cardHead },
                     h('span', { className: 'qqs-mk-name', style: S2.cardName }, String(p.name || id)),
                     p.version ? h('span', { className: 'qqs-mk-meta', style: S2.cardVer }, 'v' + p.version) : null,
+                    // 2026-10-25：扩展包可声明 minPluginVersion，这里直接对照当前插件版本。
+                    // 满足 → 灰字提示「最低插件 vX」；不满足 → 标红并写清当前版本，免得装上去才发现跑不动。
+                    p.minPluginVersion ? (function () {
+                      var need = String(p.minPluginVersion)
+                      var cur = String((market && market.pluginVersion) || '')
+                      var cmpV = function (a, b) {
+                        var na = String(a || '').replace(/^v/i, '').split(/[.+-]/).map(function (x) { return parseInt(x, 10) || 0 })
+                        var nb = String(b || '').replace(/^v/i, '').split(/[.+-]/).map(function (x) { return parseInt(x, 10) || 0 })
+                        for (var i = 0; i < 3; i++) { var d = (na[i] || 0) - (nb[i] || 0); if (d) return d > 0 ? 1 : -1 }
+                        return 0
+                      }
+                      var okVer = !cur ? true : (cmpV(cur, need) >= 0)
+                      return h('span', {
+                        className: 'qqs-mk-meta',
+                        style: okVer ? S2.cardVer : Object.assign({}, S2.cardVer, { color: '#e5484d', fontWeight: 600 }),
+                        title: okVer ? ('当前插件 v' + cur + ' 满足要求') : ('当前插件 v' + cur + ' 低于要求，装上也跑不起来'),
+                      }, okVer ? ('最低插件 v' + need) : ('需要插件 ≥ v' + need + '（当前 v' + (cur || '?') + '）'))
+                    })() : null,
                     p.author ? h('span', { className: 'qqs-mk-meta', style: S2.cardVer }, 'by ' + p.author) : null,
                     h('span', { style: { marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' } },
                       isIn

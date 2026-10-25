@@ -83,6 +83,15 @@ export interface ExtCapsDeps {
   replyTarget?: unknown;
   /** 当前会话的 agent（appendSilent / appendWake 用） */
   agent?: { session?: unknown; followup?: (msg: unknown) => unknown } | undefined;
+  /**
+   * ★ **按会话标识唤醒 AI**（钩子专用）。`wakeTo(scope, peerId, text)`：
+   *   `scope` = `"group" | "c2c"`；`peerId` = 群 openid / 用户 openid。
+   *
+   * 为什么钩子需要它：钩子没有"当前消息"，拿不到"回谁"，只能**显式点名**目标
+   * （通常来自钩子自己的配置文件）。实现走 `agent.followup(createUserMessage(...))` ——
+   * 与 `appendWake` 同一条路，是**正常回合**（dsh 会先补人设），不是旁路注入。
+   */
+  wakeTo?: (scope: string, peerId: string, text: string) => Promise<boolean>;
   /** 当前会话标识 + 称呼（peer / user 展示用） */
   scope?: string;
   peerId?: string;
@@ -249,6 +258,14 @@ export interface ExtCapabilities {
   registerInteractionCard(input: { cardId: string; buttonIds: string[]; expireAt?: number }): boolean;
   appendSilent(text: string): Promise<boolean>;
   appendWake(text: string): Promise<boolean>;
+  /**
+   * ★ **唤指定会话的 AI**（钩子 / 定时任务专用）。
+   * @param scope `"group"` 群 / `"c2c"` 私聊
+   * @param peerId 群 openid 或 用户 openid
+   * @param text 要"当成用户说的话"注入的正文（走正常回合，dsh 会先补人设）
+   * @returns 已投递 = true；目标会话不存在 / 宿主没接这能力 = false（不抛错）
+   */
+  wakeTo(scope: string, peerId: string, text: string): Promise<boolean>;
   canAppendSilent(): boolean;
   user: { openid: string; name: string; isOwner: boolean };
   owners: string[];
@@ -521,6 +538,36 @@ export function makeExtCaps(deps: ExtCapsDeps): ExtCapabilities {
       }
       // 没有 followup 能力 ⇒ 退回静默 append（仍受守卫保护）
       return false;
+    },
+    /**
+     * ★ 按会话标识唤醒：钩子没有"当前消息"，必须显式点名目标。
+     *   真正把 `peerId → agent` 解析出来的是宿主注入的 `deps.wakeTo`（见 gateway/bootstrap.ts）；
+     *   这里只做参数清洗 + 兜底，永远不抛错。
+     */
+    wakeTo: async (scope: string, peerId: string, text: string): Promise<boolean> => {
+      const t = String(text ?? '').trim();
+      const sc = String(scope ?? '').trim();
+      const pid = String(peerId ?? '').trim();
+      if (!t || !sc || !pid) return false;
+
+      // ① 宿主显式注入的优先（目前只有 hooks / commands 两处注入）
+      const fn = deps.wakeTo;
+      if (typeof fn === 'function') {
+        try { if ((await fn(sc, pid, t)) === true) return true; } catch (err) { warn('wakeTo(deps)', err); }
+      }
+
+      // ② 兜底：自己按 peer 找 manager 再注入 —— 与 session_wake 工具同一条路。
+      //    ⚠️ 2026-10-25 事故：caps 有六个构造方（tools/commands/hooks/botplay/inbound/outbound），
+      //    逐个注入 deps.wakeTo 必然漏（实测 tools 与 commands 都漏了），于是扩展拿到一个
+      //    "是函数、但恒返回 false"的 wakeTo，回执还误导成"没找到会话"。
+      //    session-registry 是进程内 SessionManager 的唯一真源（settings-host 也用它），
+      //    问它最可靠：findManagerByPeer(scope, peerId) → manager.injectToPeer(...)（内部 agent.followup）。
+      try {
+        const reg = await import('./session-registry.js');
+        const m = reg.findManagerByPeer(sc as never, pid);
+        if (!m) return false;
+        return (await m.injectToPeer(sc as never, pid, t, 'user')) === true;
+      } catch (err) { warn('wakeTo(registry)', err); return false; }
     },
     canAppendSilent: () => canSilentlyAppend(deps.agent?.session),
 

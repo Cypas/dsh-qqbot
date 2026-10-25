@@ -94,6 +94,20 @@ export interface RunStartupHooksOptions {
   config?: unknown;
   /** 单钩子超时（ms），缺省 {@link DEFAULT_HOOK_TIMEOUT_MS}（30s） */
   timeoutMs?: number;
+  /** bot 的 AppID（落进 env.caps.appId / env.config.appId，钩子可自取凭证） */
+  appId?: string;
+  /** bot 的 AppSecret（同上） */
+  appSecret?: string;
+  /** 主人 openid 白名单（落进 env.caps.owners / env.config.owners） */
+  owners?: string[];
+  /**
+   * ★ 唤指定会话的 AI：(scope, peerId, text) => Promise<boolean>。
+   *
+   * 钩子没有“当前消息”，所以必须显式点名目标会话 —— 这是它唯一能让 AI 开口的正当方式
+   * （caps.appendWake 依赖“当前会话”，钩子里恒为 undefined）。
+   * 由 bootstrapGateway 注入；宿主不接时 caps.wakeTo() 恒返回 false（不抛错）。
+   */
+  wakeTo?: (scope: string, peerId: string, text: string) => Promise<boolean>;
 }
 
 /** 传给钩子的 env（写扩展时看到的就是这个） */
@@ -265,6 +279,14 @@ export async function runStartupHooks(opts: RunStartupHooksOptions): Promise<Hoo
         kernel: opts.ctx,
         selfName: f,
         kind: 'hooks',
+        // ── 2026-10-13：钩子也要能“自报家门 + 自己开口” ─────────────────
+        //   凭证：钩子要发消息/换 token 时不该再让用户手填一份（与 bot 实例同一份）。
+        //   owners：钩子判断“这条要不要送给主人”时要看。
+        //   wakeTo：钩子没有“当前消息”，只能显式点名目标会话（见 RunStartupHooksOptions）。
+        appId: opts.appId,
+        appSecret: opts.appSecret,
+        owners: opts.owners,
+        wakeTo: opts.wakeTo,
       });
       const env: HookEnv = {
         ctx: opts.ctx,

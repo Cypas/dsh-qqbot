@@ -185,6 +185,14 @@ export async function runStartupHooks(opts) {
                 kernel: opts.ctx,
                 selfName: f,
                 kind: 'hooks',
+                // ── 2026-10-13：钩子也要能“自报家门 + 自己开口” ─────────────────
+                //   凭证：钩子要发消息/换 token 时不该再让用户手填一份（与 bot 实例同一份）。
+                //   owners：钩子判断“这条要不要送给主人”时要看。
+                //   wakeTo：钩子没有“当前消息”，只能显式点名目标会话（见 RunStartupHooksOptions）。
+                appId: opts.appId,
+                appSecret: opts.appSecret,
+                owners: opts.owners,
+                wakeTo: opts.wakeTo,
             });
             const env = {
                 ctx: opts.ctx,

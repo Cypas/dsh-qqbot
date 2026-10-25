@@ -42,6 +42,15 @@ export interface ExtCapsDeps {
         session?: unknown;
         followup?: (msg: unknown) => unknown;
     } | undefined;
+    /**
+     * ★ **按会话标识唤醒 AI**（钩子专用）。`wakeTo(scope, peerId, text)`：
+     *   `scope` = `"group" | "c2c"`；`peerId` = 群 openid / 用户 openid。
+     *
+     * 为什么钩子需要它：钩子没有"当前消息"，拿不到"回谁"，只能**显式点名**目标
+     * （通常来自钩子自己的配置文件）。实现走 `agent.followup(createUserMessage(...))` ——
+     * 与 `appendWake` 同一条路，是**正常回合**（dsh 会先补人设），不是旁路注入。
+     */
+    wakeTo?: (scope: string, peerId: string, text: string) => Promise<boolean>;
     /** 当前会话标识 + 称呼（peer / user 展示用） */
     scope?: string;
     peerId?: string;
@@ -243,6 +252,14 @@ export interface ExtCapabilities {
     }): boolean;
     appendSilent(text: string): Promise<boolean>;
     appendWake(text: string): Promise<boolean>;
+    /**
+     * ★ **唤指定会话的 AI**（钩子 / 定时任务专用）。
+     * @param scope `"group"` 群 / `"c2c"` 私聊
+     * @param peerId 群 openid 或 用户 openid
+     * @param text 要"当成用户说的话"注入的正文（走正常回合，dsh 会先补人设）
+     * @returns 已投递 = true；目标会话不存在 / 宿主没接这能力 = false（不抛错）
+     */
+    wakeTo(scope: string, peerId: string, text: string): Promise<boolean>;
     canAppendSilent(): boolean;
     user: {
         openid: string;

@@ -63,6 +63,7 @@
 | 持久化 | `env.store.load()` / `env.store.save(obj)` | 落 `…/data/<你的文件名>.json`，**升级插件不丢** |
 | **进上下文（静默）** | `await env.appendSilent('...')` | **只落上下文、不唤醒**（详见 §4 安全红线） |
 | 进上下文（唤醒） | `await env.appendWake('...')` | 走正常回合唤醒一轮 AI（耗 token） |
+| **唤指定会话（钩子专用）** | `await caps.wakeTo(scope, peerId, text)` | 不用"当前会话"，**点名**唤醒某个群/私聊里的 AI（`scope`=`group`/`c2c`，`peerId`=群/用户 openid）。走正常回合，AI 用自己的话回，回复由宿主发到 QQ。返回 `true`=已投递；目标不存在/宿主没接= `false`（不抛错） |
 | **身份** | `env.user.openid` / `env.user.name` / `env.user.isOwner` | 当前发言者。`isOwner` 已按主人白名单**算好布尔值**，直接 `if (!env.user.isOwner) return` 即可，不必自己比数组 |
 | **主人判定（便捷）** | `env.isOwner` | 等价于 `env.user.isOwner` 的顶层布尔，最省事的写法 |
 | **主人白名单** | `env.owners`（`string[]`） | 原始 openid 数组，`[]` = 未配置主人 |

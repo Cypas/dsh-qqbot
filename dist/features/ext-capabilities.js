@@ -310,6 +310,46 @@ export function makeExtCaps(deps) {
             // 没有 followup 能力 ⇒ 退回静默 append（仍受守卫保护）
             return false;
         },
+        /**
+         * ★ 按会话标识唤醒：钩子没有"当前消息"，必须显式点名目标。
+         *   真正把 `peerId → agent` 解析出来的是宿主注入的 `deps.wakeTo`（见 gateway/bootstrap.ts）；
+         *   这里只做参数清洗 + 兜底，永远不抛错。
+         */
+        wakeTo: async (scope, peerId, text) => {
+            const t = String(text ?? '').trim();
+            const sc = String(scope ?? '').trim();
+            const pid = String(peerId ?? '').trim();
+            if (!t || !sc || !pid)
+                return false;
+            // ① 宿主显式注入的优先（目前只有 hooks / commands 两处注入）
+            const fn = deps.wakeTo;
+            if (typeof fn === 'function') {
+                try {
+                    if ((await fn(sc, pid, t)) === true)
+                        return true;
+                }
+                catch (err) {
+                    warn('wakeTo(deps)', err);
+                }
+            }
+            // ② 兜底：自己按 peer 找 manager 再注入 —— 与 session_wake 工具同一条路。
+            //    ⚠️ 2026-10-25 事故：caps 有六个构造方（tools/commands/hooks/botplay/inbound/outbound），
+            //    逐个注入 deps.wakeTo 必然漏（实测 tools 与 commands 都漏了），于是扩展拿到一个
+            //    "是函数、但恒返回 false"的 wakeTo，回执还误导成"没找到会话"。
+            //    session-registry 是进程内 SessionManager 的唯一真源（settings-host 也用它），
+            //    问它最可靠：findManagerByPeer(scope, peerId) → manager.injectToPeer(...)（内部 agent.followup）。
+            try {
+                const reg = await import('./session-registry.js');
+                const m = reg.findManagerByPeer(sc, pid);
+                if (!m)
+                    return false;
+                return (await m.injectToPeer(sc, pid, t, 'user')) === true;
+            }
+            catch (err) {
+                warn('wakeTo(registry)', err);
+                return false;
+            }
+        },
         canAppendSilent: () => canSilentlyAppend(deps.agent?.session),
         // ── 身份 ───────────────────────────────────────────────────────
         user: {

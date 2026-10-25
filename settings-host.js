@@ -77,6 +77,35 @@ function resolveProfileRoot() {
   return byLocation;
 }
 const PROFILE_ROOT = resolveProfileRoot();
+/**
+ * 本插件自身的版本号（读包根 package.json）。
+ * 2026-10-25 主人要求：面板上要能直接看到当前装的 qqbot 插件版本 ——
+ * 之前只能靠 npm/github 记录去猜，出问题时对不上版本。
+ * 读不到就空串，前端显示 "—"，绝不影响面板其他部分。
+ */
+const PLUGIN_VERSION = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const j = JSON.parse(readFileSync(join(here, 'package.json'), 'utf8'));
+    return String(j.version || '');
+  } catch { return ''; }
+})();
+
+/**
+ * 语义化版本比较（只比前 3 段，容忍 'v' 前缀与 -beta 之类的尾巴）。
+ * @returns a<b → -1，a===b → 0，a>b → 1；任一侧空串 → 0（视为不比较）
+ */
+function cmpVer(a, b) {
+  const norm = (v) => String(v || '').replace(/^v/i, '').split(/[.+-]/).map((x) => parseInt(x, 10) || 0);
+  const pa = norm(a); const pb = norm(b);
+  if (!String(a || '') || !String(b || '')) return 0;
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
 /** cordis.patch.yml = 宿主插件装配文件(账号实例声明处; 改它需重启 dsh 生效) */
 const PATCH_FILE = join(PROFILE_ROOT, 'cordis.patch.yml');
 
@@ -618,8 +647,12 @@ export function apply(ctx) {
       // 通知插件实例重新读取（桥与插件同进程；不写宿主配置 → 不触发任何热更新）
       try { ctx.emit('qqbot/settings-changed', ns); } catch { /* 无监听者也无妨 */ }
       const base = viewOf(ctx.settings, ns) || {};
+      // 2026-10-25：响应与 /read 一样只回掩码 —— 否则前端会把 base(patch 旧值) 当成"当前值"
+      // 存进表单状态，下一次保存原样提交回来，绕一圈又把旧密码写回自有存储。
+      const respValue = Object.assign({}, base.value || {}, merged);
+      if (respValue && typeof respValue === 'object' && respValue.appSecret) respValue.appSecret = SECRET_MASK;
       writeJson(res, 200, {
-        value: Object.assign({}, base.value || {}, merged),
+        value: respValue,
         revision: base.revision,
         mode: 'own',
         file,
@@ -1184,8 +1217,18 @@ export function apply(ctx) {
       if (inst.remove) continue;
       const orig = bots.find((b) => b.id === String(inst.id));
       // 掩码/空 → 保留原 secret(仅当原值存在; 全新账号本就无原值则维持空)
+      // ⚠️ 2026-10-25 修「什么都不改、再点一次保存，appSecret 就变回 cordis.patch.yml 里的旧值」：
+      //   回填源必须是**插件自有存储**（{DSH_HOME}/qqbot-settings/<ns>.json，用户真正保存过的那份），
+      //   绝不能拿 patch 里的 appSecret 顶着。
+      //   原因链：/api/qqbot-settings/accounts 只回掩码(SECRET_MASK)，前端提交的必然是空或掩码 →
+      //   旧代码从 orig.cfg.appSecret 取 patch 值（自 2026-09-24 起 patch 就再没被写过，那是历史旧值）
+      //   → 写进自有存储 → 覆盖用户刚存的新密码。第一次保存正常、第二次必坏，症状完全吻合。
       let secret = String(inst.appSecret ?? '');
-      if (!secret || secret === SECRET_MASK) secret = orig?.cfg?.appSecret ? String(orig.cfg.appSecret) : '';
+      if (!secret || secret === SECRET_MASK) {
+        let ownSecret = '';
+        try { ownSecret = String(readOwnSettings(String(inst.settingsNs || inst.id)).appSecret || ''); } catch { /* 读不到才走 patch 兜底 */ }
+        secret = ownSecret || (orig?.cfg?.appSecret ? String(orig.cfg.appSecret) : '');
+      }
       // 前端不编辑 dataRoot → 保留原值(2026-09-09: 曾因保存覆盖丢失导致图库路径回退 cwd)
       let dataRoot = inst.dataRoot;
       if (dataRoot === undefined && orig?.cfg?.dataRoot) dataRoot = orig.cfg.dataRoot;
@@ -1241,6 +1284,7 @@ export function apply(ctx) {
         const nsKey = String(inst.settingsNs || inst.id);
         const cur = readOwnSettings(nsKey);
         let sec = String(inst.appSecret ?? '');
+        // 掩码/空 = 保留原值；原值只认自有存储（上面已保证自己这份是最新的），不再回看 patch。
         if (!sec || sec === SECRET_MASK) sec = cur.appSecret ? String(cur.appSecret) : '';
         if (inst.appId !== undefined) cur.appId = inst.appId;
         if (sec) cur.appSecret = sec;
@@ -5462,7 +5506,11 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
     const errs = [];
     for (const url of MARKET_SOURCES) {
       try {
-        const txt = await fetchText(url, 8000);
+        // 2026-10-25 修：jsDelivr 对 @main 有 CDN 缓存（实测删了目录它还返回旧的 4 个包）。
+        //   前三个源拿到的就是最新内容，但都超时时会走到 jsdelivr 拿到陈旧索引 ——
+        //   所以每个源都拼一个 __cb 时间戳：GitHub raw 忽略它，jsDelivr 当新 URL 绕开缓存。
+        const bust = url + (url.indexOf("?") >= 0 ? "&" : "?") + "__cb=" + Date.now();
+        const txt = await fetchText(bust, 8000);
         const j = JSON.parse(txt);
         if (!Array.isArray(j.plugins)) j.plugins = [];
         return { json: j, source: url };
@@ -5647,7 +5695,8 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
           });
       } catch { installed = []; }
 
-      writeJson(res, 200, { ok: true, index, indexErr, indexSource, proxy: curProxy, installed, packsRoot, indexUrl: MARKET_INDEX_URL + '（多源，实际用: ' + (indexSource || '无') + '）' });
+      // 2026-10-25：带上当前插件版本，市场卡片据此对照扩展包声明的 minPluginVersion
+      writeJson(res, 200, { ok: true, index, indexErr, indexSource, proxy: curProxy, installed, packsRoot, pluginVersion: PLUGIN_VERSION, indexUrl: MARKET_INDEX_URL + '（多源，实际用: ' + (indexSource || '无') + '）' });
     } catch (e) {
       writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
     }
@@ -5824,6 +5873,8 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
         dataRootFrom: _dr.source,
         builtinRoot,
         builtin,
+        // 2026-10-25：当前插件版本（面板直观显示；扩展包可比对它声明最低要求）
+        pluginVersion: PLUGIN_VERSION,
         packsRoot: join(dataRoot, 'extension-packs'),
         packs: [],
       };
@@ -5851,6 +5902,8 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
               desc: j.description || j.desc || '',
               version: j.version || '',
               homepage: j.homepage || j.repository || '',
+              // 2026-10-25：扩展包可声明「需要的最低插件版本」（qqbot-pack.json 的 minPluginVersion）
+              minPluginVersion: String(j.minPluginVersion || j.minPlugin || ''),
             };
             break;
           } catch { /* 清单坏了就当没有 */ }
@@ -5864,6 +5917,11 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
           meta,
           kinds: scanned.kinds,
           total: scanned.total,
+          // 2026-10-25：版本兼容性（面板据此标红提示"需要插件 ≥ x.y.z"）
+          minPluginVersion: meta.minPluginVersion || '',
+          versionOk: !meta.minPluginVersion || !PLUGIN_VERSION
+            ? true
+            : cmpVer(PLUGIN_VERSION, meta.minPluginVersion) >= 0,
         });
       }
       result.packs.sort((a, b) => a.dirName.localeCompare(b.dirName));

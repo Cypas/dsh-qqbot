@@ -434,6 +434,13 @@ pluginCtx) {
                 return makeExtCaps({
                     dataRoot: dataRootOf(config),
                     logger,
+                    // ★ 2026-10-25：命令侧也必须能"点名唤醒"，否则 caps.wakeTo 恒返回 false。
+                    //   之前只有钩子侧（ext-hooks.ts）注入了 deps.wakeTo，命令调的 /companion test
+                    //   永远走"唤醒没送达"分支 —— makeExtCaps 总会给出 wakeTo 函数（所以"能力在"），
+                    //   但它内部读不到 deps.wakeTo 就直接 return false（所以"没送达"）。
+                    //   真身用 manager.injectToPeer()：它的语义就是"往某会话塞一条新消息，
+                    //   AI 带上下文处理并回复到 QQ"，与 appendWake 同一条路，只是目标由 (scope,peerId) 显式指定。
+                    wakeTo: (scope2, peerId2, text2) => manager.injectToPeer(scope2, peerId2, text2, 'user'),
                     appId: config.appId,
                     appSecret: config.appSecret,
                     // 2026-10-25 修：主人白名单在 config.groupAdmin.owners，不是 config.owners
