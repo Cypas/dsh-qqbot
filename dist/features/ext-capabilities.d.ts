@@ -191,6 +191,8 @@ export interface ExtInboundCaps {
     };
 }
 export interface ExtCapabilities {
+    /** 当前执行者 openid（群聊=author.member_openid，单聊=author.user_openid） */
+    actorOpenid?: string;
     appId: string;
     appSecret: string;
     /** ★ 2026-10-16：数据根（扩展之间共享一小份状态时用它拼固定路径；空串=拿不到，别拿它拼相对路径写盘） */

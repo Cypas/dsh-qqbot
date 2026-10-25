@@ -2879,7 +2879,9 @@ const toolDefs: Array<{ name: string; tool: unknown }> = [
                 logger: (ctx as { logger?: unknown }).logger as never,
                 appId: mgr?.config?.appId,
                 appSecret: mgr?.config?.appSecret,
-                owners: mgr?.config?.owners,
+                owners: (Array.isArray((mgr as { config?: { groupAdmin?: { owners?: string[] } } })?.config?.groupAdmin?.owners)
+                  ? (mgr as { config?: { groupAdmin?: { owners?: string[] } } })!.config!.groupAdmin!.owners!.map(String)
+                  : []),
                 // 2026-10-25：按 docs/extension-contract.md §2 补齐 user / peer 命名空间（见下方），
                 //   并额外给一个**顶层 isOwner 布尔值** —— 这是最省事的判据，
                 //   扩展直接 `if (!env.isOwner) return` 即可，不必自己比对 owners 数组。

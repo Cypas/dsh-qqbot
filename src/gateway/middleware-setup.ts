@@ -428,10 +428,30 @@ export async function setupMiddlewares(
     //   持久化 / 上下文 / 身份」。只补不覆盖；构造失败不影响命令本身的执行。
     const capsForCmd = (() => {
       try {
-        const mc = ctx.message as { kind?: string; groupOpenid?: string; senderId?: string } | undefined;
+        // ★ 2026-10-25 修：按 QQ 官方事件体结构取发送者。
+        //   官方文档（参考文档/qqbot-api-v2-docs-20261020/html/autogen__event__group_at_message_create.html）写明：
+        //     | author | User | 发送者（member_openid 有值）|
+        //     User = { id, username, bot, union_openid, user_openid, member_openid }
+        //   群聊取 author.member_openid，单聊取 author.user_openid，兜底 author.id。
+        //   之前读的是自造的 mc.senderId —— 那个字段根本不存在，永远是空，
+        //   于是命令侧拿不到发送者 → isOwner 恒 false → /companion 一直说"仅主人可用"。
+        const mc = ctx.message as {
+          kind?: string;
+          groupOpenid?: string;
+          group_openid?: string;
+          senderId?: string;
+          author?: { id?: string; username?: string; member_openid?: string; user_openid?: string };
+        } | undefined;
         const isG = mc?.kind === 'group';
         const sc = isG ? 'group' : 'c2c';
-        const pid = String((isG ? mc?.groupOpenid : mc?.senderId) ?? '');
+        const actorOpenid = String(
+          mc?.author?.member_openid
+          ?? mc?.author?.user_openid
+          ?? mc?.author?.id
+          ?? mc?.senderId
+          ?? ''
+        );
+        const pid = String((isG ? (mc?.groupOpenid ?? mc?.group_openid) : actorOpenid) ?? '');
         const rec = pid ? manager.findByPeer(sc as never, pid) : undefined;
         const ga = manager.groupAdmin;
         return makeExtCaps({
@@ -439,7 +459,11 @@ export async function setupMiddlewares(
           logger,
           appId: (config as { appId?: string }).appId,
           appSecret: (config as { appSecret?: string }).appSecret,
-          owners: (config as { owners?: string[] }).owners,
+          // 2026-10-25 修：主人白名单在 config.groupAdmin.owners，不是 config.owners
+          //   （与 bootstrap.ts:778 botplay 侧同口径，那边一直是对的）
+          owners: (Array.isArray((config as { groupAdmin?: { owners?: string[] } }).groupAdmin?.owners)
+            ? (config as { groupAdmin?: { owners?: string[] } }).groupAdmin!.owners!.map(String)
+            : []),
           // 命令侧能拿到的发送器就是中间件 ctx 上的 bot（至少有 sendText / sendMarkdown）；
           // 缺什么能力，对应的 env.xxx 会优雅地返回 false，而不是抛错。
           sender: (ctx as { bot?: unknown }).bot as never,
@@ -453,7 +477,7 @@ export async function setupMiddlewares(
           peerSessionId: pid ? manager.sessionIdFor(sc as never, pid) : '',
           scope: sc,
           peerId: pid,
-          actorOpenid: String(mc?.senderId ?? ''),
+          actorOpenid,
           apiCall: ga && typeof ga.apiCall === 'function'
             ? ((mm: 'GET' | 'POST' | 'PATCH' | 'DELETE', p: string, b?: unknown) => ga.apiCall(mm, p, b)) as never
             : undefined,
@@ -517,6 +541,9 @@ export async function setupMiddlewares(
           ...(readExtConfig(dr, cmdFile) as Record<string, unknown>),
           appId: (config as { appId?: string }).appId,
           appSecret: (config as { appSecret?: string }).appSecret,
+          owners: (Array.isArray((config as { groupAdmin?: { owners?: string[] } }).groupAdmin?.owners)
+            ? (config as { groupAdmin?: { owners?: string[] } }).groupAdmin!.owners!.map(String)
+            : []),
         };
         handlerArg.__file = cmdFile;
       }
