@@ -498,7 +498,14 @@ pluginCtx) {
                 || '';
             if (cmdFile && dr) {
                 const { readExtConfig } = await import('../features/ext-config.js');
-                handlerArg.config = readExtConfig(dr, cmdFile);
+                // 2026-10-25：bot 凭证也塞进 config —— 扩展生态（proactive-companion 的
+                //   lib/transport.mjs credentials()）从 env.config.appId/appSecret 读凭证自己换 token，
+                //   而宿主的 config 本来是「扩展自己的设置」，两者对不上就报 NO_CREDENTIALS。
+                handlerArg.config = {
+                    ...readExtConfig(dr, cmdFile),
+                    appId: config.appId,
+                    appSecret: config.appSecret,
+                };
                 handlerArg.__file = cmdFile;
             }
         }

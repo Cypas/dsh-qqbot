@@ -3102,6 +3102,8 @@ export async function apply(ctx) {
                                 // 2026-10-25：按 docs/extension-contract.md §2 补齐 user / peer 命名空间（见下方），
                                 //   并额外给一个**顶层 isOwner 布尔值** —— 这是最省事的判据，
                                 //   扩展直接 `if (!env.isOwner) return` 即可，不必自己比对 owners 数组。
+                                // 2026-10-25：扩展可能从 env.config.appId/appSecret 自取凭证换 token
+                                config: { appId: mgr?.config?.appId, appSecret: mgr?.config?.appSecret },
                                 isOwner: (Array.isArray(mgr?.config?.owners)
                                     && !!recAny?.senderId
                                     && mgr.config.owners.map(String).includes(String(recAny.senderId))),

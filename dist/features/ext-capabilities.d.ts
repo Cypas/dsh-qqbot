@@ -71,6 +71,12 @@ export interface ExtCapsDeps {
         scope?: string;
         peerId?: string;
     };
+    /** 宿主注入的通用配置（含 bot 的 appId/appSecret；扩展可自取凭证换 token） */
+    config?: {
+        appId?: string;
+        appSecret?: string;
+        [k: string]: unknown;
+    };
     /** 便捷布尔：等价于 user.isOwner（顶层，最省事的判据） */
     isOwner?: boolean;
     /** 发送者 openid 的平铺别名（部分扩展按这些名字找身份） */
