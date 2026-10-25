@@ -63,7 +63,12 @@
 | 持久化 | `env.store.load()` / `env.store.save(obj)` | 落 `…/data/<你的文件名>.json`，**升级插件不丢** |
 | **进上下文（静默）** | `await env.appendSilent('...')` | **只落上下文、不唤醒**（详见 §4 安全红线） |
 | 进上下文（唤醒） | `await env.appendWake('...')` | 走正常回合唤醒一轮 AI（耗 token） |
-| 身份 | `env.user.openid/name/isOwner`、`env.owners`、`env.peer.scope/peerId` | |
+| **身份** | `env.user.openid` / `env.user.name` / `env.user.isOwner` | 当前发言者。`isOwner` 已按主人白名单**算好布尔值**，直接 `if (!env.user.isOwner) return` 即可，不必自己比数组 |
+| **主人判定（便捷）** | `env.isOwner` | 等价于 `env.user.isOwner` 的顶层布尔，最省事的写法 |
+| **主人白名单** | `env.owners`（`string[]`） | 原始 openid 数组，`[]` = 未配置主人 |
+| **发送者 openid（平铺）** | `env.actorOpenid` | 与 `env.user.openid` 同值。v1.10.42 起才真正暴露（此前只在内部算 `isOwner` 时用到） |
+| **会话标识** | `env.peer.scope` / `env.peer.peerId` | `scope` = `'group'` / `'c2c'`；`peerId` = 群 openid 或用户 openid |
+| **宿主配置** | `env.config.appId` / `env.config.appSecret` / `env.config.owners` | 给「想自己换 token 调接口」或「自己判主人」的扩展用。⚠️ 命令侧 `ctx.config` **同时**还包含该扩展自己的设置项（面板里填的值），两者合并 |
 | **本会话 id** | `env.peerSessionId` | 本 QQ 会话对应的 **DSH 会话 id**（= `session/event` 里那个 `session.id`）。⚠️ **不是 `agent.id`** —— 跨会话回灌/引用回流判"父会话"用的正是它。v1.10.0 起提供；命令与按钮回调侧都能拿到（回调侧字面同值，直接读即可） |
 | 日志 | `env.log(...)` | 落插件 logger |
 | 内核句柄 | `env.kernel`（工具侧也叫 `env.ctx`） | **全权限"遥控器"**：`ctx.get('服务名')` / `ctx.on(...)` / `ctx.webServer.register(...)`。⚠️ 形状跟随 dsh 版本；`register` 返回的 disposer 要自己收尾 |
