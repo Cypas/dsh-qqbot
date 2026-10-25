@@ -465,6 +465,31 @@ pluginCtx) {
             args: parsed.raw,
             rawArgs: parsed.raw,
         };
+        // ★ 2026-10-25：补齐 docs/extension-contract.md §2 承诺的 user / peer 命名空间
+        //   文档写的是 `env.user.openid/name/isOwner`、`env.peer.scope/peerId`，
+        //   命令侧原本只有顶层 `caps.actorOpenid` 这类字段 —— 对不上，作者照文档写必然拿到 undefined。
+        //   （这里不新增私有别名，只把文档承诺的那两个对象补出来；旧字段照旧保留。）
+        {
+            const c = capsForCmd;
+            const who = c?.actorOpenid ? String(c.actorOpenid) : '';
+            const ownerList = Array.isArray(c?.owners) ? c.owners.map(String) : [];
+            handlerArg.user = {
+                openid: who || undefined,
+                name: ctx?.senderName
+                    ?? ctx?.message?.senderName,
+                isOwner: Boolean(who && ownerList.includes(who)),
+            };
+            handlerArg.peer = {
+                scope: c?.scope,
+                peerId: c?.peerId,
+            };
+            // 作者生态里还有一批按顶层名字找身份的写法（isOwnerContext 的候选列表），一并给到；
+            // 值同源，不引入新语义。
+            handlerArg.senderOpenid = who || undefined;
+            handlerArg.userOpenid = who || undefined;
+            handlerArg.openid = who || undefined;
+            handlerArg.owners = ownerList;
+        }
         // ★ 2026-10-24：把「该扩展自己的设置」塞进来（面板里填的值），扩展用 ctx.config 读
         try {
             const cmdFile = cmd.__file;

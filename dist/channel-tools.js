@@ -3099,7 +3099,38 @@ export async function apply(ctx) {
                                 appId: mgr?.config?.appId,
                                 appSecret: mgr?.config?.appSecret,
                                 owners: mgr?.config?.owners,
-                                sender: sess?.ch.sender,
+                                // 2026-10-25：按 docs/extension-contract.md §2 补齐 user / peer 命名空间（见下方），
+                                //   并额外给一个**顶层 isOwner 布尔值** —— 这是最省事的判据，
+                                //   扩展直接 `if (!env.isOwner) return` 即可，不必自己比对 owners 数组。
+                                isOwner: (Array.isArray(mgr?.config?.owners)
+                                    && !!recAny?.senderId
+                                    && mgr.config.owners.map(String).includes(String(recAny.senderId))),
+                                senderOpenid: recAny?.senderId,
+                                userOpenid: recAny?.senderId,
+                                openid: recAny?.senderId,
+                                // sender 合并而非覆盖：保留原字段（别的扩展可能读 name/card 等）
+                                // 额外带上 openid —— 部分扩展按 `ctx.sender.openid` 找发送者
+                                sender: ({
+                                    ...((sess?.ch.sender && typeof sess.ch.sender === 'object') ? sess.ch.sender : {}),
+                                    openid: recAny?.senderId,
+                                }),
+                                // ★ 2026-10-25：补齐 docs/extension-contract.md §2 承诺的命名空间
+                                //   文档写的是 `env.user.openid/name/isOwner` 与 `env.peer.scope/peerId`，
+                                //   但实现一直没给 —— 文档声明「本文写的就是当前真实实现」，
+                                //   于是照文档写的扩展拿到 undefined（proactive-companion 就栽在这）。
+                                user: {
+                                    openid: recAny?.senderId,
+                                    name: ((sess?.ch.sender && typeof sess.ch.sender === 'object')
+                                        ? sess.ch.sender.name
+                                        : undefined),
+                                    isOwner: (Array.isArray(mgr?.config?.owners)
+                                        && !!recAny?.senderId
+                                        && mgr.config.owners.map(String).includes(String(recAny.senderId))),
+                                },
+                                peer: {
+                                    scope: recAny?.scope,
+                                    peerId: recAny?.peerId,
+                                },
                                 replyTarget: (recAny?.replyTarget ?? sess?.rec.replyTarget),
                                 agent: recAny?.agent,
                                 scope: recAny?.scope,

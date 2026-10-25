@@ -59,6 +59,24 @@ export interface ExtCapsDeps {
     apiCall?: (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown) => Promise<ExtApiResult>;
     /** 扩展名（store 文件名 / 日志前缀） */
     selfName?: string;
+    /** 当前发言者身份（文档 §2「身份」承诺的字段） */
+    user?: {
+        openid?: string;
+        name?: string;
+        /** 是否主人（已比对 owners 白名单，扩展不用自己算） */
+        isOwner?: boolean;
+    };
+    /** 当前会话标识（文档 §2「身份」承诺的字段） */
+    peer?: {
+        scope?: string;
+        peerId?: string;
+    };
+    /** 便捷布尔：等价于 user.isOwner（顶层，最省事的判据） */
+    isOwner?: boolean;
+    /** 发送者 openid 的平铺别名（部分扩展按这些名字找身份） */
+    senderOpenid?: string;
+    userOpenid?: string;
+    openid?: string;
     /** 扩展种类：tools / commands（决定 store 落在哪个子目录） */
     kind?: string;
     /**
