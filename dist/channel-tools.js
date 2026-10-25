@@ -3125,8 +3125,15 @@ export async function apply(ctx) {
                         }
                         try {
                             const r = await def.run(args, env);
-                            if (r && typeof r === 'object')
-                                return { ok: r.ok === true, msg: String(r.msg ?? 'done') };
+                            if (r && typeof r === 'object') {
+                                // 2026-10-25 兼容三种写法：{ok,msg} / {ok,message} / 裸对象（如 get 直接返回查询结果）
+                                //   之前只认 r.msg，导致作者写 {ok:true, message:'已开启'} 也显示成 "已完成: done"，
+                                //   而 get 分支返回裸对象时 r.ok 是 undefined → 显示成 "失败: done"。
+                                const rr = r;
+                                const okFlag = typeof rr.ok === 'boolean' ? rr.ok : !rr.error;
+                                const text = rr.msg ?? rr.message ?? rr.error ?? 'done';
+                                return { ok: okFlag, msg: String(text) };
+                            }
                             return { ok: true, msg: r === undefined || r === null ? 'done' : String(r) };
                         }
                         catch (err) {

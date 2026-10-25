@@ -5478,6 +5478,30 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
    * 墙内 raw.githubusercontent.com / api.github.com / data.jsdelivr.com 都连不上，
    * 实测只有 cdn.jsdelivr.net 通 —— 文件内容也走它。
    */
+  /**
+   * 插件文件的多源候选（2026-10-25 修）
+   *
+   * 旧实现只用 cdn.jsdelivr.net，注释写"文件内容不变，缓存无害"——
+   * 但作者发新版后 jsDelivr 的 @main 缓存还停在旧内容，于是：
+   *   index.json 走 raw 拿到 version 1.0.5（新）
+   *   文件走 jsDelivr 拿到 handler/parameters（旧，v1.0.4 之前的）
+   * → 装出来的包"元数据是新的、代码是旧的"，工具直接不加载。
+   *
+   * 现在文件和索引用同一套顺序：实时源优先，jsDelivr 只做最后兜底。
+   */
+  function fileUrlCandidates(repo, branch, relPath) {
+    const segs = String(relPath).replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
+    const b = branch || 'main';
+    const raw = repo + '/' + b + '/' + segs;
+    return [
+      'https://gh-proxy.com/https://raw.githubusercontent.com/' + raw,
+      'https://raw.githubusercontent.com/' + raw,
+      'https://ghproxy.net/https://raw.githubusercontent.com/' + raw,
+      'https://cdn.jsdelivr.net/gh/' + repo + '@' + b + '/' + segs,
+    ];
+  }
+
+  /** 兼容旧引用：取候选里的 jsDelivr 那条 */
   function jsdelivrFileUrl(repo, branch, relPath) {
     const segs = String(relPath).replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
     return 'https://cdn.jsdelivr.net/gh/' + repo + '@' + (branch || 'main') + '/' + segs;
@@ -5707,8 +5731,18 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
         if (!abs.replace(/\\/g, '/').startsWith(destNorm + '/')) return { ok: false, rel, err: '路径越界' };
         try {
           mkdirSync(dirname(abs), { recursive: true });
-          const url = jsdelivrFileUrl(item.repo, branch, String(item.path) + '/' + relPath);
-          const content = px ? curlText(url, px, 20000) : await fetchText(url, 20000);
+          const urls = fileUrlCandidates(item.repo, branch, String(item.path) + '/' + relPath);
+          let content = null;
+          let lastErr = '';
+          for (const u of urls) {
+            try {
+              content = px ? curlText(u, px, 20000) : await fetchText(u, 20000);
+              break;
+            } catch (e) {
+              lastErr = String((e && e.message) || e);
+            }
+          }
+          if (content == null) throw new Error('所有源都失败 → ' + lastErr);
           writeFileSync(abs, content, 'utf8');
           return { ok: true, rel };
         } catch (e) {
