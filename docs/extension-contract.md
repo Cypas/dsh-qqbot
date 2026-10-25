@@ -63,7 +63,7 @@
 | 持久化 | `env.store.load()` / `env.store.save(obj)` | 落 `…/data/<你的文件名>.json`，**升级插件不丢** |
 | **进上下文（静默）** | `await env.appendSilent('...')` | **只落上下文、不唤醒**（详见 §4 安全红线） |
 | 进上下文（唤醒） | `await env.appendWake('...')` | 走正常回合唤醒一轮 AI（耗 token） |
-| **唤指定会话（钩子专用）** | `await caps.wakeTo(scope, peerId, text)` | 不用"当前会话"，**点名**唤醒某个群/私聊里的 AI（`scope`=`group`/`c2c`，`peerId`=群/用户 openid）。走正常回合，AI 用自己的话回，回复由宿主发到 QQ。返回 `true`=已投递；目标不存在/宿主没接= `false`（不抛错） |
+| **点名唤醒任意会话** | `await env.caps.wakeTo(scope, peerId, text)` | **不需要「当前会话」**，直接点名唤醒某个群/私聊里的 AI。`scope`=`group`/`c2c`，`peerId`=群 openid / 用户 openid。走正常回合：AI 带着该会话的历史与人设自己作答，回复由宿主发到 QQ。<br>**会话被回收、或宿主重启后活跃表为空时，会自动 `getOrCreate` 重建再注入**，调用方不用管。<br>返回 `true`=已排进该会话的回合；宿主没接/找不到目标=`false`（**不抛错**，调用方自己决定回退）。⚠️ `true` 不等于 QQ 一定送达。 |
 | **身份** | `env.user.openid` / `env.user.name` / `env.user.isOwner` | 当前发言者。`isOwner` 已按主人白名单**算好布尔值**，直接 `if (!env.user.isOwner) return` 即可，不必自己比数组 |
 | **主人判定（便捷）** | `env.isOwner` | 等价于 `env.user.isOwner` 的顶层布尔，最省事的写法 |
 | **主人白名单** | `env.owners`（`string[]`） | 原始 openid 数组，`[]` = 未配置主人 |
@@ -75,6 +75,36 @@
 | 内核句柄 | `env.kernel`（工具侧也叫 `env.ctx`） | **全权限"遥控器"**：`ctx.get('服务名')` / `ctx.on(...)` / `ctx.webServer.register(...)`。⚠️ 形状跟随 dsh 版本；`register` 返回的 disposer 要自己收尾 |
 | 宿主自重启 | `await env.restart()` | 复用内置 `/bot-restart`（自动识别启动命令、强补 `--no-open`）。默认**仅主人**可触发；要放开写 `env.restart({ requireOwner: false })` |
 | 回调按钮卡 | `env.registerInteractionCard({cardId, buttonIds, expireAt})` | 发**带回调按钮**的卡片必须先登记，否则点了没人认 |
+
+### 扩展包声明「最低插件版本」（1.10.44 起）
+
+包的清单文件里可以写 `minPluginVersion`，面板会拿它跟当前装的插件版本对照，不满足就标红：
+
+```json
+{
+  "name": "主动陪伴与私聊关怀",
+  "version": "1.0.6",
+  "minPluginVersion": "1.10.44"
+}
+```
+
+规则：
+
+- **不写 = 不检查**，任何插件版本都允许安装
+- 写了的包，市场卡片与扩展总览都会显示「需要插件 vX」；当前版本低于它时红字提示「需要插件 ≥ vX（当前 vY）」
+- 扩展总览接口同时返回 `pluginVersion`（插件自身版本），面板顶部「插件版本 vX.Y.Z」那一行就是它
+- **用了新能力就应该声明**，否则老用户装上去会在运行期撞 `undefined`
+
+### 主动唤醒别人的会话：怎么写 prompt
+
+`caps.wakeTo` 的第三个参数会被当成**用户消息**注入目标会话，所以写法上有三个要点：
+
+1. **自报家门**：`（系统提示，不是主人说的话）现在是 22:50，你和主人已经有 3 小时没有互动了。` —— 否则 AI 会以为对方真的开口了
+2. **说清要它做什么**：`这次想主动做的是：晚安陪伴。请主动发一条私聊消息，一到两句，用你自己的语气说。`
+3. **禁止项**：`不要提"系统""提醒""定时""唤醒"这些词，不要解释你为什么突然说话。`
+
+⚠️ 唤醒可能被**价值评分**拦掉：纯打招呼、纯「我收到了」这类内容容易被判低价值而不产生回合。要唤醒就写清「为什么找你 + 要你做什么」；纯告知请改用 `appendSilent`。
+
 
 ---
 
