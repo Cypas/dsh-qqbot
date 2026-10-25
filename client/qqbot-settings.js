@@ -6476,13 +6476,39 @@ var QQS_THEME_CSS = [
           onChange: function (e) { var v = e.target.value; upd(v === '' ? undefined : Number(v)) } })
       } else if (f.type === 'select') {
         var opts = Array.isArray(f.options) ? f.options : []
-        control = h('select', { style: S.fieldInput, value: val === undefined ? '' : val,
-          onChange: function (e) { upd(e.target.value) } },
-          opts.map(function (o) {
-            var v = (o && typeof o === 'object') ? (o.value !== undefined ? o.value : o.label) : o
-            var t = (o && typeof o === 'object') ? (o.label || o.value) : o
-            return h('option', { key: String(v), value: String(v), style: { background: '#2a2a2e', color: '#e8e8ea' } }, String(t))
-          }))
+        // 统一成 [{v: 实际值, t: 显示文本}]
+        var normOpts = opts.map(function (o) {
+          var v = (o && typeof o === 'object') ? (o.value !== undefined ? o.value : o.label) : o
+          var t = (o && typeof o === 'object') ? (o.label || o.value) : o
+          return { v: String(v), t: String(t) }
+        })
+        if (f.searchable) {
+          // ★ 可搜索下拉（2026-10-26）：选项很多时（比如 294 个 TTS 音色）原生 select 没法找。
+          //   用 <input list=datalist>：浏览器原生支持输入过滤，且允许手填列表外的值。
+          //   datalist 的 option.value 用「显示文本」，这样搜中文名、选中后存进去的也是那一整串；
+          //   读取侧（如 lib/settings.mjs 的 resolveVoice）需要自己从「中文名｜id」里剥出真值。
+          var dlId = 'qqs-dl-' + String(f.key || 'f')
+          control = h('div', null,
+            h('input', {
+              type: 'text',
+              list: dlId,
+              style: Object.assign({}, S.fieldInput, { width: '100%' }),
+              value: val === undefined || val === null ? '' : String(val),
+              placeholder: f.placeholder || ('输入关键字筛选（共 ' + normOpts.length + ' 项，也可直接手填值）'),
+              onInput: function (e) { upd(e.target.value) },
+              onChange: function (e) { upd(e.target.value) },
+            }),
+            h('datalist', { id: dlId },
+              normOpts.map(function (o) {
+                return h('option', { key: o.v, value: o.t })
+              })))
+        } else {
+          control = h('select', { style: S.fieldInput, value: val === undefined ? '' : val,
+            onChange: function (e) { upd(e.target.value) } },
+            normOpts.map(function (o) {
+              return h('option', { key: o.v, value: o.v, style: { background: '#2a2a2e', color: '#e8e8ea' } }, o.t)
+            }))
+        }
       } else if (f.type === 'list') {
         var arr = Array.isArray(val) ? val : []
         control = h('div', null,

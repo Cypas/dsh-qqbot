@@ -76,6 +76,37 @@
 | 宿主自重启 | `await env.restart()` | 复用内置 `/bot-restart`（自动识别启动命令、强补 `--no-open`）。默认**仅主人**可触发；要放开写 `env.restart({ requireOwner: false })` |
 | 回调按钮卡 | `env.registerInteractionCard({cardId, buttonIds, expireAt})` | 发**带回调按钮**的卡片必须先登记，否则点了没人认 |
 
+### 扩展设置页的字段类型（schema）
+
+扩展文件里 `export const qqbotSettingsPage = { title, desc, schema: [...] }`，面板就会给它生成设置页。
+`schema` 每项支持：
+
+| type | 控件 | 说明 |
+| --- | --- | --- |
+| `bool` | 开关 | 值 true/false |
+| `number` | 数字框 | 值 number |
+| `string`（默认） | 输入框 | 加 `secret: true` 变密码框 |
+| `list` | 多行文本 | 一行一项，值 string[] |
+| `select` | 下拉 | `options` 可写字符串数组，也可写 `{ value, label }` |
+
+**`select` + `searchable: true`（1.10.46 起）**
+
+选项很多（几十上百条）时，原生 `<select>` 根本没法找。加上这个标记会渲染成
+`<input list="…"> + <datalist>`：浏览器原生**输入过滤**，并且**允许手填列表外的值**。
+
+```js
+{ key: 'defaultSpeaker', type: 'select', searchable: true, label: '默认音色',
+  default: 'Vivi 2.0｜zh_female_vv_uranus_bigtts',
+  options: VOICES.map(v => v.label) }   // ['中文名｜voice_type', ...]
+```
+
+⚠️ 两个必须注意的点：
+
+1. **`select` 取到的值永远是字符串**（`'24000'`，不是 `24000`）。
+   如果你的扩展要把它传给要求严格类型的第三方接口，**自己转数字**，否则会像 TTS 那样撞
+   `55000000 cannot unmarshal string into ... of type int`。
+2. 用 `中文名｜id` 这种复合值时，**读取侧要负责剥出真值**（本项目 TTS 包用 `pickSpeaker()` 统一处理）。
+
 ### 扩展包声明「最低插件版本」（1.10.44 起）
 
 包的清单文件里可以写 `minPluginVersion`，面板会拿它跟当前装的插件版本对照，不满足就标红：

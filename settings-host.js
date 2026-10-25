@@ -121,13 +121,72 @@ const COPY_SKIP = /\.(rar|zip|7z|bak|tmp|log|diag)$/i;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /** 同源回环 fence: 仅本机 loopback + 同源/无 Origin 放行 */
+/**
+ * 规范化 host：'1.2.3.4:8443' / 'http://a.b' / 'a.b' → 'a.b:8443' 或 'a.b'
+ * 解析失败就原样小写返回，让比较退化成字符串相等。
+ */
+function normHost(v) {
+  const t = String(v || '').trim().toLowerCase();
+  if (!t) return '';
+  try { return new URL(t.includes('://') ? t : `http://${t}`).host; } catch { return t; }
+}
+
+/**
+ * 宿主 dsh web 的 --trusted-host 白名单（issue #22）
+ *
+ * 为什么读 process.argv：插件与 dsh web **同进程**，宿主已经用它放行了远程访问，
+ * 插件这边再自己维护一套 loopback 判断就会两边策略打架 —— 反代场景下
+ * Caddy 保留原始 Host（如 example.com:8443），插件一律 403 而宿主放行。
+ *
+ * 支持两种写法：
+ *   --trusted-host a.com:8443 b.com      （一个参数跟多个值，遇到 - 开头结束）
+ *   --trusted-host=a.com:8443
+ */
+let TRUSTED_HOST_CACHE;
+function trustedHostList() {
+  if (TRUSTED_HOST_CACHE !== undefined) return TRUSTED_HOST_CACHE;
+  const set = new Set();
+  const argv = process.argv || [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (typeof a !== 'string') continue;
+    if (a === '--trusted-host') {
+      for (let j = i + 1; j < argv.length; j++) {
+        const v = argv[j];
+        if (typeof v !== 'string' || !v || v.startsWith('-')) break;
+        const n = normHost(v);
+        if (n) set.add(n);
+      }
+    } else if (a.startsWith('--trusted-host=')) {
+      const n = normHost(a.slice('--trusted-host='.length));
+      if (n) set.add(n);
+    }
+  }
+  TRUSTED_HOST_CACHE = set;
+  return set;
+}
+
+/** 请求的 host 是否命中 --trusted-host 白名单（带端口精确比；不带端口则比 hostname） */
+function hostAllowed(host, hostname) {
+  const list = trustedHostList();
+  if (!list.size) return false;
+  for (const t of list) {
+    if (t === host) return true;
+    if (!t.includes(':')) {
+      try { if (new URL(`http://${t}`).hostname === hostname) return true; } catch { /* 忽略 */ }
+    }
+  }
+  return false;
+}
+
 function isTrusted(req) {
   const h = req.headers?.host;
   if (typeof h !== 'string') return false;
   let hostname;
   try { hostname = new URL(`http://${h}`).hostname; } catch { return false; }
   const loopback = /^(\[::1\]|localhost|127(\.\d{1,3}){3})$/.test(hostname);
-  if (!loopback) return false;
+  // ★ 2026-10-26（issue #22）：loopback ∪ 宿主 --trusted-host 白名单
+  if (!loopback && !hostAllowed(String(h).toLowerCase(), hostname)) return false;
   if (req.headers?.['sec-fetch-site'] === 'cross-site') return false;
   const o = req.headers?.origin;
   if (o === undefined) return true;
@@ -620,7 +679,13 @@ export function apply(ctx) {
         const wa = await import('./dist/session/workspace-attach.js');
         workspaceAttach = typeof wa.workspaceAttachState === 'function' ? wa.workspaceAttachState() : null;
       } catch { /* 模块未部署时忽略 */ }
-      writeJson(res, 200, { hasSettings, nss, describeErr, workspaceAttach });
+      writeJson(res, 200, {
+        hasSettings, nss, describeErr, workspaceAttach,
+        // ★ issue #22 诊断：远程访问被 403 时看这里 —— 空集合说明 dsh web 没带 --trusted-host
+        trustedHosts: [...trustedHostList()],
+        hostHeader: req.headers?.host || '(无)',
+        hostTrusted: isTrusted(req),
+      });
     } catch (e) { writeJson(res, 500, { error: String(e?.message ?? e) }); }
   });
 
