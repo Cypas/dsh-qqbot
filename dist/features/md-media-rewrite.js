@@ -41,7 +41,9 @@ function isLocalImagePath(u) {
         return false;
     if (/^file:\/\//i.test(u))
         return true;
-    if (/^[A-Za-z]:[\/]/.test(u))
+    // 2026-10-26 修：原来只认 `D:/` 正斜杠，Windows 原生的 `D:\` 反斜杠会被判成"远程图"直接跳过，
+    //   表现为正文写反斜杠路径时根本不触发上传（diag 日志里就是 no local image）。
+    if (/^[A-Za-z]:[\\/]/.test(u))
         return true;
     if (u.startsWith('/'))
         return true;
