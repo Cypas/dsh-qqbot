@@ -419,13 +419,34 @@ function mergeDeepOne(cur, patch) {
   for (const [k, v] of Object.entries(patch || {})) {
     if (v === undefined) continue;
     if (v === '__REDACTED__') continue;   // 脱敏占位符绝不写回
+    // ★ issue #21：/read 回显的掩码 '********' 也是"未修改"，绝不能当真实值写回。
+    //   否则链路是：/read 打码 → 前端全量 patch 带回 → 这里写盘 → 触发 settings-changed
+    //   → 网关重建 → 拿 '********' 换 token → 100016 invalid appid or secret → 表现为掉线。
+    if (v === SECRET_MASK) continue;
     if (v && typeof v === 'object' && !Array.isArray(v) && out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) {
-      out[k] = Object.assign({}, out[k], v);
+      // ★ 原来是 Object.assign 浅合并，函数名叫 mergeDeepOne 却只合一层 ——
+      //   嵌套结构（如 accounts.<ns>.appSecret）里的掩码根本过滤不到。改成真递归。
+      out[k] = mergeDeepOne(out[k], v);
     } else {
       out[k] = v;
     }
   }
   return out;
+}
+
+/**
+ * 判断一个值是不是"密钥被掩码污染"（issue #21 的兜底）。
+ * 真实 QQ 机器人 secret 是 32 位字母数字；'********' 只有 8 个星号。
+ * 用于落盘前拦截与启动自检告警，避免把坏值当真值用。
+ */
+function looksMaskedSecret(v) {
+  if (typeof v !== 'string') return false;
+  const t = v.trim();
+  if (!t) return false;
+  if (t === SECRET_MASK) return true;
+  if (/^\*+$/.test(t)) return true;                 // 全是星号
+  if (/^[\u2022\u25cf\u25cb\uFF0A\uFF03]+$/.test(t)) return true; // 各种圆点/星号占位
+  return false;
 }
 
 /** 按 (条目, **所属映射**, 键名) 去掉重复键，保留**最后一次**出现（YAML 语义）。
@@ -1875,6 +1896,7 @@ export function apply(ctx) {
         // ⚠️ 脱敏占位符绝不写回（2026-09-24 实测事故）：设置页读到的是 viewOf 打码过的
         //    `__REDACTED__`，若原样写入就会把真密钥覆盖掉。这个值一律视为"未修改"。
         if (value === '__REDACTED__') return true;
+        if (value === SECRET_MASK) return true;   // ★ issue #21：回显掩码不算修改
         const re = new RegExp('^\\s{' + indent + '}' + esc(key) + ':\\s*(.*)$');
         for (let i = from; i < to; i++) {
           if (!re.test(lineTexts[i])) continue;

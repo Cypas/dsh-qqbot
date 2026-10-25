@@ -340,7 +340,28 @@ export function makeExtCaps(deps) {
             //    问它最可靠：findManagerByPeer(scope, peerId) → manager.injectToPeer(...)（内部 agent.followup）。
             try {
                 const reg = await import('./session-registry.js');
-                const m = reg.findManagerByPeer(sc, pid);
+                let m = reg.findManagerByPeer(sc, pid);
+                if (!m) {
+                    // ★ 2026-10-25（主人实测）：不只是宿主重启，**空闲一段时间没动静后会话也会被回收**，
+                    //   活跃表里就没有这条了 → 召回永远失败。所以这里要能自己按 peer 重建会话再注入。
+                    //   用 getOrCreateByPeerWeb：它内部 manager.getOrCreate(..., {scope,targetId})，
+                    //   语义是"不开回合、只保证 session log 存在"，正是这种场景要的。
+                    //   ⚠️ 只在**唯一实例**时自动重建：openid 按 bot 应用隔离，多实例下乱建会落到错号上，
+                    //      那种情况宁可返回 false 让调用方（伴随扩展）走兜底文案。
+                    const nss = (reg.listManagerNs?.() ?? []);
+                    if (nss.length !== 1)
+                        return false;
+                    const onlyNs = nss[0];
+                    if (!onlyNs)
+                        return false;
+                    try {
+                        await reg.getOrCreateByPeerWeb(onlyNs, sc, pid, pid);
+                    }
+                    catch (err) {
+                        warn('wakeTo(create)', err);
+                    }
+                    m = reg.findManagerByPeer(sc, pid);
+                }
                 if (!m)
                     return false;
                 return (await m.injectToPeer(sc, pid, t, 'user')) === true;

@@ -204,6 +204,17 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
       `ns=${String(ns)} appId=${String(appId)} secretTail=${String(appSecret).slice(-4)} len=${String(appSecret).length}`
       + ` ownKeys=${Object.keys(ownSettings).length} file=${ownSettingsFile} hasCred=${hasCred} profile=${profName || '(空)'}`,
     );
+    // ★ issue #21：secret 被掩码污染时要显式告警，而不是等反复鉴权失败（100016）才有人查。
+    //   真实 QQ 机器人 secret 是 32 位字母数字；写成 8 个星号说明被 /read 的掩码写回过了。
+    try {
+      const sc = String(appSecret || "");
+      if (sc && /^[*•●＊]+$/.test(sc)) {
+        logger.warn(`[qqbot] ⚠ appSecret 疑似被掩码污染 (ns=${ns}, 值="${sc}")，鉴权必然 100016。请到账号设置页重新填写真实 secret。`);
+        diagWrite("qqbot-boot-diag", `ALERT ns=${String(ns)} appSecret 是掩码串（${sc.length} 个字符），需要重新填写`);
+      } else if (sc && sc.length !== 32) {
+        diagWrite("qqbot-boot-diag", `WARN ns=${String(ns)} appSecret 长度 ${sc.length}（正常 32 位），留意是否为异常值`);
+      }
+    } catch { /* 告警失败不影响启动 */ }
   } catch { /* 诊断失败绝不影响启动 */ }
 
   // ── 2026-10-11 新增：settingsNs 冲突自检（判据与修法见 features/ns-guard.ts 顶部注释）──
