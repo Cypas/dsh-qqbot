@@ -6,6 +6,7 @@
 import { readFileSync, writeFileSync, appendFileSync, rmSync, mkdirSync, existsSync, readdirSync, statSync, cpSync, renameSync, openSync, readSync, closeSync, createWriteStream } from 'node:fs';
 import { basename, extname, join, resolve, dirname, normalize, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';   // 懒加载 zlib（zstd 是 Node 22.15+ 才有，静态 import 会在老 Node 上直接炸）
 import { spawn, execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -1445,7 +1446,109 @@ export function apply(ctx) {
   //    列出"已有 dsh 会话"的工作区目录 + 会话数, 供账号 cwd 挑选(避免指到空目录/错目录)。
   //    dsh 把会话按工作区路径归到 ~/.dsh/sessions/--<编码路径>--, 目录内 *.zstd = 会话数。
   /** dsh session 目录名 → 工作区绝对路径(~XXXX 为 UTF-16 code unit, - 为段分隔, 首段补盘符冒号) */
+  // ── 会话文件头读 cwd（2026-10-26，为 decodeSessionDirName 的第二层）──────────
+  //   为什么需要：registry 只认「已登记的工作区」。用 session_create 在带横杠的目录里
+  //   建会话时它落"未分组"，registry 查不到，只能靠文件头。
+  //   文件是 zstd 压缩（session*.jsonl.zstd），Node 22.15+ 才有 zstdDecompressSync；
+  //   拿不到就返回 ''，调用方退到旧的拆 '-' 逻辑。
+  let _zlibLazy;                                  // undefined=没试过 / null=不可用 / obj=可用
+  function getZlibSync() {
+    if (_zlibLazy !== undefined) return _zlibLazy;
+    try {
+      const req = createRequire(import.meta.url);
+      const z = req('node:zlib');
+      _zlibLazy = (z && typeof z.zstdDecompressSync === 'function') ? z : null;
+    } catch { _zlibLazy = null; }
+    return _zlibLazy;
+  }
+  const _cwdHeaderCache = new Map();              // dirName → cwd（结果稳定，缓存不过期）
+  function readCwdFromSessionHeader(dirName) {
+    if (!dirName) return '';
+    if (_cwdHeaderCache.has(dirName)) return _cwdHeaderCache.get(dirName);
+    let result = '';
+    const z = getZlibSync();
+    if (z) {
+      const root = join(homedir(), '.dsh', 'sessions', dirName);
+      const stack = [root];
+      let guard = 0;
+      while (stack.length && guard++ < 200 && !result) {
+        const cur = stack.pop();
+        let ents = [];
+        try { ents = readdirSync(cur, { withFileTypes: true }); } catch { continue; }
+        for (const f of ents) {
+          const p = join(cur, f.name);
+          if (f.isDirectory()) { stack.push(p); continue; }
+          if (!/session.*\.jsonl\.zstd$/i.test(f.name)) continue;
+          try {
+            const txt = z.zstdDecompressSync(readFileSync(p)).toString('utf8');
+            const j = JSON.parse(txt.split(String.fromCharCode(10))[0]);
+            if (j && typeof j.cwd === 'string' && j.cwd) { result = j.cwd; break; }
+          } catch { /* 该文件读不通，继续下一个 */ }
+        }
+      }
+    }
+    _cwdHeaderCache.set(dirName, result);
+    return result;
+  }
+
   function decodeSessionDirName(name) {
+    // ══ ★ 2026-10-26（实测验证后改）：先问 dsh 官方 Workspace Registry，用 sid 反查 ══
+    //   dsh 把工作区路径转成 `--D-agent-sandbox--` 这种目录名时，转义是**有损**的：
+    //   '-' 既是路径分隔符、也是路径本身的合法字符，编码没有区分两者。
+    //   于是 `split('-')` 还原必然出歧义 —— 路径里一带连字符就错：
+    //       D:\agent-sandbox  →  被还原成 D:\agent\sandbox
+    //   现象（PR #23）：扩展面板「当前工作区/内置目录/扩展包目录」全指向不存在的路径，
+    //   内置扩展计数恒为 0，工作区选择器列出一堆假的。
+    //
+    //   根治方式不是"猜转义规则"，而是**根本不解码**：
+    //     实测 ctx.get('workspaceRegistry').list() 返回
+    //       [{ id, record: { path, title, sessionIds: [...] } }, ...]
+    //   拿「这个 sessions 目录里出现的 sid 集合」去反查 record.sessionIds，命中即得真 path。
+    //   零歧义、不受 dsh 以后改转义规则影响。
+    try {
+      const reg = (typeof ctx.get === 'function') ? ctx.get('workspaceRegistry') : null;
+      if (reg && typeof reg.list === 'function') {
+        const sroot = join(homedir(), '.dsh', 'sessions', String(name || ''));
+        if (existsSync(sroot)) {
+          const sidSet = new Set();
+          const stack = [sroot];
+          let guard = 0;
+          while (stack.length && guard++ < 500) {
+            const cur = stack.pop();
+            let ents = [];
+            try { ents = readdirSync(cur, { withFileTypes: true }); } catch { continue; }
+            for (const f of ents) {
+              if (!f.isDirectory()) continue;
+              // 会话子目录名就是 sessionId（UUID）
+              if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(f.name)) sidSet.add(f.name);
+              stack.push(join(cur, f.name));
+            }
+          }
+          if (sidSet.size) {
+            const all = reg.list() || [];
+            const hit = all.find((w) => {
+              const ids = (w && w.record && w.record.sessionIds) || [];
+              return ids.some((s) => sidSet.has(String(s)));
+            });
+            if (hit && hit.record && hit.record.path) return String(hit.record.path);
+          }
+        }
+      }
+    } catch { /* 拿不到就往下走旧逻辑，绝不影响主链 */ }
+
+    // ══ ★ 2026-10-26 第二层：registry 没命中（工作区未分组/未登记）→ 读 session header 的 cwd ══
+    //   实测（造 D:/newwenjianjia/aiwork/test-ws 验证过）：用 session_create 在带横杠的目录里
+    //   建会话时，该目录还没被登记成"工作区"，registry.list() 查不到它，第一层就落空。
+    //   但**会话文件头里写着真实 cwd**：
+    //       sessions/<目录名>/<sid>/session*.jsonl.zstd → 第一行 JSON 的 cwd
+    //   实测该用例：旧解码给出 D:\...\test\ws（错），header 给出 D:/.../test-ws（对）。
+    //   文件是 zstd 压缩（Node 22.15+ 才有 zstdDecompressSync），拿不到就跳过、退第三层。
+    try {
+      const fromHeader = readCwdFromSessionHeader(String(name || ''));
+      if (fromHeader) return fromHeader;
+    } catch { /* 继续往下 */ }
+
+    // ② 旧逻辑：按 '-' 拆分还原（保留为兜底 —— 老宿主没有 workspaceRegistry 时）
     try {
       const segs = name.split('-').filter(Boolean);
       if (segs.length === 0) return '';
@@ -5176,6 +5279,48 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
   // 配置落盘：{dataRoot}/.qqbot-extensions/.state/ext-config/{扩展id}.json
   // 扩展自己在代码里可用 readExtConfig 的方式拿到（暂未内置 API，先读那个 json 即可）。
   // ═══════════════════════════════════════════════════════════════════════════
+
+  // ══ 扩展 UI 卡片（2026-10-26）：给扩展一个声明式 UI 入口 ══════════════════
+  //   扩展在 {dataRoot}/.qqbot-extensions/ui/<id>/card.html（或扩展包内 ui/<id>/）放静态文件，
+  //   面板从这两条路由取。详见 src/features/ext-ui.ts 与 docs/extension-contract.md。
+  //
+  //   GET …/ext-ui/list?cwd=…            → { ok, items:[{extId,slot,title,order,files,from}] }
+  //   GET …/ext-ui/file?cwd=&id=&f=      → { ok, text } | { ok:false, reason }
+  //
+  //   安全：extId 白名单正则 + 必须是扫描结果里真实存在的；f 只允许 card.html/card.css/card.js；
+  //        路径 resolve 后还要校验仍在扩展目录内（防 .. 穿越）—— 全在 ext-ui.ts 里做。
+  route(ctx, 'GET', '/api/qqbot-settings/ext-ui/list', async (req, res) => {
+    let cwd = '';
+    try { cwd = String(new URL(req.url ?? '/', 'http://x').searchParams.get('cwd') || '').trim(); } catch { cwd = ''; }
+    try {
+      const { dataRoot } = resolveDataRootForWorkspace(cwd);
+      if (!dataRoot) return writeJson(res, 200, { ok: false, items: [], error: '推不出 dataRoot' });
+      const mod = await import('./dist/features/ext-ui.js');
+      const items = mod.listExtUi(dataRoot, PROFILE_ROOT).map((x) => ({
+        extId: x.extId, slot: x.slot, title: x.title, order: x.order, files: x.files, from: x.from,
+      }));
+      return writeJson(res, 200, { ok: true, items });
+    } catch (e) {
+      return writeJson(res, 200, { ok: false, items: [], error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  route(ctx, 'GET', '/api/qqbot-settings/ext-ui/file', async (req, res) => {
+    let q = null;
+    try { q = new URL(req.url ?? '/', 'http://x').searchParams; } catch { q = null; }
+    const cwd = String(q?.get('cwd') || '').trim();
+    const extId = String(q?.get('id') || '').trim();
+    const fileName = String(q?.get('f') || '').trim();
+    try {
+      const { dataRoot } = resolveDataRootForWorkspace(cwd);
+      if (!dataRoot) return writeJson(res, 200, { ok: false, reason: '推不出 dataRoot' });
+      const mod = await import('./dist/features/ext-ui.js');
+      const r = mod.readExtUiFile(dataRoot, PROFILE_ROOT, extId, fileName);
+      return writeJson(res, 200, r.ok ? { ok: true, text: r.text } : { ok: false, reason: r.reason });
+    } catch (e) {
+      return writeJson(res, 200, { ok: false, reason: e instanceof Error ? e.message : String(e) });
+    }
+  });
 
   /** 扩展配置文件路径 */
   function extConfigPath(dataRoot, extId) {

@@ -576,6 +576,106 @@ window.__ModuleLoader__.load({
       return h('div', null, body, h(HintBlock, { text: f.hint }))
     }
 
+    // ══ 扩展 UI（2026-10-26）════════════════════════════════════════════════
+    //   为什么要提到模块顶层：ExtCardPage 是给 QqbotHome 用的（顶层 tab 切换），
+    //   原来错写在 SettingsPage 内部 → QqbotHome 里 ReferenceError: ExtCardPage is not defined，
+    //   整页白屏（2026-10-26 主人实测）。
+    //   这里自包含实现，不依赖 SettingsPage 内部的 extUiText / injectExtUiCss。
+    var EXT_UI_CSS_ID = 'qqs-ext-css'
+    function extUiEnsureCss() {
+      try {
+        if (document.getElementById(EXT_UI_CSS_ID)) return
+        var s = document.createElement('style')
+        s.id = EXT_UI_CSS_ID
+        s.textContent = ''
+          + '.qqs-ext-cards{display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;'
+          + '-webkit-overflow-scrolling:touch;scrollbar-width:none;'
+          + 'scroll-snap-type:x proximity;padding:2px 0 6px}'
+          + '.qqs-ext-cards::-webkit-scrollbar{display:none}'
+          + '.qqs-ext-card{flex:0 0 auto;scroll-snap-align:start;min-width:220px;max-width:320px}'
+          + '.qqs-top-tabs{scrollbar-width:none}'
+          + '.qqs-top-tabs::-webkit-scrollbar{display:none}'
+          + '.qqs-ext-page-card{display:block;min-width:260px}'
+        document.head.appendChild(s)
+        // 鼠标滚轮 → 横向滚动（2026-10-26 主人实测"不能横滑"）：
+        //   容器 overflow-x:auto 在触摸屏上能滑，但**桌面上普通滚轮是纵向的**，
+        //   浏览器不会自动转成横滚，所以看着"溢出却不动"。这里做一次事件委托，
+        //   .qqs-top-tabs / .qqs-ext-cards 上把纵向滚轮折算成 scrollLeft。
+        if (!window.__qqsExtWheelBound) {
+          window.__qqsExtWheelBound = true
+          document.addEventListener('wheel', function (e) {
+            var el = e.target
+            while (el && el !== document.body) {
+              // 用 id 判断（className 不一定被自定义 h() 落到 DOM 上）
+              var hit = el.id === 'qqs-top-tabs'
+                || (el.classList && (el.classList.contains('qqs-top-tabs') || el.classList.contains('qqs-ext-cards')))
+              if (hit) {
+                if (el.scrollWidth > el.clientWidth + 1 && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                  el.scrollLeft += e.deltaY
+                  e.preventDefault()
+                }
+                return
+              }
+              el = el.parentNode
+            }
+          }, { passive: false })
+        }
+      } catch (e) { /* ignore */ }
+    }
+    function extUiLoad(extId, f) {
+      return fetch('/api/qqbot-settings/ext-ui/file?f=' + encodeURIComponent(f) + '&id=' + encodeURIComponent(extId))
+        .then(function (r) { return r.json() })
+        .then(function (j) { return j && j.ok ? String(j.text || '') : '' })
+        .catch(function () { return '' })
+    }
+    /** 把一张扩展卡片用 Shadow DOM 挂进容器 */
+    function extUiMountCard(container, extId, cls) {
+      var host = document.createElement('div')
+      host.className = cls || 'qqs-ext-card'
+      var sr = host.attachShadow({ mode: 'open' })
+      container.appendChild(host)
+      Promise.all([extUiLoad(extId, 'card.html'), extUiLoad(extId, 'card.css'), extUiLoad(extId, 'card.js')])
+        .then(function (res) {
+          sr.innerHTML = '<style>' + (res[1] || '') + '</style>' + (res[0] || '')
+          if (!res[2]) return
+          var api = {
+            extId: extId,
+            api: function (p, opts) {
+              return fetch('/api/ext/' + encodeURIComponent(extId) + String(p || ''),
+                Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}))
+                .then(function (r) { return r.json() })
+                .catch(function () { return null })
+            },
+            toast: function (m) { try { window.alert(String(m)) } catch (e) { /* ignore */ } },
+          }
+          try {
+            new Function('qqbotExt', 'shadowRoot', res[2])(api, sr)
+          } catch (e) {
+            var d = document.createElement('div')
+            d.style.cssText = 'color:#c33;font-size:12px;padding:6px 0'
+            d.textContent = '卡片脚本出错: ' + (e && e.message ? e.message : e)
+            sr.appendChild(d)
+          }
+        })
+      return host
+    }
+    /** 扩展页签的整页视图：把它的卡片铺在内容区 */
+    function ExtCardPage(props) {
+      var extId = String((props && props.extId) || '')
+      var title = String((props && props.title) || extId)
+      useEffect(function () {
+        extUiEnsureCss()
+        var box = document.getElementById('qqs-ext-page')
+        if (!box || !extId) return
+        box.innerHTML = ''
+        extUiMountCard(box, extId, 'qqs-ext-page-card')
+        return function () { try { box.innerHTML = '' } catch (e) { /* ignore */ } }
+      }, [extId])
+      return h('div', { style: { maxWidth: 720 } },
+        h('h2', { style: { margin: '0 0 10px' } }, title),
+        h('div', { id: 'qqs-ext-page', style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } }))
+    }
+
     function SettingsPage(props) {
       var close = props && props.close
       // 多账号: 当前操作账号的 settings 命名空间(主=im-qqbot 不带参, 其它=实例 id)
@@ -711,6 +811,94 @@ window.__ModuleLoader__.load({
           q2 ? h('span', { onClick: function () { setQ2('') }, style: { fontSize: 12, color: T.text3, cursor: 'pointer' } }, '清空') : null,
           h('span', { style: { fontSize: 11, color: T.text3, whiteSpace: 'nowrap' } }, '程序算的相似度 · 本地即时')))
 
+      // ── 扩展 UI 卡片（2026-10-26）─────────────────────────────────────────
+      //   扩展在 {dataRoot}/.qqbot-extensions/ui/<id>/ 放 card.html / card.css / card.js，
+      //   这里拉过来用 **Shadow DOM** 挂到设置页底部。扫描与安全校验见 src/features/ext-ui.ts。
+      //   用 Shadow DOM 的两个理由：
+      //     ① 扩展写的 CSS 不会污染这个 535KB 单文件里的任何样式（一条全局 button{} 就能改全站）
+      //     ② 扩展脚本报错只白自己那张卡，不整页崩
+      var EXT_UI_LIST = '/api/qqbot-settings/ext-ui/list'
+      var EXT_UI_FILE = '/api/qqbot-settings/ext-ui/file?f='
+      function extUiText(extId, f) {
+        return fetch(EXT_UI_FILE + encodeURIComponent(f) + '&id=' + encodeURIComponent(extId))
+          .then(function (r) { return r.json() })
+          .then(function (j) { return j && j.ok ? String(j.text || '') : '' })
+          .catch(function () { return '' })
+      }
+      function extUiApi(extId) {
+        return {
+          extId: extId,
+          // 扩展自己的只读/只写接口走 /api/ext/<id>/…（由扩展自己注册，本插件不代管）
+          api: function (p, opts) {
+            return fetch('/api/ext/' + encodeURIComponent(extId) + String(p || ''),
+              Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}))
+              .then(function (r) { return r.json() })
+              .catch(function () { return null })
+          },
+          toast: function (m) { try { window.alert(String(m)) } catch (e) { /* ignore */ } },
+        }
+      }
+      function injectExtUiCss() {
+        if (document.getElementById('qqs-ext-css')) return
+        var s = document.createElement('style')
+        s.id = 'qqs-ext-css'
+        // 横向滑动：抄 .dk-tab 那套已在机器上跑熟的写法（overflow-x + 惯性 + 隐藏滚动条）。
+        // ★ flex:0 0 auto 是关键 —— 少了这句卡片会被 flex 压成一条缝，这是最常见的坑。
+        // scroll-snap 让"滑一下正好停在卡片边缘"，不会卡在半张卡中间。
+        s.textContent = ''
+          + '.qqs-ext-cards{display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;'
+          + '-webkit-overflow-scrolling:touch;scrollbar-width:none;'
+          + 'scroll-snap-type:x proximity;padding:2px 0 6px}'
+          + '.qqs-ext-cards::-webkit-scrollbar{display:none}'
+          + '.qqs-ext-card{flex:0 0 auto;scroll-snap-align:start;min-width:220px;max-width:320px}'
+          // 顶部页签条：内置四页 + 扩展页签，扩展多了横向滑动（2026-10-26）
+          + '.qqs-top-tabs{scrollbar-width:none}'
+          + '.qqs-top-tabs::-webkit-scrollbar{display:none}'
+          // 扩展整页视图：让卡片在页内能撑开（卡片自身宽度由 :host 决定）
+          + '.qqs-ext-page-card{display:block}'
+        document.head.appendChild(s)
+      }
+      function mountExtUiCards() {
+        injectExtUiCss()
+        var box = document.getElementById('qqs-ext-cards')
+        if (!box) return
+        fetch(EXT_UI_LIST).then(function (r) { return r.json() }).then(function (j) {
+          if (!j || !j.ok) return
+          var list = (j.items || []).filter(function (x) { return x.slot === 'settings' })
+          if (!list.length) { box.style.display = 'none'; return }
+          box.style.display = ''
+          // 幂等：卡片数量没变就不重挂（避免每次 setState 都把扩展的 DOM 冲掉）
+          var sig = list.map(function (x) { return x.extId }).join(',')
+          if (box.getAttribute('data-sig') === sig) return
+          box.setAttribute('data-sig', sig)
+          box.innerHTML = ''
+          list.forEach(function (it) {
+            var host = document.createElement('div')
+            host.className = 'qqs-ext-card'
+            var sr = host.attachShadow({ mode: 'open' })
+            box.appendChild(host)
+            Promise.all([
+              extUiText(it.extId, 'card.html'),
+              it.files && it.files.indexOf('card.css') >= 0 ? extUiText(it.extId, 'card.css') : Promise.resolve(''),
+              it.files && it.files.indexOf('card.js') >= 0 ? extUiText(it.extId, 'card.js') : Promise.resolve(''),
+            ]).then(function (res) {
+              sr.innerHTML = '<style>' + (res[1] || '') + '</style>' + (res[0] || '')
+              if (!res[2]) return
+              try {
+                // Function 而不是 eval：作用域干净，且把 qqbotExt 作为形参传进去
+                new Function('qqbotExt', 'shadowRoot', res[2])(extUiApi(it.extId), sr)
+              } catch (e) {
+                var d = document.createElement('div')
+                d.style.cssText = 'color:#c33;font-size:12px;padding:4px 0'
+                d.textContent = '卡片脚本出错: ' + (e && e.message ? e.message : e)
+                sr.appendChild(d)
+              }
+            })
+          })
+        }).catch(function () { /* 静默：扩展 UI 挂了不该影响设置页本体 */ })
+      }
+      setTimeout(function () { try { mountExtUiCards() } catch (e) { /* ignore */ } }, 0)
+
       return h('div', { style: { maxWidth: 720 } },
         h('h2', { style: { margin: '0 0 6px' } }, 'QQ 机器人设置'),
         h('p', { style: { fontSize: 12, color: T.text3, margin: '0 0 10px' } }, '改完点「保存」立刻生效(不用重启)。看不懂的项放着别动就行;想恢复"不限制"就把数字填 0、勾选取消、列表清空。只提交你改过的字段——没碰的项不会被动。'),
@@ -721,7 +909,9 @@ window.__ModuleLoader__.load({
           h(SButton, { variant: 'primary', onClick: doSave }, dirtyN ? ('保存(' + dirtyN + ' 项改动)') : '保存'),
           h(SButton, { variant: 'ghost', onClick: load }, '放弃修改(重新读取)'),
           msg ? h('span', { style: { fontSize: 13, color: T.text2 } }, msg) : null,
-          close ? h(SButton, { variant: 'ghost', onClick: close }, '完成') : null))
+          close ? h(SButton, { variant: 'ghost', onClick: close }, '完成') : null),
+        // ★ 扩展卡片挂载点：横向可滑动，样式见文件末尾注入的 .qqs-ext-cards
+        h('div', { id: 'qqs-ext-cards', className: 'qqs-ext-cards' }))
     }
 
         // ── ⑥ QQ 群管理(单开大卡片; P3+ 设计系统版: 横排 Tab + 状态条 + 表格 + 空状态 + 预留接口位) ──
@@ -1539,6 +1729,21 @@ window.__ModuleLoader__.load({
         })
         return function () { alive = false }
       }, [accts, acctId])
+      // ── 扩展 UI 页签（2026-10-26）：slot=settings 的扩展挂到顶部 tab 右边 ──
+      //   数据来自 /api/qqbot-settings/ext-ui/list（profile 级目录，全 profile 一份）。
+      var [extTabs, setExtTabs] = useState([])
+      useEffect(function () {
+        var alive = true
+        fetch('/api/qqbot-settings/ext-ui/list')
+          .then(function (r) { return r.json() })
+          .then(function (j) {
+            if (!alive || !j || !j.ok) return
+            var list = (j.items || []).filter(function (x) { return x.slot === 'settings' })
+            setExtTabs(list)
+          })
+          .catch(function () { /* 扩展列表拉不到不影响设置页 */ })
+        return function () { alive = false }
+      }, [])
       if (!tab) return h('div', null, '…')
       function choose(t) { setTab(t); try { localStorage.setItem(TAB_KEY, t) } catch (e) {} }
       function chooseAcct(id) { setAcctId(id); try { localStorage.setItem(ACCT_KEY, id) } catch (e) {} }
@@ -1553,6 +1758,16 @@ window.__ModuleLoader__.load({
       var sub = tab === 'gallery' ? h(GalleryPage, { key: subKey, close: props && props.close, acct: acctx })
         : tab === 'timers' ? h(TimersPage, { key: subKey, close: props && props.close, acct: acctx })
         : tab === 'accounts' ? h(AccountsPage, { close: props && props.close })
+        : String(tab).indexOf('ext:') === 0
+          ? h(ExtCardPage, {
+              key: String(tab).slice(4),
+              extId: String(tab).slice(4),
+              title: (function () {
+                var hit = null
+                extTabs.forEach(function (x) { if (x.extId === String(tab).slice(4)) hit = x })
+                return hit ? hit.title : String(tab).slice(4)
+              })(),
+            })
         : h(SettingsPage, { key: subKey, close: props && props.close, acct: acctx })
       var acctLine = (accts && accts.length > 1) || (accts && accts.length === 1)
       return h('div', { style: { width: '100%' } },
@@ -1568,16 +1783,21 @@ window.__ModuleLoader__.load({
           ac ? h('span', { style: { fontSize: 12, color: '#6d28d9', whiteSpace: 'nowrap' } }, ac.dataDir ? '数据目录: ' + ac.dataDir : '') : null,
           h('span', { style: { flex: 1 } }),
           h('span', { style: { fontSize: 12, color: '#8a97ad' } }, '设置/图库/定时 都跟随上面选的机器人')),
-        h('div', { style: { position: 'sticky', top: 0, zIndex: 30, background: 'transparent', padding: '10px 4px 12px', display: 'flex', gap: 10, flexWrap: 'nowrap', alignItems: 'stretch', marginBottom: 12 } },
-          [['settings', '设置', '#ff5d5d'], ['gallery', '表情包图库', '#ffd97a'], ['timers', '定时任务', '#5b9dff'], ['accounts', '账号与预设', '#b197fc']].map(function (t) {
+        h('div', { id: 'qqs-top-tabs', className: 'qqs-top-tabs', style: { position: 'sticky', top: 0, zIndex: 30, background: 'transparent', padding: '10px 4px 12px', display: 'flex', gap: 10, flexWrap: 'nowrap', alignItems: 'stretch', marginBottom: 12, overflowX: 'auto', overflowY: 'hidden', WebkitOverflowScrolling: 'touch', scrollbarWidth: 'none', width: '100%', maxWidth: '100%', minWidth: 0, boxSizing: 'border-box' } },
+          // 内置四页 + 扩展页签（2026-10-26）：扩展 tab 用青蓝色区分，放在最右边。
+          // 容器从「四个 flex:1 平分」改成「按钮 flex:0 0 auto + 容器横向可滑」——
+          // 否则扩展一多，按钮会被压成一条缝（这跟 .dk-tab 那套是同一个道理）。
+          [['settings', '设置', '#ff5d5d'], ['gallery', '表情包图库', '#ffd97a'], ['timers', '定时任务', '#5b9dff'], ['accounts', '账号与预设', '#b197fc']]
+            .concat(extTabs.map(function (x) { return ['ext:' + x.extId, x.title, '#38bdf8'] }))
+            .map(function (t) {
             var on = tab === t[0]
             var n = t[0] === 'gallery' ? badges.untagged : t[0] === 'timers' ? badges.timers : 0
             var col = t[2]
             return h('button', { key: t[0], onClick: function () { choose(t[0]) },
               style: {
-                flex: 1, minWidth: 0, cursor: 'pointer', font: 'inherit',
+                flex: '0 0 auto', minWidth: 104, cursor: 'pointer', font: 'inherit',
                 color: 'var(--qqs-text,#171a21)', fontSize: 14, textAlign: 'center',
-                whiteSpace: 'nowrap', padding: '9px 8px', borderRadius: 14,
+                whiteSpace: 'nowrap', padding: '9px 14px', borderRadius: 14,
                 border: '1px solid ' + (on ? col : col + 'a6'),
                 background: 'linear-gradient(165deg,' + col + (on ? '66' : '40') + ',' + col + (on ? '1f' : '14') + ')',
                 boxShadow: on
