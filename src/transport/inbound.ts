@@ -990,9 +990,15 @@ function assembleAgentBody(
   // 2026-10-01 主人实测「别人 @ 别人怎么没转换成昵称，依然是 id」：
   //   正文里 @ 别人的 `<@openid>` 查**群成员台账**换成 `@昵称`（查不到退化成 @短id）；
   //   顺手省 token —— `<@07B470BDA5052489D2D0532C2CC2A2EB>`(35 字符) → `@难崩`(3 字符)。
-  const userContent = resolveMentionNames(userContentRaw, stickerDir, scope === 'group' ? msg.groupOpenid : undefined);
+  // ★ 2026-10-26 修（外部作者 wuwo1979 实测）：原来这里直接 `return null`，
+  //   上游收到 null 就静默返回、连日志都没有 —— "只 @ 不打字"那条消息会凭空消失。
+  //   改成给一句占位正文继续走：消息不再丢，日志里也留得下痕迹。
+  let userContent = resolveMentionNames(userContentRaw, stickerDir, scope === 'group' ? msg.groupOpenid : undefined);
 
-  if (!userContent && (!msg.attachments || msg.attachments.length === 0)) return null;
+  if (!userContent && (!msg.attachments || msg.attachments.length === 0)) {
+    logger?.warn?.('[im-qqbot] 入站正文为空(只@未打字?) → 用占位正文继续，避免消息被静默丢弃');
+    userContent = '（只 @ 了你一下，没有文字）';
+  }
 
   // ⚠️ 2026-10-01: QQ 引用**纯图片**时 msg_elements 给不出图 —— 先用本地台账补一把（见 msg-content-cache.ts）
   const quotePeer = `${scope}:${scope === 'group' ? (msg.groupOpenid ?? msg.senderId) : msg.senderId}`;
