@@ -1783,7 +1783,12 @@ window.__ModuleLoader__.load({
           ac ? h('span', { style: { fontSize: 12, color: '#6d28d9', whiteSpace: 'nowrap' } }, ac.dataDir ? '数据目录: ' + ac.dataDir : '') : null,
           h('span', { style: { flex: 1 } }),
           h('span', { style: { fontSize: 12, color: '#8a97ad' } }, '设置/图库/定时 都跟随上面选的机器人')),
-        h('div', { id: 'qqs-top-tabs', className: 'qqs-top-tabs', style: { position: 'sticky', top: 0, zIndex: 30, background: 'transparent', padding: '10px 4px 12px', display: 'flex', gap: 10, flexWrap: 'nowrap', alignItems: 'stretch', marginBottom: 12, overflowX: 'auto', overflowY: 'hidden', WebkitOverflowScrolling: 'touch', scrollbarWidth: 'none', width: '100%', maxWidth: '100%', minWidth: 0, boxSizing: 'border-box' } },
+        // ★ 2026-10-26 修「页签条不能横滑」：原来把 `position:sticky` 和 `overflow-x:auto`
+        //   放在**同一个元素**上 —— sticky 会创建新的格式化上下文，导致滚动容器的
+        //   scrollWidth 计算异常（看着溢出、实际判定为没溢出），于是滚不动。
+        //   拆成两层：外层只管 sticky + 裁剪，内层只管横向滚动。
+        h('div', { style: { position: 'sticky', top: 0, zIndex: 30, background: 'transparent', overflow: 'hidden', marginBottom: 12 } },
+          h('div', { id: 'qqs-top-tabs', className: 'qqs-top-tabs', style: { display: 'flex', gap: 10, flexWrap: 'nowrap', alignItems: 'stretch', padding: '10px 4px 12px', overflowX: 'auto', overflowY: 'hidden', WebkitOverflowScrolling: 'touch', scrollbarWidth: 'none', width: '100%', boxSizing: 'border-box' } },
           // 内置四页 + 扩展页签（2026-10-26）：扩展 tab 用青蓝色区分，放在最右边。
           // 容器从「四个 flex:1 平分」改成「按钮 flex:0 0 auto + 容器横向可滑」——
           // 否则扩展一多，按钮会被压成一条缝（这跟 .dk-tab 那套是同一个道理）。
@@ -1808,7 +1813,7 @@ window.__ModuleLoader__.load({
                 transition: 'all .15s', outline: 'none',
               } },
               t[1], badge(n))
-          })),
+          }))),
         sub)
     }
 

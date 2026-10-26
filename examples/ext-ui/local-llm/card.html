@@ -1,0 +1,38 @@
+<!-- qqbot-ui: { "slot": "settings", "title": "本地代答", "order": 10 } -->
+<!--
+  扩展 UI 卡片示例 —— 抄这个就能用。
+
+  放置位置（任选其一）：
+    {dataRoot}/.qqbot-extensions/ui/local-llm/card.html
+    {dataRoot}/extension-packs/<包名>/ui/local-llm/card.html
+
+  上面的注释是**元信息**，必须放在文件最前面（前 2KB 内）：
+    slot   settings = 设置页底部卡片条 | dock = 悬浮台页签
+    title  卡片标题（缺省用目录名）
+    order  排序，小的靠前（缺省 100）
+
+  卡片跑在 Shadow DOM 里 ⇒ 这里写的 CSS 不会污染面板，面板的样式也进不来。
+  card.js 会以 new Function('qqbotExt', 'shadowRoot', 源码) 执行，
+  所以两个变量可直接用：qqbotExt（API）、shadowRoot（自己这层影子根）。
+-->
+<div class="card">
+  <div class="hd">
+    <span class="dot" id="dot"></span>
+    <span>⚡ 本地代答</span>
+  </div>
+
+  <label class="row">
+    <input type="checkbox" id="on" />
+    <span>启用</span>
+  </label>
+
+  <div class="row">
+    <span class="lbl">状态</span>
+    <span class="val" id="st">读取中…</span>
+  </div>
+
+  <div class="acts">
+    <button class="btn" id="ping">测试连通</button>
+    <button class="btn ghost" id="refresh">刷新</button>
+  </div>
+</div>
