@@ -745,21 +745,52 @@ export class SessionManager {
         this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
         // 更新配置指纹(会话已存在且配置一致 → 指纹刷新为当前值)
         try { this.modelResolver.setSessionCfg(key, { cwd: wantCwd }); } catch { /* ignore */ }
-      } catch {
-        const created = await this.agents.create({
-          sessionId,
-          meta: {
-            cwd: absCwdOf(this.config.cwd) || process.cwd(),
-            ...(agentPreset ? { agentPreset } : {}),
-          },
-          ...(route ? { agentOptions: route } : {}),
-          ...(composed.setup ? { setup: composed.setup } : {}),
-        });
-        agent = created.agent;
-        handle = created;
-        this.logger.info(`created new session: key=${key} preset=${agentPreset ?? 'none'}`);
-        // 记录配置指纹(create 用当前 cwd/preset; 下次配置变更据此弃旧开新)
-        try { this.modelResolver.setSessionCfg(key, { cwd: wantCwd }); } catch { /* ignore */ }
+      } catch (resumeErr) {
+        // ★ 2026-10-26 修（外部作者 wuwo1979 用真机日志定位）：
+        //   原来这里是**裸 catch** —— resume 的真实失败原因被吞掉，一行日志都不留，
+        //   然后用**同一个 sessionId** 去 create。若该 id 在宿主 store 里已存在，
+        //   create 抛 `session "xxx" already exists` → 冒到 inbound 的 catch → **整条消息消失**
+        //   （他的 harness.log 里一天出现约 50 次）。
+        //   改为：① 先把 resume 错误 warn 出来；② create 撞 already exists 时轮换 sessionId 再试一次。
+        const resumeMsg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
+        this.logger.warn(`resume 失败(改走 create): key=${key} sessionId=${sessionId} err=${resumeMsg}`);
+        try {
+          const created = await this.agents.create({
+            sessionId,
+            meta: {
+              cwd: absCwdOf(this.config.cwd) || process.cwd(),
+              ...(agentPreset ? { agentPreset } : {}),
+            },
+            ...(route ? { agentOptions: route } : {}),
+            ...(composed.setup ? { setup: composed.setup } : {}),
+          });
+          agent = created.agent;
+          handle = created;
+          this.logger.info(`created new session: key=${key} preset=${agentPreset ?? 'none'}`);
+          // 记录配置指纹(create 用当前 cwd/preset; 下次配置变更据此弃旧开新)
+          try { this.modelResolver.setSessionCfg(key, { cwd: wantCwd }); } catch { /* ignore */ }
+        } catch (createErr) {
+          const createMsg = createErr instanceof Error ? createErr.message : String(createErr);
+          // create 撞上"该 id 已存在" → 轮换一个新 id 重试一次（旧档文件原样保留，消息不再丢）
+          if (!/already exists/i.test(createMsg)) throw createErr;
+          const rotated = SessionId(randomUUID());
+          this.logger.warn(`create 撞已存在 → 轮换 sessionId 重试: ${sessionId} → ${rotated}`);
+          try { this.modelResolver.setSessionId(key, rotated); } catch { /* ignore */ }
+          try { this.modelResolver.setSessionCfg(key, { cwd: wantCwd }); } catch { /* ignore */ }
+          const created2 = await this.agents.create({
+            sessionId: rotated,
+            meta: {
+              cwd: absCwdOf(this.config.cwd) || process.cwd(),
+              ...(agentPreset ? { agentPreset } : {}),
+            },
+            ...(route ? { agentOptions: route } : {}),
+            ...(composed.setup ? { setup: composed.setup } : {}),
+          });
+          agent = created2.agent;
+          handle = created2;
+          this.logger.info(`created new session(轮换后): key=${key} sessionId=${rotated} preset=${agentPreset ?? 'none'}`);
+          try { this.modelResolver.setSessionCfg(key, { cwd: wantCwd }); } catch { /* ignore */ }
+        }
       }
     }
 

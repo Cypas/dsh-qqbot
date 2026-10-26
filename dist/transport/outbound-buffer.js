@@ -49,7 +49,17 @@ extHook) {
     if (extHook?.enabled !== false) {
         try {
             const { runOutboundChain } = await import('../features/ext-outbound.js');
-            const EXT_HOOK_TIMEOUT_MS = 3000;
+            // ★ 2026-10-26 修（外部作者 wuwo1979 用真机日志实测上报）：
+            //   3 秒对**语音合成 / 拆条 / 表情包搜索**都太紧 —— TTS 走网络 1~3 秒，冷启动更容易压线。
+            //   超时的后果是"放弃改写/配图、按原文发出"，用户看到的就是"她说要发语音，结果什么都没来"。
+            //   改成可配：环境变量 QQBOT_EXT_HOOK_TIMEOUT_MS，默认 8000ms，夹在 [500, 30000]。
+            //   （出站链里语音合成已经挪进 ctx.background() 不占这个预算，所以 8 秒是富余而不是更慢。）
+            const EXT_HOOK_TIMEOUT_MS = (() => {
+                const raw = Number(process.env.QQBOT_EXT_HOOK_TIMEOUT_MS);
+                if (Number.isFinite(raw) && raw >= 500)
+                    return Math.min(30000, Math.round(raw));
+                return 8000;
+            })();
             const chain = runOutboundChain(text, {
                 ...(extHook ?? {}),
                 target,
