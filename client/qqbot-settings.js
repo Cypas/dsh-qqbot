@@ -3370,10 +3370,14 @@ var QQS_THEME_CSS = [
                 intervalMin: state.gaInterval,
                 minCount: state.gaMinCount,
                 wakeLlm: state.gaPollWake,
-                hubNotify: state.gaHubNotify,
-                notifyGroup: state.gaNotifyGroup,
-                wakeGroup: state.gaWakeGroup,
               },
+              // ★ 2026-10-26 修（主人报「叉掉注入群管会话还是会注入」）：
+              //   hubNotify / notifyInGroup / wakeGroup 是 groupAdmin 的**顶层**字段
+              //   （见 config.ts 的 groupAdmin schema），原来错写进 pollJoinRequests 子对象里，
+              //   后端读顶层永远读不到 → UI 上取消勾选完全无效。
+              hubNotify: state.gaHubNotify,
+              notifyInGroup: state.gaNotifyGroup,
+              wakeGroup: state.gaWakeGroup,
               // 🔨 自动撤回(2026-10-20 主人定): 命中关键词/附件类型 → 立刻撤; mode 决定是否进 AI
               autoRecall: {
                 enabled: state.arOn === true,

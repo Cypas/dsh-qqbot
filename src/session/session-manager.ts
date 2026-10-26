@@ -1197,6 +1197,13 @@ export class SessionManager {
             }
           }
         } catch (e) { this.logger?.debug?.('[contextless] 组装智能提示异常(已忽略): ' + (e instanceof Error ? e.message : String(e))); }
+        // ★ 2026-10-26 修（性能 bug，外部作者 wuwo1979 实测上报）：
+        //   去重指纹原来用 CTX_SMART_REMINDER，但该串**只在 contextlessSmart 开启时才进 body**
+        //   （默认 false）⇒ 谓词连"自己刚注入的那条"都判不中 ⇒ skipGroupRules 永不置位
+        //   ⇒ 每个 pre-step 都重注整段群守则(~1910 字符)，副本作为 user/message 留在 surface
+        //   里被长期重放，每步都在白烧 token。
+        //   改用**群守则内容指纹**判重：内容没变就不再注；群守则改了会自动重注一次。
+        const rulesFp = (rules.trim() || FIXED_CHANNEL_CONTEXT.trim()).slice(0, 60);
         let skipGroupRules = false;   // 群守则已在上下文里 → 只跳过它，不影响智能提示注入
         // ★ 2026-10-01 正解：把「话题判断 + 备忘」拼进群守则这条 body —— 与它**共用同一套去重**
         //   （下面的 inBatch + surface 历史比对）。人家先前的独立注入靠 step/turn/时间窗判重，
@@ -1217,7 +1224,7 @@ export class SessionManager {
           const mm = m as { source?: { kind?: string; ns?: string }; content?: { type?: string; text?: string }[] };
           // ⚠️ 只比对固定部分（备忘会变），否则每轮都被判成'新内容'而重复注入
               return mm?.source?.kind === 'qqbot:group-rules' && mm.source.ns === ns
-                && String(mm.content?.[0]?.text ?? '').includes(CTX_SMART_REMINDER);
+                && String(mm.content?.[0]?.text ?? '').includes(rulesFp);
         });
         // ⚠️ dsh 0.1.6 起 `eventAt / snapshotEvents / ownEvents` 被标记 @deprecated（官方措辞：
         //    "既有逻辑可暂不迁移，但不允许新增调用"）。此处是 2026-09 就存在的**既有只读遍历**，
@@ -1232,7 +1239,7 @@ export class SessionManager {
             if (ev?.type === 'user/message'
               && ev.data?.source?.kind === 'qqbot:group-rules'
               && ev.data.source.ns === ns
-              && String(ev.data.content?.[0]?.text ?? '').includes(CTX_SMART_REMINDER)) {
+              && String(ev.data.content?.[0]?.text ?? '').includes(rulesFp)) {
               // ⚠️ 2026-10-01：原来这里直接 return decision —— 但群守则每轮都在，
               //   于是从第二回合起整轮注入都被吞掉（智能提示也跟着丢，实测"话题判断"事件恒为 0）。
               //   改为：只跳过群守则这一条，继续往下走（ctxSmartText 照常注入）。

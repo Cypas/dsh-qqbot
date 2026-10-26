@@ -23,6 +23,25 @@ import { notifyGroupHub, safeAppendUserMessage, joinDataDir, wakeSessionAgent, i
 import { dataRootOf } from '../gateway/data-root.js';
 import { appendGroupMember } from './chat-ledger.js';
 import { verifyHuman } from '../api/group-admin.js';
+/** 官方 GROUP_JOIN_REQUEST 事件体(与本项目用到的字段) */
+/**
+ * ★ 2026-10-26 修（主人报「叉掉注入群管会话还是会注入」）：
+ *   groupAdmin 的这三个开关是**顶层**字段（见 config.ts schema），
+ *   但客户端 saveGroupAdmin 曾经把它们错写进 pollJoinRequests 子对象，
+ *   后端有的地方读顶层、有的地方读子对象 → 无论怎么改 UI 总有一半不生效。
+ *   这里统一走一个 helper：顶层优先，回退到旧的嵌套位置，新旧配置都能生效。
+ */
+function gaFlag(ga, topKey, legacyKey, dflt) {
+    const g = (ga || {});
+    const top = g[topKey];
+    if (typeof top === 'boolean')
+        return top;
+    const nested = (g.pollJoinRequests || {});
+    const legacy = nested[legacyKey];
+    if (typeof legacy === 'boolean')
+        return legacy;
+    return dflt;
+}
 /** 内存去重(join_request_id)与群内提醒限频: 每群 5 分钟至多 1 条, 防风暴 */
 const recentIds = new Map();
 const lastGroupNotify = new Map();
@@ -187,8 +206,10 @@ export async function handleGroupJoinRequestEvent(data, opts) {
         //    申请群就是 hub 群时跳过(hub 注记已覆盖, 避免同一会话重复)。
         const isHub = await isHubPeerOf(manager, config, 'group', gid);
         if (!isHub) {
-            const pollOpts = config.groupAdmin?.pollJoinRequests;
-            if (pollOpts?.notifyGroup || pollOpts?.wakeGroup) {
+            const gaCfg = config.groupAdmin;
+            const doNotifyGroup = gaFlag(gaCfg, 'notifyInGroup', 'notifyGroup', true);
+            const doWakeGroup = gaFlag(gaCfg, 'wakeGroup', 'wakeGroup', true);
+            if (doNotifyGroup || doWakeGroup) {
                 let record = manager.findByPeer('group', gid);
                 if (!record) {
                     try {
@@ -201,11 +222,11 @@ export async function handleGroupJoinRequestEvent(data, opts) {
                     }
                 }
                 if (record) {
-                    if (pollOpts.notifyGroup) {
+                    if (doNotifyGroup) {
                         const r = await safeAppendUserMessage(record.agent, summary, logger);
                         logger.info(`[group-join] 通知普通群(notifyGroup, 不唤醒): ${r} gid=${gid.slice(0, 8)}…`);
                     }
-                    if (pollOpts.wakeGroup) {
+                    if (doWakeGroup) {
                         const w = await wakeSessionAgent(manager, record.sessionId, logger, `${summary}\n\n可回复我处理(如: 查看入群申请 / 通过 某人 / 拒绝 某人)`);
                         logger.info(`[group-join] 唤醒普通群 AI(wakeGroup): ${w} gid=${gid.slice(0, 8)}…`);
                     }
@@ -215,8 +236,7 @@ export async function handleGroupJoinRequestEvent(data, opts) {
         else {
             // 2026-10-20: 申请群就是 hub 群时, 原来只"注记不唤醒" —— 主人完全收不到提示(注记要等下次有人说话才被带进上下文)。
             // 现在按 wakeGroup 开关也唤醒 hub 会话: 注记照写, 另外叫醒它立刻处理。
-            const pollOpts1 = config.groupAdmin?.pollJoinRequests;
-            if (pollOpts1?.wakeGroup) {
+            if (gaFlag(config.groupAdmin, 'wakeGroup', 'wakeGroup', true)) {
                 const rec1 = manager.findByPeer('group', gid);
                 if (rec1) {
                     const w1 = await wakeSessionAgent(manager, rec1.sessionId, logger, `${summary}${String.fromCharCode(10)}${String.fromCharCode(10)}可回复我处理(如: 查看入群申请 / 通过 某人 / 拒绝 某人)`);
@@ -231,8 +251,7 @@ export async function handleGroupJoinRequestEvent(data, opts) {
     //   hub 没设/失效时这条能力整个消失(表现为"重新保存群管设置后, 入群申请不再进 AI 上下文")。
     //   这里补一条: hub 不成功也要唤醒申请所在群的 AI。
     if (hubR !== 'ok') {
-        const pollOpts0 = config.groupAdmin?.pollJoinRequests;
-        if (pollOpts0?.wakeGroup) {
+        if (gaFlag(config.groupAdmin, 'wakeGroup', 'wakeGroup', true)) {
             let rec0 = manager.findByPeer('group', gid);
             if (!rec0) {
                 try {
@@ -247,7 +266,7 @@ export async function handleGroupJoinRequestEvent(data, opts) {
         }
     }
     // ② 无 hub / 转发未成功 → 原群内提醒(回合安全 append; busy/fail 兜底 QQ 静态卡)
-    if (config.groupAdmin?.notifyInGroup !== false) {
+    if (gaFlag(config.groupAdmin, 'notifyInGroup', 'notifyGroup', true)) {
         const last = lastGroupNotify.get(gid) ?? 0;
         if (now - last >= GROUP_NOTIFY_MIN_GAP_MS) {
             lastGroupNotify.set(gid, now);

@@ -2,7 +2,6 @@ import type { QQBotSender } from '../transport/outbound-buffer.js';
 import type { ImQQBotConfig } from '../config.js';
 import type { Logger } from '../types.js';
 import type { SessionManager } from '../session/index.js';
-/** 官方 GROUP_JOIN_REQUEST 事件体(与本项目用到的字段) */
 export interface GroupJoinRequestEvent {
     group_openid?: string;
     join_request_id?: string;
