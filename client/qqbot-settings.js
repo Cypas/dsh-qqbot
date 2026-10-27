@@ -693,6 +693,15 @@ window.__ModuleLoader__.load({
      *   dock.members()      群友台账（谁说过话、什么印象分）
      * 这些走 /api/qqbot-settings/dock-data，scope=当前数据根（每实例一份，天然隔离）。
      */
+    /** 宿主是不是暗色主题（宿主 ThemePresenter 给 body 加 data-ds-dark-theme 属性） */
+    function extUiIsDark() {
+      try {
+        if (document.body && document.body.hasAttribute('data-ds-dark-theme')) return true
+        // 兜底：宿主没给属性时看系统偏好
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return true
+      } catch (e) { /* ignore */ }
+      return false
+    }
     /** 读当前 web 会话 id（宿主的 localStorage，和「当前会话」检测同一个源） */
     function extUiCurrentSid() {
       try {
@@ -749,6 +758,35 @@ window.__ModuleLoader__.load({
             .catch(function () { return null })
         },
         toast: function (m) { try { window.alert(String(m)) } catch (e) { /* ignore */ } },
+
+        /**
+         * 主题（2026-10-27 主人问：自定义 UI 能跟随宿主主题吗？—— 能）
+         *
+         * 两条路，**优先用 CSS 变量**：
+         *   ① CSS 变量（推荐）：插件在 body 上定义了 --qqs-* token，亮/暗两套自动切换。
+         *      自定义属性会**穿透 Shadow DOM**，卡片里直接写 var(--qqs-text) 就行。
+         *        常用：--qqs-card / --qqs-panel / --qqs-text / --qqs-text2 / --qqs-text3
+         *              --qqs-border / --qqs-input / --qqs-toolbar / --qqs-primary-fg
+         *   ② JS 判断（要按主题做逻辑分支时）：theme / isDark() / onThemeChange(fn)
+         * 宿主切主题时给 body 加 data-ds-dark-theme 属性，这里监听它。
+         */
+        get theme() { return extUiIsDark() ? 'dark' : 'light' },
+        isDark: function () { return extUiIsDark() },
+        onThemeChange: function (fn) {
+          if (typeof fn !== 'function') return function () {}
+          var handler = function () { try { fn(extUiIsDark() ? 'dark' : 'light') } catch (e) { /* ignore */ } }
+          try {
+            var ob = new MutationObserver(handler)
+            ob.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'class'] })
+            var mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null
+            if (mq && mq.addEventListener) mq.addEventListener('change', handler)
+            return function () {
+              try { ob.disconnect() } catch (e) { /* ignore */ }
+              try { if (mq && mq.removeEventListener) mq.removeEventListener('change', handler) } catch (e) { /* ignore */ }
+            }
+          } catch (e) { return function () {} }
+        },
+
         /**
          * 能力调用（2026-10-27 主人要求：UI 卡片要和其余扩展对齐能力）
          *

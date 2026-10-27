@@ -109,7 +109,34 @@ qqbotExt.cap('text' | 'markdown', 文本)  // 发消息
 
 // 自己的后端（见 §7）
 qqbotExt.api('/你的路由')            // → /api/ext/dispatch?id=<你>&p=/你的路由
+
+// 主题
+qqbotExt.theme                       // 'light' | 'dark'
+qqbotExt.isDark()
+qqbotExt.onThemeChange(cb)           // 返回取消函数
 ```
+
+**让卡片跟着宿主主题变**：插件在 `body` 上定义了一套 `--qqs-*` token，亮/暗两套自动切换，
+而 **CSS 自定义属性会穿透 Shadow DOM** —— 所以卡片里直接用变量就行，不用自己判断：
+
+```css
+.card {
+  background: var(--qqs-card, #fff);
+  color: var(--qqs-text, #1f2329);
+  border: 1px solid var(--qqs-border, #e6e8ec);
+}
+```
+
+可用 token：
+
+| 类别 | 变量 |
+|---|---|
+| 背景 | `--qqs-card` `--qqs-panel` `--qqs-card-solid` `--qqs-input` `--qqs-toolbar` |
+| 文字 | `--qqs-text` `--qqs-text2` `--qqs-text3` |
+| 边框 | `--qqs-border` `--qqs-border-light` |
+| 主题色 | `--qqs-primary-bg` `--qqs-primary-border` `--qqs-primary-fg` |
+
+**一定要带 fallback**（`var(--qqs-text, #1f2329)`）—— 老版本宿主的 token 可能不全。
 
 **写卡片的几条硬边界**（都是设计如此，不是 bug）：
 
