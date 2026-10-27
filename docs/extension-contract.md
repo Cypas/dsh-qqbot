@@ -93,7 +93,8 @@ qqbotExt.dock.peerId / scope / ns
 qqbotExt.dock.dataRoot / cwd
 qqbotExt.dock.context()             // 实例 + 会话信息
 qqbotExt.dock.sessions()            // 这个机器人管过哪些会话
-qqbotExt.dock.history(n)            // 当前会话最近 n 条消息
+qqbotExt.dock.history(n)            // 当前会话最近 n 条消息（QQ 消息流水）
+qqbotExt.dock.lastAssistantText()   // ★ AI 最后一个正文块（她真正输出的那段话）
 qqbotExt.dock.members()             // 群友台账
 
 // 能力（与代码扩展对齐，走白名单 RPC）

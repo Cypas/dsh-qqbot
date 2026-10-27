@@ -5481,6 +5481,43 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
         return writeJson(res, 200, { ok: true, messages: rows });
       }
 
+      // ★ 2026-10-27（主人要求）：取当前会话「AI 最后一个正文块」。
+      //   原来卡片读的是 .qqbot/msg-history（QQ 消息流水），跟 AI 的正文不是一回事。
+      //   实现抄 examples/ext-tools/lib/session_watch_lib.mjs 的 lastAssistantText()：
+      //   宿主 kernel.get('sessions').get(sid).deriveMessages() 从后往前找 assistant 角色。
+      //   （那条路还支持 turn/end 事件累积，但这里只要"最后一次的正文"，直接取更省事。）
+      if (what === 'lastAssistantText') {
+        const sid = String(q?.get('sid') || '').trim();
+        if (!sid) return writeJson(res, 200, { ok: false, reason: '缺 sid（当前会话 id）', text: '' });
+        let text = '';
+        let via = '';
+        try {
+          const sessions = ctx.get?.('sessions');
+          const sess = sessions && typeof sessions.get === 'function' ? sessions.get(sid) : null;
+          if (sess && typeof sess.deriveMessages === 'function') {
+            const msgs = sess.deriveMessages() || [];
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              const m = msgs[i];
+              const role = String(m?.role ?? m?.type ?? '');
+              if (!role.includes('assistant')) continue;
+              // content 可能是字符串、数组（每项带 text）、或对象
+              const c = m?.content;
+              let t = '';
+              if (typeof c === 'string') t = c;
+              else if (Array.isArray(c)) t = c.map((x) => (typeof x === 'string' ? x : String(x?.text ?? ''))).join('');
+              else if (c && typeof c === 'object') t = String(c.text ?? '');
+              t = t.trim();
+              if (t) { text = t; via = 'deriveMessages'; break; }
+            }
+          } else {
+            via = 'sessions.get 拿不到会话';
+          }
+        } catch (e) {
+          via = '异常: ' + (e instanceof Error ? e.message : String(e));
+        }
+        return writeJson(res, 200, { ok: !!text, text, via, sid });
+      }
+
       if (what === 'members') {
         // 群友台账（people-memo 落的那份）
         let out = {};
@@ -5703,7 +5740,11 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
           dataRoot: dr,
           logger: console,
           selfName: id,
-          kind: 'ui',
+          // ★ 2026-10-27：kind 不能传 'ui' —— store 会落到 .qqbot-extensions/ui/data/，
+          //   而 listExtUi 正是扫 ui/ 下每个子目录找 card.html，会把 data/ 当成一个扩展目录。
+          //   用点开头：路径变成 .qqbot-extensions/.ui-data/data/<extId>.json，
+          //   既不在 ui/ 下，也不会被 EXT_ID_RE（不允许 '.'）当成扩展 id。
+          kind: '.ui-data',
           appId: String(viewOf(ctx.settings, capNs)?.value?.appId || ''),
           owners: (() => {
             try {

@@ -895,6 +895,14 @@ window.__ModuleLoader__.load({
           context: function () { return fetch(q('context')).then(function (r) { return r.json() }).catch(function () { return null }) },
           sessions: function () { return fetch(q('sessions')).then(function (r) { return r.json() }).catch(function () { return null }) },
           history: function (n) { return fetch(q('history') + '&limit=' + (n || 20)).then(function (r) { return r.json() }).catch(function () { return null }) },
+          /**
+           * 当前会话 **AI 最后一个正文块**（2026-10-27）
+           * 不是 QQ 消息流水，是 agent 真正输出的那段文字。
+           * 实现：宿主 kernel.get('sessions').get(sid).deriveMessages() 从后往前找 assistant。
+           */
+          lastAssistantText: function () {
+            return fetch(q('lastAssistantText')).then(function (r) { return r.json() }).catch(function () { return null })
+          },
           members: function () { return fetch(q('members')).then(function (r) { return r.json() }).catch(function () { return null }) },
         }
       }

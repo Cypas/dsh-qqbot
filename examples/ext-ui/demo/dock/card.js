@@ -64,12 +64,13 @@
     hisBtn.addEventListener('click', function () {
       if (!qqbotExt.dock) return setInfo('这个卡片没有 dock 上下文')
       setInfo('读取中…')
-      qqbotExt.dock.history(8).then(function (r) {
-        if (!r || !r.ok) return setInfo(r || '(空)')
-        var rows = (r.messages || []).map(function (m) {
-          return '[' + (m.k || 'text') + '] ' + String(m.n || '') + ': ' + String(m.x || '').slice(0, 60)
-        })
-        setInfo(rows.length ? rows.join('\n') : '(这个会话还没有历史消息)')
+      // ★ 2026-10-27（主人要求）：读 **AI 最后一个正文块**，不是 QQ 消息流水。
+      //   实现抄 session_watch_lib.mjs 的 lastAssistantText()：
+      //   宿主 kernel.get('sessions').get(sid).deriveMessages() 从后往前找 assistant。
+      qqbotExt.dock.lastAssistantText().then(function (r) {
+        if (!r) return setInfo('没有响应')
+        if (!r.ok) return setInfo('读不到：' + (r.reason || r.via || '未知') + (r.sid ? ('\nsid=' + r.sid) : ''))
+        setInfo('（AI 最后一段正文，' + r.text.length + ' 字符）\n\n' + r.text)
       })
     })
   }
