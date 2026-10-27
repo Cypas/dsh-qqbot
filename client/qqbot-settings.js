@@ -603,13 +603,19 @@ window.__ModuleLoader__.load({
         //   .qqs-top-tabs / .qqs-ext-cards 上把纵向滚轮折算成 scrollLeft。
         if (!window.__qqsExtWheelBound) {
           window.__qqsExtWheelBound = true
+          // 哪些容器算"可横滑条"：设置页顶栏、扩展卡片条、dock 页签（★ 2026-10-26 补 dk-tab）
+          var isScrollBar = function (el) {
+            if (!el || !el.classList) return false
+            return el === window.__qqsTopTabs
+              || el.id === 'qqs-top-tabs'
+              || el.classList.contains('qqs-top-tabs')
+              || el.classList.contains('qqs-ext-cards')
+              || el.classList.contains('dk-tab')
+          }
           document.addEventListener('wheel', function (e) {
             var el = e.target
-            while (el && el !== document.body) {
-              // 用 id 判断（className 不一定被自定义 h() 落到 DOM 上）
-              var hit = el.id === 'qqs-top-tabs'
-                || (el.classList && (el.classList.contains('qqs-top-tabs') || el.classList.contains('qqs-ext-cards')))
-              if (hit) {
+            while (el) {
+              if (isScrollBar(el)) {
                 if (el.scrollWidth > el.clientWidth + 1 && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
                   el.scrollLeft += e.deltaY
                   e.preventDefault()
@@ -619,35 +625,259 @@ window.__ModuleLoader__.load({
               el = el.parentNode
             }
           }, { passive: false })
+
+          // ★ 鼠标按住拖拽（桌面端最直觉的滑动方式）。
+          //   dock 页签是字符串拼的 HTML、拿不到 ref，所以用**全局事件委托**：
+          //   mousedown 判断落点是否在可横滑容器里，是就开始记起点。
+          var dragEl = null, dragX = 0, dragLeft = 0, dragMoved = false
+          document.addEventListener('mousedown', function (e) {
+            if (e.button !== 0) return
+            var el = e.target
+            while (el) {
+              if (isScrollBar(el) && el.scrollWidth > el.clientWidth + 1) {
+                dragEl = el; dragX = e.pageX; dragLeft = el.scrollLeft; dragMoved = false
+                el.style.cursor = 'grab'
+                return
+              }
+              el = el.parentNode
+            }
+          })
+          document.addEventListener('mousemove', function (e) {
+            if (!dragEl) return
+            var dx = e.pageX - dragX
+            if (Math.abs(dx) > 4) {
+              dragMoved = true
+              dragEl.style.cursor = 'grabbing'
+              dragEl.scrollLeft = dragLeft - dx
+              e.preventDefault()
+            }
+          })
+          document.addEventListener('mouseup', function () {
+            if (!dragEl) return
+            try { dragEl.style.cursor = '' } catch (x) { /* ignore */ }
+            var d = dragEl
+            setTimeout(function () { if (dragEl === d) dragEl = null }, 0)
+            // ★ 2026-10-27 修：dragMoved 必须清 —— 之前只清 dragEl、没清 dragMoved，
+            //   结果是「拖过一次之后所有 click 都被吞」：点按钮没反应、页签切不动，
+            //   看起来像"路由到别处了"（主人实测就是这个现象）。
+            //   留 120ms 给紧随其后的 click 消费，然后强制归零。
+            setTimeout(function () { dragMoved = false }, 120)
+          })
+          // 拖完拦截一次 click，避免"想滑动却切走了页签"
+          document.addEventListener('click', function (e) {
+            if (dragMoved) { dragMoved = false; e.stopPropagation(); e.preventDefault() }
+          }, true)
         }
       } catch (e) { /* ignore */ }
     }
-    function extUiLoad(extId, f) {
-      return fetch('/api/qqbot-settings/ext-ui/file?f=' + encodeURIComponent(f) + '&id=' + encodeURIComponent(extId))
+    function extUiLoad(extId, f, slot) {
+      // slot 用于区分「同一个扩展 id 在 profile 级 / 数据根各有一张卡」的情况（见 ext-ui.ts 注释）
+      var u = '/api/qqbot-settings/ext-ui/file?f=' + encodeURIComponent(f) + '&id=' + encodeURIComponent(extId)
+      if (slot) u += '&slot=' + encodeURIComponent(slot)
+      return fetch(u)
         .then(function (r) { return r.json() })
         .then(function (j) { return j && j.ok ? String(j.text || '') : '' })
         .catch(function () { return '' })
     }
+    /**
+     * 给卡片脚本的统一 API（2026-10-26）
+     *
+     * @param extId    扩展 id
+     * @param cfgScope 'profile'（设置页卡片：全局一份）| 'data'（dock 卡片：每实例一份）
+     * @param dockCtx  dock 卡片才有：当前实例/会话上下文（settings 卡片传 null）
+     *
+     * dock 卡片的独特之处就是**能看到当前实例和会话的真实数据**，所以这里额外给：
+     *   dock.context()      当前实例 + 会话信息（ns/appId/dataRoot/peer/群名）
+     *   dock.sessions()     这个机器人管过哪些会话
+     *   dock.history(n)     当前会话最近 n 条消息
+     *   dock.members()      群友台账（谁说过话、什么印象分）
+     * 这些走 /api/qqbot-settings/dock-data，scope=当前数据根（每实例一份，天然隔离）。
+     */
+    /** 读当前 web 会话 id（宿主的 localStorage，和「当前会话」检测同一个源） */
+    function extUiCurrentSid() {
+      try {
+        var raw = localStorage.getItem('dsh.sessions.current')
+        if (!raw) return ''
+        var o = JSON.parse(raw)
+        return (o && o.sessionId) ? String(o.sessionId) : ''
+      } catch (e) { return '' }
+    }
+    function extUiApi(extId, cfgScope, dockCtx, acctCtx) {
+      var scope = cfgScope === 'profile' ? 'profile' : 'data'
+      // ★ 2026-10-27（主人要求）：设置页的卡片虽然是"全局 UI"，也能读写**当前选中账号**。
+      //   getConfig('data') / setConfig(p, 'data') 会落到上面账号下拉框选中的那个实例；
+      //   传 sc='profile' 仍是全局那份。第三个参数可临时指定某个账号（不传=当前选中的）。
+      var acctCwdOf = function (a) {
+        if (!a || typeof a !== 'object') return ''
+        return String(a.cwd || '').trim() || (a.dataRoot ? String(a.dataRoot).replace(/[\/]dshqqbot[\/]*$/, '') : '')
+      }
+      var api = {
+        extId: extId,
+        /** 当前卡片上下文里的账号（设置页=下拉框选中的；dock=当前实例） */
+        acct: acctCtx || (dockCtx ? { ns: dockCtx.ns, cwd: dockCtx.cwd, dataRoot: dockCtx.dataRoot } : null),
+        getConfig: function (s, acctOverride) {
+          var sc = s === 'profile' || s === 'data' ? s : scope
+          var a = acctOverride || acctCtx
+          var u = '/api/qqbot-settings/ext-config?id=' + encodeURIComponent(extId) + '&scope=' + sc
+          var cw = acctCwdOf(a)
+          if (sc === 'data' && cw) u += '&cwd=' + encodeURIComponent(cw)
+          return fetch(u)
+            .then(function (r) { return r.json() })
+            .then(function (j) { return (j && j.ok && j.config) || {} })
+            .catch(function () { return {} })
+        },
+        setConfig: function (patch, s, acctOverride) {
+          var sc = s === 'profile' || s === 'data' ? s : scope
+          var a = acctOverride || acctCtx
+          var cw = acctCwdOf(a)
+          return fetch('/api/qqbot-settings/ext-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: extId, scope: sc, patch: patch || {}, cwd: sc === 'data' ? cw : '' }),
+          }).then(function (r) { return r.json() }).catch(function () { return null })
+        },
+        api: function (p, opts) {
+          // ★ 2026-10-26：改走统一 dispatch 出口 —— 扩展用 env.registerRoute() 注册的
+          //   自有存储接口都从这里进（settings-host 的 /api/ext/dispatch 派发）。
+          // ★ 2026-10-27：dock 卡片额外带 dataRoot —— hooks 是「插件启动时跑一次」，
+          //   其 env.dataRoot 是**插件级**的（主实例那份），不是当前机器人实例的。
+          //   所以数据根必须随请求传，让 handler 用 query.dataRoot 自己算路径。
+          var u = '/api/ext/dispatch?id=' + encodeURIComponent(extId) + '&p=' + encodeURIComponent(String(p || '/'))
+          if (dockCtx && dockCtx.dataRoot) u += '&dataRoot=' + encodeURIComponent(dockCtx.dataRoot)
+          return fetch(u, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}))
+            .then(function (r) { return r.json() })
+            .catch(function () { return null })
+        },
+        toast: function (m) { try { window.alert(String(m)) } catch (e) { /* ignore */ } },
+        /**
+         * 能力调用（2026-10-27 主人要求：UI 卡片要和其余扩展对齐能力）
+         *
+         * 卡片跑在浏览器里，但 store / kernel / log 这些都在服务端 ——
+         * 所以走 RPC：cap('store.load') → /api/ext/dispatch?p=/__cap&fn=store.load
+         * 后端有白名单（EXT_CAP_ALLOW），只有列出来的能用。
+         *
+         * 白名单：store.load / store.save / appId / owners /
+         *         kernel.get / kernel.has / log / text / markdown / appendSilent
+         */
+        cap: function (fn) {
+          var args = Array.prototype.slice.call(arguments, 1);
+          var u = '/api/ext/dispatch?id=' + encodeURIComponent(extId)
+            + '&p=' + encodeURIComponent('/__cap')
+            + '&fn=' + encodeURIComponent(String(fn || ''))
+            + '&args=' + encodeURIComponent(JSON.stringify(args))
+          if (dockCtx && dockCtx.dataRoot) u += '&dataRoot=' + encodeURIComponent(dockCtx.dataRoot)
+          if (dockCtx && dockCtx.cwd) u += '&cwd=' + encodeURIComponent(dockCtx.cwd)
+          if (acctCtx && acctCtx.cwd) u += '&cwd=' + encodeURIComponent(acctCtx.cwd)
+          // ★ 2026-10-27 修：peer/ns **必须实时读**，不能用挂载时的快照 ——
+          //   卡片挂载时「当前会话」检测还没跑完（异步），那会儿 detectedHit 是 null，
+          //   于是 appendSilent 拿到空 peer，永远注入失败。
+          try {
+            // ★ 2026-10-27（主人点明）：只要**当前会话 id** 就够了。
+            //   后端 findManagerBySessionId(sid) 一步定位 manager + agent，
+            //   不用再猜 scope/peer/群注册表。
+            var sidNow = extUiCurrentSid()
+            if (sidNow) u += '&sid=' + encodeURIComponent(sidNow)
+            var live = window.__qqsDockState || {}
+            if (live.ns) u += '&ns=' + encodeURIComponent(live.ns)
+            var hit = live.detectedHit
+            if (hit && hit.peerId) {
+              u += '&peer=' + encodeURIComponent(hit.peerId)
+              u += '&scope=' + encodeURIComponent(hit.scope === 'c2c' ? 'c2c' : 'group')
+            } else if (dockCtx && dockCtx.peer && dockCtx.peer.peerId) {
+              u += '&peer=' + encodeURIComponent(dockCtx.peer.peerId)
+              u += '&scope=' + encodeURIComponent(dockCtx.peer.scope || 'group')
+            }
+          } catch (e) { /* ignore */ }
+          return fetch(u, { method: 'POST' })
+            .then(function (r) { return r.json() })
+            .then(function (j) { return j && j.ok ? j.data : null })
+            .catch(function () { return null })
+        },
+        dock: null,
+      }
+
+      // ── 语义化包装（内部走 cap，写起来更像其余扩展）──────────────
+      api.log = function (msg) { return api.cap('log', String(msg == null ? '' : msg)) }
+      api.store = {
+        load: function () { return api.cap('store.load') },
+        save: function (v) { return api.cap('store.save', v == null ? {} : v) },
+      }
+      api.kernel = {
+        /** 取宿主服务（DSH cordis Context）—— 等于扩展里的 env.kernel.get(name) */
+        get: function (name) { return api.cap('kernel.get', String(name == null ? '' : name)) },
+        has: function (name) { return api.cap('kernel.has', String(name == null ? '' : name)) },
+      }
+      api.owners = function () { return api.cap('owners') }
+      api.appIdOf = function () { return api.cap('appId') }
+      if (dockCtx) {
+        var q = function (what) {
+          // ★ 2026-10-27：必须带上 dataRoot / cwd —— 否则后端推不出当前实例的数据根，
+          //   会落到宿主默认（表现为"切到 3 号机读到的还是 2 号机的路径"）。
+          var u = '/api/qqbot-settings/dock-data?what=' + encodeURIComponent(what)
+          if (dockCtx.ns) u += '&ns=' + encodeURIComponent(dockCtx.ns)
+          if (dockCtx.dataRoot) u += '&dataRoot=' + encodeURIComponent(dockCtx.dataRoot)
+          if (dockCtx.cwd) u += '&cwd=' + encodeURIComponent(dockCtx.cwd)
+          // ★ 同上：peer 实时读（挂载时可能还没检测出来）
+          try {
+            var sidNow2 = extUiCurrentSid()
+            if (sidNow2) u += '&sid=' + encodeURIComponent(sidNow2)
+            var live2 = window.__qqsDockState || {}
+            var hit2 = live2.detectedHit
+            if (hit2 && hit2.peerId) {
+              u += '&peer=' + encodeURIComponent(hit2.peerId)
+              u += '&scope=' + encodeURIComponent(hit2.scope === 'c2c' ? 'c2c' : 'group')
+            } else if (dockCtx.peer && dockCtx.peer.peerId) {
+              u += '&peer=' + encodeURIComponent(dockCtx.peer.peerId)
+              u += '&scope=' + encodeURIComponent(dockCtx.peer.scope || 'group')
+            }
+          } catch (e) { /* ignore */ }
+          return u
+        }
+        api.dock = {
+          ns: dockCtx.ns || '',
+          appId: dockCtx.appId || '',
+          // ★ 2026-10-27（主人问：当前会话 id 暴露了吗？—— 之前没有，现在补上）
+          //   就是顶栏「当前会话」那个 26421171-... ，宿主的 agent 表按它索引。
+          //   做成 getter：每次读都是最新的（卡片挂载时可能还没检测完，不能存快照）。
+          get sid() { return extUiCurrentSid() },
+          get peerId() {
+            var h = (window.__qqsDockState || {}).detectedHit
+            return h && h.peerId ? String(h.peerId) : ''
+          },
+          get scope() {
+            var h = (window.__qqsDockState || {}).detectedHit
+            return h && h.scope === 'c2c' ? 'c2c' : 'group'
+          },
+          // ★ 两个路径都暴露（2026-10-26 主人问"dataRoot 还是 cwd？" —— 都给了）：
+          //   dataRoot = 插件数据根（推荐：扩展自己的文件/SQLite 放这儿，跟插件数据一起）
+          //   cwd      = 当前工作区根（扩展要往用户项目目录写东西时才用）
+          dataRoot: dockCtx.dataRoot || '',
+          cwd: dockCtx.cwd || '',
+          peer: dockCtx.peer || null,
+          context: function () { return fetch(q('context')).then(function (r) { return r.json() }).catch(function () { return null }) },
+          sessions: function () { return fetch(q('sessions')).then(function (r) { return r.json() }).catch(function () { return null }) },
+          history: function (n) { return fetch(q('history') + '&limit=' + (n || 20)).then(function (r) { return r.json() }).catch(function () { return null }) },
+          members: function () { return fetch(q('members')).then(function (r) { return r.json() }).catch(function () { return null }) },
+        }
+      }
+      return api
+    }
     /** 把一张扩展卡片用 Shadow DOM 挂进容器 */
-    function extUiMountCard(container, extId, cls) {
+    function extUiMountCard(container, extId, cls, dockCtx, acctCtx) {
       var host = document.createElement('div')
       host.className = cls || 'qqs-ext-card'
       var sr = host.attachShadow({ mode: 'open' })
       container.appendChild(host)
-      Promise.all([extUiLoad(extId, 'card.html'), extUiLoad(extId, 'card.css'), extUiLoad(extId, 'card.js')])
+      var slot = dockCtx ? 'dock' : 'settings'
+      Promise.all([
+        extUiLoad(extId, 'card.html', slot),
+        extUiLoad(extId, 'card.css', slot),
+        extUiLoad(extId, 'card.js', slot),
+      ])
         .then(function (res) {
           sr.innerHTML = '<style>' + (res[1] || '') + '</style>' + (res[0] || '')
           if (!res[2]) return
-          var api = {
-            extId: extId,
-            api: function (p, opts) {
-              return fetch('/api/ext/' + encodeURIComponent(extId) + String(p || ''),
-                Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}))
-                .then(function (r) { return r.json() })
-                .catch(function () { return null })
-            },
-            toast: function (m) { try { window.alert(String(m)) } catch (e) { /* ignore */ } },
-          }
+          var api = extUiApi(extId, dockCtx ? 'data' : 'profile', dockCtx, acctCtx)
           try {
             new Function('qqbotExt', 'shadowRoot', res[2])(api, sr)
           } catch (e) {
@@ -663,17 +893,148 @@ window.__ModuleLoader__.load({
     function ExtCardPage(props) {
       var extId = String((props && props.extId) || '')
       var title = String((props && props.title) || extId)
+      // ★ 2026-10-27（主人要求）：设置页的卡片虽然是"全局 UI"，但也要能读写**当前选中账号**
+      //   那份数据 —— 即 getConfig('data') 走上面账号下拉框选中的实例。
+      //   acct 来自 QqbotHome 的 acctx（含 ns / cwd / dataRoot）。
+      var acct = (props && props.acct) || null
       useEffect(function () {
         extUiEnsureCss()
         var box = document.getElementById('qqs-ext-page')
         if (!box || !extId) return
         box.innerHTML = ''
-        extUiMountCard(box, extId, 'qqs-ext-page-card')
+        extUiMountCard(box, extId, 'qqs-ext-page-card', null, acct)
         return function () { try { box.innerHTML = '' } catch (e) { /* ignore */ } }
-      }, [extId])
+      }, [extId, acct && acct.ns])
       return h('div', { style: { maxWidth: 720 } },
         h('h2', { style: { margin: '0 0 10px' } }, title),
         h('div', { id: 'qqs-ext-page', style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } }))
+    }
+
+    /**
+     * dock 扩展页签的列表（2026-10-26）
+     * 只收 slot=dock 的卡片 —— 它们放在**数据根**（每个机器人实例各一份），
+     * 所以能拿到「当前实例 + 当前会话」的数据（见 extUiApi 里的 dock.*）。
+     * 拉一次缓存在 window，paintBody 重绘后就有页签了。
+     */
+    var _dockTabsLoaded = false
+    var _dockTabsRoot = ''            // 上次拉列表用的 dataRoot —— 换机器人实例时要重拉
+    function ensureDockExtTabs(force) {
+      // ★ 2026-10-27 修（主人实测：切到 im-qqbot-3 仍显示 im-qqbot-2 的扩展卡片）：
+      //   dock 卡片按**机器人实例的 dataRoot** 分源，不同实例不一样。
+      //   原来拉列表没带实例信息、且只拉一次 → 换了实例还是旧那份。
+      //   现在带上当前账号的 dataDir，变了就重拉。
+      var st = window.__qqsDockState || {}
+      var ac = null
+      try {
+        var l0 = (st.accts || [])
+        // ★ 2026-10-27：dock 的 state 里**没有 acctId**（那是 SettingsPage 的 React state），
+        //   必须用 st.ns 匹配。原来写 st.acctId 永远 undefined → 落到"第一个启用的实例"
+        //   → 不管切到哪个实例都拿 2 号机的 dataRoot（主人实测就是这个）。
+        if (st.ns) l0.forEach(function (a) { if (a && (a.ns === st.ns || a.id === st.ns)) ac = a })
+        if (!ac) l0.forEach(function (a) { if (!ac && a && !a.disabled) ac = a })
+        if (!ac && l0.length) ac = l0[0]
+      } catch (e) { ac = null }
+      // ★ 2026-10-27：dock 卡片按**机器人实例的 dataRoot** 分源，不同实例不一样。
+      //   注意不能用 ac.dataDir —— 那是「图库目录」({dataRoot}/表情包)，
+      //   扩展 UI 在 {dataRoot}/.qqbot-extensions/ui/，差一级就扫不到。
+      //   优先用 accounts 回给我们的 dataRoot；老版本没这个字段时从 cwd 推。
+      var root = ''
+      if (ac) {
+        root = String(ac.dataRoot || '').trim()
+        if (!root && ac.cwd) root = String(ac.cwd).replace(/[\\/]+$/, '') + '/dshqqbot'
+      }
+      if (_dockTabsLoaded && !force && root === _dockTabsRoot) return
+      _dockTabsLoaded = true
+      _dockTabsRoot = root
+      var u = '/api/qqbot-settings/ext-ui/list'
+      if (root) u += '?dataRoot=' + encodeURIComponent(root)
+      fetch(u)
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          if (!j || !j.ok) return
+          var list = (j.items || []).filter(function (x) { return x.slot === 'dock' })
+          window.__qqsDockTabs = list
+          // paintBody 是 dock 闭包内的函数，模块级拿不到 —— 由它自己挂到 window 上
+          if (typeof window.__qqsPaintBody === 'function') {
+            try { window.__qqsPaintBody() } catch (e) { /* ignore */ }
+          }
+        })
+        .catch(function () { _dockTabsLoaded = false })   // 失败允许下次重试
+    }
+    /** 把一张 dock 扩展卡片挂进面板（带当前实例/会话上下文） */
+    function mountDockExtTab(bodyEl, extId) {
+      extUiEnsureCss()
+      var box = document.createElement('div')
+      box.id = 'qqs-dock-ext'
+      box.style.cssText = 'display:block'
+      bodyEl.appendChild(box)
+      mountDockCard(box, extId)
+    }
+    /** 真挂载：先取一次上下文（拿到 dataRoot / cwd），再挂卡片 —— 卡片里 dock.dataRoot 可直接同步读 */
+    function mountDockCard(container, extId) {
+      // ★ 2026-10-27：必须在这里也装上 CSS + 滚轮/拖拽监听。
+      //   原来只在 mountDockExtTab 里调，但实际走的是本函数 —— 结果监听器根本没绑，
+      //   表现就是「dock 页签既拖不动也滚不动」（主人实测）。
+      //   extUiEnsureCss 是幂等的，多调几次没副作用。
+      try { extUiEnsureCss() } catch (e) { /* ignore */ }
+      // ★ 2026-10-27 修：state 是 dock 闭包里的变量，**模块级拿不到**！
+      //   原来写 `typeof state !== 'undefined' ? state : {}` 永远拿到 {}，
+      //   于是 ns 是空、没传给后端 → 后端用默认 NS(im-qqbot) → 读到别的实例的配置，
+      //   卡片里显示的 appId/cwd 全错（主人实测）。改从 window 上取。
+      var st = (window.__qqsDockState && typeof window.__qqsDockState === 'object') ? window.__qqsDockState : {}
+      // ★ 2026-10-27：dataRoot/cwd 必须**先从账号列表取**，不能等 context 返回后再填 ——
+      //   否则第一次请求必然没带上，后端只能落到宿主默认（表现为"切到 3 号机还是 2 号机的路径"）。
+      var ac = null
+      try {
+        var l0 = (st.accts || [])
+        // ★ 2026-10-27：dock 的 state 里**没有 acctId**（那是 SettingsPage 的 React state），
+        //   必须用 st.ns 匹配。原来写 st.acctId 永远 undefined → 落到"第一个启用的实例"
+        //   → 不管切到哪个实例都拿 2 号机的 dataRoot（主人实测就是这个）。
+        if (st.ns) l0.forEach(function (a) { if (a && (a.ns === st.ns || a.id === st.ns)) ac = a })
+        if (!ac) l0.forEach(function (a) { if (!ac && a && !a.disabled) ac = a })
+        if (!ac && l0.length) ac = l0[0]
+      } catch (e) { ac = null }
+      var root0 = ''
+      if (ac) {
+        root0 = String(ac.dataRoot || '').trim()
+        if (!root0 && ac.cwd) root0 = String(ac.cwd).replace(/[\\/]+$/, '') + '/dshqqbot'
+      }
+      // ★ 2026-10-27 修（主人实测：静默注入 diag 里 peer 是空的）：
+      //   原来用 st.gid —— 那是「📇 群组管理」里选的目标群，**不一定是当前会话**。
+      //   扩展卡片要"往当前会话注入"，必须用顶栏那个「当前会话」(state.detectedHit)，
+      //   和「🤖 让 AI 写」按钮完全一致（它用的就是 detectedHit.peerId）。
+      var __hit = st.detectedHit || null
+      var peer = null
+      if (__hit && __hit.peerId) {
+        peer = { scope: __hit.scope === 'c2c' ? 'c2c' : 'group', peerId: String(__hit.peerId), name: __hit.name || '' }
+      } else if (st.gid) {
+        peer = { scope: 'group', peerId: String(st.gid) }
+      }
+      var base = {
+        ns: st.ns || '',
+        appId: (ac && ac.appId) || '',
+        dataRoot: root0,
+        cwd: (ac && ac.cwd) || '',
+        peer: peer,
+      }
+      var u = '/api/qqbot-settings/dock-data?what=context'
+      if (base.ns) u += '&ns=' + encodeURIComponent(base.ns)
+      if (base.dataRoot) u += '&dataRoot=' + encodeURIComponent(base.dataRoot)
+      if (base.cwd) u += '&cwd=' + encodeURIComponent(base.cwd)
+      if (peer) u += '&peer=' + encodeURIComponent(peer.peerId) + '&scope=' + peer.scope
+      fetch(u)
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          if (j && j.ok && j.context) {
+            base.appId = j.context.appId || ''
+            base.dataRoot = j.context.dataRoot || ''
+            base.cwd = j.context.cwd || ''
+          }
+        })
+        .catch(function () { /* 取不到就用空值，卡片自己再 dock.context() */ })
+        .then(function () {
+          extUiMountCard(container, extId, 'qqs-dock-ext-card', base)
+        })
     }
 
     function SettingsPage(props) {
@@ -1752,7 +2113,12 @@ window.__ModuleLoader__.load({
       }
       var ac = currentAcct()
       // 传给按账号视图的上下文: 设置按 ns, 图库按 dataDir, 定时按 schedDir
-      var acctx = ac ? { id: ac.id, ns: ac.ns, dataDir: ac.dataDir, schedDir: ac.schedDir } : null
+      // ★ 2026-10-27：补上 cwd / dataRoot —— 扩展卡片要能对"当前选中的账号"
+      //   读写它自己那份配置（getConfig('data')），光有 dataDir（图库目录）不够。
+      var acctx = ac ? {
+        id: ac.id, ns: ac.ns, dataDir: ac.dataDir, schedDir: ac.schedDir,
+        cwd: ac.cwd || '', dataRoot: ac.dataRoot || '', appId: ac.appId || '',
+      } : null
       // key=账号: 切号即强制子页整页重挂(清掉旧账号 state, 全部重新拉取)
       var subKey = ac ? ac.id : 'main'
       var sub = tab === 'gallery' ? h(GalleryPage, { key: subKey, close: props && props.close, acct: acctx })
@@ -1760,8 +2126,9 @@ window.__ModuleLoader__.load({
         : tab === 'accounts' ? h(AccountsPage, { close: props && props.close })
         : String(tab).indexOf('ext:') === 0
           ? h(ExtCardPage, {
-              key: String(tab).slice(4),
+              key: String(tab).slice(4) + '|' + subKey,   // 切账号即重挂（同其他子页）
               extId: String(tab).slice(4),
+              acct: acctx,                                // ★ 卡片据此可对当前账号读写
               title: (function () {
                 var hit = null
                 extTabs.forEach(function (x) { if (x.extId === String(tab).slice(4)) hit = x })
@@ -1787,8 +2154,47 @@ window.__ModuleLoader__.load({
         //   放在**同一个元素**上 —— sticky 会创建新的格式化上下文，导致滚动容器的
         //   scrollWidth 计算异常（看着溢出、实际判定为没溢出），于是滚不动。
         //   拆成两层：外层只管 sticky + 裁剪，内层只管横向滚动。
-        h('div', { style: { position: 'sticky', top: 0, zIndex: 30, background: 'transparent', overflow: 'hidden', marginBottom: 12 } },
-          h('div', { id: 'qqs-top-tabs', className: 'qqs-top-tabs', style: { display: 'flex', gap: 10, flexWrap: 'nowrap', alignItems: 'stretch', padding: '10px 4px 12px', overflowX: 'auto', overflowY: 'hidden', WebkitOverflowScrolling: 'touch', scrollbarWidth: 'none', width: '100%', boxSizing: 'border-box' } },
+        //   ⚠️ 外层必须**自己受宽度约束**（width/maxWidth/minWidth:0）——
+        //   否则它会被内容撑开，内层 width:100% 也跟着等于内容宽，永远不产生溢出。
+        h('div', { style: { position: 'sticky', top: 0, zIndex: 30, background: 'transparent', overflow: 'hidden', marginBottom: 12, width: '100%', maxWidth: '100%', minWidth: 0, boxSizing: 'border-box' } },
+          h('div', { id: 'qqs-top-tabs', className: 'qqs-top-tabs',
+            // ★ 2026-10-26：id 查不到（设置页可能在 Shadow DOM 里，document.getElementById 拿不到），
+            //   改用 React ref 直接抓元素，并把「鼠标按住拖拽」绑上 —— 桌面端之前只能靠滚轮。
+            ref: function (el) {
+              if (!el) return
+              try { window.__qqsTopTabs = el } catch (e) {}
+              if (el.__qqsDragBound) return
+              el.__qqsDragBound = true
+              var down = false, startX = 0, startLeft = 0, moved = false
+              el.addEventListener('mousedown', function (e) {
+                if (e.button !== 0) return
+                // 点在按钮上时不要立刻开始拖（否则点选页签会失效）
+                down = true; moved = false
+                startX = e.pageX; startLeft = el.scrollLeft
+              })
+              el.addEventListener('mousemove', function (e) {
+                if (!down) return
+                var dx = e.pageX - startX
+                if (Math.abs(dx) > 4) {
+                  moved = true
+                  el.style.cursor = 'grabbing'
+                  el.scrollLeft = startLeft - dx
+                  e.preventDefault()
+                }
+              })
+              var endDrag = function () {
+                if (!down) return
+                down = false
+                el.style.cursor = ''
+              }
+              el.addEventListener('mouseup', endDrag)
+              el.addEventListener('mouseleave', endDrag)
+              // 拖过之后拦截一次 click，避免"想滑动却误切页签"
+              el.addEventListener('click', function (e) {
+                if (moved) { moved = false; e.stopPropagation(); e.preventDefault() }
+              }, true)
+            },
+            style: { display: 'flex', gap: 10, flexWrap: 'nowrap', alignItems: 'stretch', padding: '10px 4px 12px', overflowX: 'auto', overflowY: 'hidden', WebkitOverflowScrolling: 'touch', scrollbarWidth: 'none', width: '100%', boxSizing: 'border-box', cursor: 'grab', userSelect: 'none' } },
           // 内置四页 + 扩展页签（2026-10-26）：扩展 tab 用青蓝色区分，放在最右边。
           // 容器从「四个 flex:1 平分」改成「按钮 flex:0 0 auto + 容器横向可滑」——
           // 否则扩展一多，按钮会被压成一条缝（这跟 .dk-tab 那套是同一个道理）。
@@ -2328,7 +2734,7 @@ var QQS_THEME_CSS = [
     //   · 群管理(发消息/审批入群/禁言) → 悬浮球点开成操作台
     var DOCK_CSS = "#qqs-dock-wrap{position:fixed;right:18px;bottom:190px;z-index:9997;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif}#qqs-dock-ball{width:52px;height:52px;border-radius:50%;background:linear-gradient(160deg,#7c6cf0,#5b4fd8);color:#fff;font-size:24px;line-height:52px;text-align:center;cursor:pointer;box-shadow:0 6px 20px rgba(90,70,220,.4);user-select:none;transition:transform .12s,box-shadow .12s;position:relative}#qqs-dock-ball:hover{transform:scale(1.06)}#qqs-dock-badge{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;border-radius:9px;background:#ff4d4f;color:#fff;font-size:11px;font-weight:700;line-height:18px;padding:0 4px;box-sizing:border-box;text-align:center;display:none}#qqs-dock-panel{position:fixed;right:18px;bottom:190px;z-index:9998;width:min(720px,94vw);max-height:68vh;display:none;flex-direction:column;background:#fff;border:1px solid #d9c6ff;border-radius:16px;box-shadow:0 12px 40px rgba(60,40,140,.25);overflow:hidden;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif}#qqs-dock-panel .dk-h{display:flex;align-items:center;gap:8px;padding:10px 14px;background:linear-gradient(90deg,#7c6cf01f,#7c6cf008);font-size:14px;font-weight:700;color:#4a3a9f;border-bottom:1px solid #efe8ff}#qqs-dock-panel .dk-b{padding:10px 14px;overflow:auto;font-size:13px;color:#1f2329}#qqs-dock-panel .dk-tab{display:flex;gap:4px;border-bottom:1px solid #eee;margin-bottom:10px}#qqs-dock-panel .dk-tab button{font:inherit;font-size:13px;padding:6px 14px;border:none;background:none;cursor:pointer;color:#666;border-bottom:2px solid transparent}#qqs-dock-panel .dk-tab button.on{color:#4a3a9f;font-weight:700;border-bottom-color:#7c6cf0}#qqs-dock-panel select.qqs-sel,#qqs-dock-panel input.qqs-txt,#qqs-dock-panel textarea.qqs-txt{font:inherit;color:#1f2329;background:#fff;border:1px solid #d0d5dd;border-radius:8px;padding:5px 8px;outline:none}#qqs-dock-panel .dk-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}#qqs-dock-panel .dk-btn{font:inherit;font-size:13px;padding:5px 12px;border-radius:8px;cursor:pointer;border:1px solid #d9c6ff;background:#f1ecff;color:#4a3a9f}#qqs-dock-panel .dk-btn.ok{background:#e6f7ec;color:#187a3d;border-color:#b8e6c8}#qqs-dock-panel .dk-btn.no{background:#fdeeee;color:#c23131;border-color:#f3c4c4}#qqs-dock-panel .dk-btn:disabled{opacity:.5;cursor:default}#qqs-dock-panel .dk-msg{color:#888;font-size:12px;padding:2px 0}#qqs-dock-panel .dk-list{max-height:34vh;overflow:auto;border:1px solid #f0ecff;border-radius:10px;padding:4px}#qqs-dock-panel .dk-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid #f5f2ff;flex-wrap:wrap;font-size:13px}#qqs-dock-panel .dk-item:last-child{border-bottom:none}#qqs-dock-panel .dk-empty{color:#aaa;text-align:center;padding:18px 0;font-size:12px}"
     // ── 💬 聊天视图样式(dock 追加段, 2026-09-07): QQ 风格气泡, 群友左(bot)右 ──
-    var DOCK_CSS2 = "#qqs-dock-panel .dk-chat-head{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 6px}#qqs-dock-panel .dk-chat-box{overflow-y:auto;overscroll-behavior:contain;background:#f5f6f8;border:1px solid #e6e8ec;border-radius:10px;padding:10px 12px;box-sizing:border-box;height:min(36vh,300px);min-height:140px;scroll-behavior:auto}#qqs-dock-panel .dk-chat-box::-webkit-scrollbar{width:6px}#qqs-dock-panel .dk-chat-box::-webkit-scrollbar-thumb{background:#d3d7dd;border-radius:3px}#qqs-dock-panel .dk-crow{display:flex;gap:8px;align-items:flex-start;margin:0 0 12px}#qqs-dock-panel .dk-crow.out{flex-direction:row-reverse}#qqs-dock-panel .dk-ava{width:32px;height:32px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;color:#fff;overflow:hidden;user-select:none;background:linear-gradient(150deg,#8fb3e8,#5f8fd9)}#qqs-dock-panel .dk-crow.out .dk-ava{background:linear-gradient(150deg,#5ec7f2,#3b8fe0)}#qqs-dock-panel .dk-cmain{display:flex;flex-direction:column;max-width:calc(100% - 40px);min-width:0}#qqs-dock-panel .dk-crow.in .dk-cmain{align-items:flex-start}#qqs-dock-panel .dk-crow.out .dk-cmain{align-items:flex-end}#qqs-dock-panel .dk-cmeta{font-size:11px;color:#9aa0a8;margin:0 6px 2px;max-width:100%;display:flex;align-items:center;gap:5px;flex-wrap:wrap}#qqs-dock-panel .dk-crow.out .dk-cmeta{flex-direction:row-reverse}#qqs-dock-panel .dk-cbubble{padding:7px 11px;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;box-shadow:0 1px 2px rgba(20,30,60,.06);max-width:100%}#qqs-dock-panel .dk-cbubble a.dk-link{color:#1a66d6;text-decoration:underline;word-break:break-all;cursor:pointer}#qqs-dock-panel .dk-crow.out .dk-cbubble a.dk-link{color:#eaf3ff}#qqs-dock-panel .dk-crow.in .dk-cbubble{background:#fff;border:1px solid #e3e6ea;color:#1f2329;border-radius:3px 10px 10px 10px}#qqs-dock-panel .dk-crow.out .dk-cbubble{background:linear-gradient(180deg,#69a6ff,#3d7df5);color:#fff;border-radius:10px 3px 10px 10px}#qqs-dock-panel .dk-img{display:block;max-width:min(230px,52vw);max-height:200px;border-radius:6px;margin:0 0 3px;object-fit:cover;cursor:zoom-in}#qqs-dock-panel .dk-audio{display:block;max-width:min(260px,60vw);width:100%;height:34px;margin:0 0 2px}#qqs-dock-panel .dk-file{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:6px 12px;border-radius:8px;background:#f0f6ff;border:1px solid #cfe0fa;color:#2b6bd8;font-size:13px;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#qqs-dock-panel .dk-file:hover{background:#e2edff}#qqs-dock-panel .dk-video{display:block;max-width:min(260px,60vw);max-height:180px;border-radius:6px;margin:0 0 2px}#qqs-dock-panel .dk-ctag{display:inline-block;font-size:10px;color:#5b8ff0;background:#eaf2ff;border:1px solid #d4e3fd;border-radius:8px;padding:0 6px}#qqs-dock-panel .dk-chat-top{text-align:center;color:#b0b4bb;font-size:11px;padding:2px 0 6px;user-select:none}#qqs-dock-panel .dk-chat-bottom{text-align:center;color:#c3c7cd;font-size:11px;padding:6px 0 0}#qqs-dock-panel .dk-composer{margin-top:8px;border:1px solid #e3e6ea;border-radius:10px;background:#fff;overflow:visible}#qqs-dock-panel .dk-composer textarea{width:100%;box-sizing:border-box;border:none;outline:none;resize:none;font:inherit;font-size:13px;color:#1f2329;background:transparent;padding:8px 10px 4px;line-height:1.5;max-height:120px}#qqs-dock-panel .dk-cbar{display:flex;align-items:center;gap:4px;padding:4px 8px 6px;flex-wrap:wrap}#qqs-dock-panel .dk-cbar .dk-btn{padding:3px 10px;font-size:12px;border-radius:7px}#qqs-dock-panel .dk-cbar .dk-send{background:linear-gradient(180deg,#69a6ff,#3d7df5);color:#fff;border:none;border-radius:8px;padding:5px 18px;font-size:13px;font-weight:600;cursor:pointer}#qqs-dock-panel .dk-cbar .dk-send:disabled{opacity:.5;cursor:default}#qqs-lightbox{position:fixed;inset:0;z-index:2147483000;background:rgba(8,10,18,.82);display:flex;align-items:center;justify-content:center;cursor:zoom-out}#qqs-lightbox img{max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 10px 60px rgba(0,0,0,.6)}#qqs-dock-panel .dk-composer{position:relative}#qqs-dock-panel .dk-at-pop{position:absolute;left:6px;bottom:calc(100% - 4px);z-index:30;min-width:200px;max-width:90%;max-height:190px;overflow-y:auto;background:#fff;border:1px solid #e0e4ea;border-radius:10px;box-shadow:0 8px 24px rgba(30,40,80,.16);padding:4px;display:none}#qqs-dock-panel .dk-at-item{display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:7px;cursor:pointer;font-size:12px;color:#1f2329;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#qqs-dock-panel .dk-at-item.on,#qqs-dock-panel .dk-at-item:hover{background:#eef3ff;color:#2b5fd0}#qqs-dock-panel .dk-at-empty{color:#aaa;font-size:12px;padding:6px 9px}#qqs-lightbox .lb-x{position:fixed;right:16px;top:10px;color:#fff;font-size:30px;cursor:pointer;line-height:1;padding:6px}#qqs-dock-panel.dk-full{left:0!important;top:0!important;right:0!important;bottom:0!important;width:100vw!important;max-width:100vw!important;height:100vh!important;max-height:100vh!important;border-radius:0;z-index:2147482000;display:flex;flex-direction:column}#qqs-dock-panel.dk-full .dk-h,#qqs-dock-panel.dk-full .dk-detect{flex:none}#qqs-dock-panel.dk-full .dk-b{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;padding:8px 14px 6px}#qqs-dock-panel.dk-full .dk-chat-wrap{display:flex;flex-direction:column;flex:1;min-height:0}#qqs-dock-panel.dk-full .dk-chat-head{flex:none}#qqs-dock-panel.dk-full .dk-chat-box{flex:1;height:auto!important;min-height:0!important;max-height:none!important;overflow-y:auto;overscroll-behavior:contain}#qqs-dock-panel.dk-full .dk-composer{flex:none;margin-top:6px}#qqs-dock-panel .dk-tab{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}#qqs-dock-panel .dk-tab::-webkit-scrollbar{display:none}#qqs-dock-panel .dk-tab button{white-space:nowrap;flex:0 0 auto}@media (max-width:560px){#qqs-dock-panel:not(.dk-full){left:8px!important;right:8px!important;width:auto!important;max-width:calc(100vw - 16px)!important;bottom:96px!important}#qqs-dock-panel .dk-h{font-size:13px;padding:8px 10px;gap:6px}#qqs-dock-panel .dk-b{padding:8px 10px;font-size:13px}#qqs-dock-panel .dk-tab button{font-size:12px;padding:7px 10px}#qqs-dock-panel .dk-btn{font-size:12px;padding:6px 10px}#qqs-dock-panel .dk-row{gap:6px;margin:5px 0}#qqs-dock-panel select.qqs-sel,#qqs-dock-panel input.qqs-txt,#qqs-dock-panel textarea.qqs-txt{padding:7px 9px;font-size:16px}#qqs-dock-panel .dk-list{max-height:46vh}#qqs-dock-panel .dk-item{padding:8px 6px;gap:6px}}@media (max-width:560px){#qqs-dock-panel.dk-full{border-radius:0}#qqs-dock-panel.dk-full .dk-b{padding-bottom:calc(8px + env(safe-area-inset-bottom,0px))}#qqs-dock-panel.dk-full .dk-tab{position:sticky;top:0;background:#fff;z-index:2}}@media (max-width:560px){#qqs-dock-ball{width:46px;height:46px;line-height:46px;font-size:21px}}#qqs-dock-panel .dk-chat-wrap{position:relative}#qqs-dock-panel .dk-jump-latest{display:none;position:absolute;right:12px;bottom:76px;z-index:6;align-items:center;gap:4px;padding:5px 13px;font-size:12px;font-weight:600;color:#fff;cursor:pointer;border:none;border-radius:15px;background:linear-gradient(180deg,#69a6ff,#3d7df5);box-shadow:0 3px 12px rgba(30,60,140,.32);transition:transform .12s,box-shadow .12s}#qqs-dock-panel .dk-jump-latest.on{display:inline-flex}#qqs-dock-panel .dk-jump-latest:hover{background:linear-gradient(180deg,#5c9bfa,#2f6fe6);box-shadow:0 4px 16px rgba(30,60,140,.4)}#qqs-dock-panel .dk-jump-latest:active{transform:scale(.95)}"
+    var DOCK_CSS2 = "#qqs-dock-panel .dk-chat-head{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 6px}#qqs-dock-panel .dk-chat-box{overflow-y:auto;overscroll-behavior:contain;background:#f5f6f8;border:1px solid #e6e8ec;border-radius:10px;padding:10px 12px;box-sizing:border-box;height:min(36vh,300px);min-height:140px;scroll-behavior:auto}#qqs-dock-panel .dk-chat-box::-webkit-scrollbar{width:6px}#qqs-dock-panel .dk-chat-box::-webkit-scrollbar-thumb{background:#d3d7dd;border-radius:3px}#qqs-dock-panel .dk-crow{display:flex;gap:8px;align-items:flex-start;margin:0 0 12px}#qqs-dock-panel .dk-crow.out{flex-direction:row-reverse}#qqs-dock-panel .dk-ava{width:32px;height:32px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;color:#fff;overflow:hidden;user-select:none;background:linear-gradient(150deg,#8fb3e8,#5f8fd9)}#qqs-dock-panel .dk-crow.out .dk-ava{background:linear-gradient(150deg,#5ec7f2,#3b8fe0)}#qqs-dock-panel .dk-cmain{display:flex;flex-direction:column;max-width:calc(100% - 40px);min-width:0}#qqs-dock-panel .dk-crow.in .dk-cmain{align-items:flex-start}#qqs-dock-panel .dk-crow.out .dk-cmain{align-items:flex-end}#qqs-dock-panel .dk-cmeta{font-size:11px;color:#9aa0a8;margin:0 6px 2px;max-width:100%;display:flex;align-items:center;gap:5px;flex-wrap:wrap}#qqs-dock-panel .dk-crow.out .dk-cmeta{flex-direction:row-reverse}#qqs-dock-panel .dk-cbubble{padding:7px 11px;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;box-shadow:0 1px 2px rgba(20,30,60,.06);max-width:100%}#qqs-dock-panel .dk-cbubble a.dk-link{color:#1a66d6;text-decoration:underline;word-break:break-all;cursor:pointer}#qqs-dock-panel .dk-crow.out .dk-cbubble a.dk-link{color:#eaf3ff}#qqs-dock-panel .dk-crow.in .dk-cbubble{background:#fff;border:1px solid #e3e6ea;color:#1f2329;border-radius:3px 10px 10px 10px}#qqs-dock-panel .dk-crow.out .dk-cbubble{background:linear-gradient(180deg,#69a6ff,#3d7df5);color:#fff;border-radius:10px 3px 10px 10px}#qqs-dock-panel .dk-img{display:block;max-width:min(230px,52vw);max-height:200px;border-radius:6px;margin:0 0 3px;object-fit:cover;cursor:zoom-in}#qqs-dock-panel .dk-audio{display:block;max-width:min(260px,60vw);width:100%;height:34px;margin:0 0 2px}#qqs-dock-panel .dk-file{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:6px 12px;border-radius:8px;background:#f0f6ff;border:1px solid #cfe0fa;color:#2b6bd8;font-size:13px;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#qqs-dock-panel .dk-file:hover{background:#e2edff}#qqs-dock-panel .dk-video{display:block;max-width:min(260px,60vw);max-height:180px;border-radius:6px;margin:0 0 2px}#qqs-dock-panel .dk-ctag{display:inline-block;font-size:10px;color:#5b8ff0;background:#eaf2ff;border:1px solid #d4e3fd;border-radius:8px;padding:0 6px}#qqs-dock-panel .dk-chat-top{text-align:center;color:#b0b4bb;font-size:11px;padding:2px 0 6px;user-select:none}#qqs-dock-panel .dk-chat-bottom{text-align:center;color:#c3c7cd;font-size:11px;padding:6px 0 0}#qqs-dock-panel .dk-composer{margin-top:8px;border:1px solid #e3e6ea;border-radius:10px;background:#fff;overflow:visible}#qqs-dock-panel .dk-composer textarea{width:100%;box-sizing:border-box;border:none;outline:none;resize:none;font:inherit;font-size:13px;color:#1f2329;background:transparent;padding:8px 10px 4px;line-height:1.5;max-height:120px}#qqs-dock-panel .dk-cbar{display:flex;align-items:center;gap:4px;padding:4px 8px 6px;flex-wrap:wrap}#qqs-dock-panel .dk-cbar .dk-btn{padding:3px 10px;font-size:12px;border-radius:7px}#qqs-dock-panel .dk-cbar .dk-send{background:linear-gradient(180deg,#69a6ff,#3d7df5);color:#fff;border:none;border-radius:8px;padding:5px 18px;font-size:13px;font-weight:600;cursor:pointer}#qqs-dock-panel .dk-cbar .dk-send:disabled{opacity:.5;cursor:default}#qqs-lightbox{position:fixed;inset:0;z-index:2147483000;background:rgba(8,10,18,.82);display:flex;align-items:center;justify-content:center;cursor:zoom-out}#qqs-lightbox img{max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 10px 60px rgba(0,0,0,.6)}#qqs-dock-panel .dk-composer{position:relative}#qqs-dock-panel .dk-at-pop{position:absolute;left:6px;bottom:calc(100% - 4px);z-index:30;min-width:200px;max-width:90%;max-height:190px;overflow-y:auto;background:#fff;border:1px solid #e0e4ea;border-radius:10px;box-shadow:0 8px 24px rgba(30,40,80,.16);padding:4px;display:none}#qqs-dock-panel .dk-at-item{display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:7px;cursor:pointer;font-size:12px;color:#1f2329;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#qqs-dock-panel .dk-at-item.on,#qqs-dock-panel .dk-at-item:hover{background:#eef3ff;color:#2b5fd0}#qqs-dock-panel .dk-at-empty{color:#aaa;font-size:12px;padding:6px 9px}#qqs-lightbox .lb-x{position:fixed;right:16px;top:10px;color:#fff;font-size:30px;cursor:pointer;line-height:1;padding:6px}#qqs-dock-panel.dk-full{left:0!important;top:0!important;right:0!important;bottom:0!important;width:100vw!important;max-width:100vw!important;height:100vh!important;max-height:100vh!important;border-radius:0;z-index:2147482000;display:flex;flex-direction:column}#qqs-dock-panel.dk-full .dk-h,#qqs-dock-panel.dk-full .dk-detect{flex:none}#qqs-dock-panel.dk-full .dk-b{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;padding:8px 14px 6px}#qqs-dock-panel.dk-full .dk-chat-wrap{display:flex;flex-direction:column;flex:1;min-height:0}#qqs-dock-panel.dk-full .dk-chat-head{flex:none}#qqs-dock-panel.dk-full .dk-chat-box{flex:1;height:auto!important;min-height:0!important;max-height:none!important;overflow-y:auto;overscroll-behavior:contain}#qqs-dock-panel.dk-full .dk-composer{flex:none;margin-top:6px}#qqs-dock-panel .dk-tab{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}#qqs-dock-panel .dk-tab::-webkit-scrollbar{display:none}#qqs-dock-panel .dk-tab button{white-space:nowrap;flex:0 0 auto}@media (max-width:560px){#qqs-dock-panel:not(.dk-full){left:8px!important;right:8px!important;width:auto!important;max-width:calc(100vw - 16px)!important;bottom:96px!important}#qqs-dock-panel .dk-h{font-size:13px;padding:8px 10px;gap:6px}#qqs-dock-panel .dk-b{padding:8px 10px;font-size:13px}#qqs-dock-panel .dk-tab button{font-size:12px;padding:7px 10px}#qqs-dock-panel .dk-btn{font-size:12px;padding:6px 10px}#qqs-dock-panel .dk-row{gap:6px;margin:5px 0}#qqs-dock-panel select.qqs-sel,#qqs-dock-panel input.qqs-txt,#qqs-dock-panel textarea.qqs-txt{padding:7px 9px;font-size:16px}#qqs-dock-panel .dk-list{max-height:46vh}#qqs-dock-panel .dk-item{padding:8px 6px;gap:6px}}@media (max-width:560px){#qqs-dock-panel.dk-full{border-radius:0}#qqs-dock-panel.dk-full .dk-b{padding-bottom:calc(8px + env(safe-area-inset-bottom,0px))}#qqs-dock-panel.dk-full .dk-tab{position:relative;background:#fff;z-index:2}}@media (max-width:560px){#qqs-dock-ball{width:46px;height:46px;line-height:46px;font-size:21px}}#qqs-dock-panel .dk-chat-wrap{position:relative}#qqs-dock-panel .dk-jump-latest{display:none;position:absolute;right:12px;bottom:76px;z-index:6;align-items:center;gap:4px;padding:5px 13px;font-size:12px;font-weight:600;color:#fff;cursor:pointer;border:none;border-radius:15px;background:linear-gradient(180deg,#69a6ff,#3d7df5);box-shadow:0 3px 12px rgba(30,60,140,.32);transition:transform .12s,box-shadow .12s}#qqs-dock-panel .dk-jump-latest.on{display:inline-flex}#qqs-dock-panel .dk-jump-latest:hover{background:linear-gradient(180deg,#5c9bfa,#2f6fe6);box-shadow:0 4px 16px rgba(30,60,140,.4)}#qqs-dock-panel .dk-jump-latest:active{transform:scale(.95)}"
     function ensureDockCss2() { try { if (!document.getElementById('qqs-dock-css2')) { var st = document.createElement('style'); st.id = 'qqs-dock-css2'; st.textContent = DOCK_CSS2; document.head.appendChild(st) } } catch (e) {} };
     function ensureDockCss() { try { if (!document.getElementById('qqs-dock-css')) { var st = document.createElement('style'); st.id = 'qqs-dock-css'; st.textContent = DOCK_CSS; document.head.appendChild(st) } } catch (e) {} }
     function startQqDock(sessionsSvc) {
@@ -2555,6 +2961,9 @@ var QQS_THEME_CSS = [
 
       // ── 面板状态(每个实例独立保存, 切回不丢) ──
       var state = { ns: '', accts: [], gid: '', groups: [], tab: 'chat', sendScope: 'group', sendTo: '', sendName: '', sendText: '', insertCtx: true, targetQ: '', c2cs: [], joins: null, mutes: null, members: null, muteSecs: '60', bindGid: '', bindName: '', msg: '', busy: '', wantPeer: null, lookedUp: false, detected: null, detectedHit: null, chatItems: [], chatMore: false, chatBusy: '', chatErr: '', chatOldest: 0, chatText: '', chatIns: true, outMode: '', outRev: undefined, bpEvents: [], bpSel: null, bpDraft: null, bpExt: null, bpExtBusy: '', bpReq: '', bpReqHint: '', bpSrcText: null, bpSrcPath: '', rosterSel: {}, rosterScope: 'all', rosterQ: '', hubSid: '', hubRev: undefined, hubBusy: '', hubMsg: '', gaEnabled: false, gaPoll: false, gaPollWake: true, gaHubNotify: true, gaNotifyGroup: true, gaInterval: 5, gaMinCount: 1, gaMsg: '', gaBusy: '', bcDraft: null, bcTasks: null, cardMd: '', cardBtns: '', cardGid: '', cardBusy: '', cardQ: '', tgGroups: [], tgCur: '', hammerSub: 'mute', arOn: false, arMode: 'keep', arKws: '', arKinds: [], arMute: 0, arDry: false, arMsg: '', qunLogged: null, qunUin: '', qunGroups: [], qunGc: '', qunKw: '', qunMembers: [], qunCount: 0, qunQr: false, qunMsg: '', qunBusy: false, qunLoading: false }
+      // ★ 2026-10-27：把 state 暴露到 window —— 模块级的 mountDockCard 拿不到这个闭包变量，
+      //   扩展卡片要读当前 ns / gid 只能从这里取。
+      try { window.__qqsDockState = state } catch (e) { /* ignore */ }
       // 🗂 自定义目标分组(仿 QQ 分组): 2026-09-12 起**host 持久化**({dataRoot}/.qqbot/target-groups.json),
       // localStorage 只当秒开缓存 —— 这样 **AI 与主人共用同一份分组**(agent 侧 broadcast_send 可直接写分组名群发),
       // 顺带修掉"换个浏览器分组就没了"的老毛病。
@@ -4166,6 +4575,16 @@ var QQS_THEME_CSS = [
       }
       function paintBody() {
         if (!panel || !open) return
+        // 让模块级的 ensureDockExtTabs 能触发重绘（它拿不到这个闭包）
+        try { window.__qqsPaintBody = paintBody } catch (e) { /* ignore */ }
+        // ★ 2026-10-27 修（主人问：上方明明已命中当前会话，为什么扩展还拿不到）：
+        //   `state` 是**每次渲染新建的对象** —— 只在初始化时赋一次 window.__qqsDockState 指针，
+        //   后续 render 换了新 state，window 上那个还指着旧对象（detectedHit 永远是 null）。
+        //   每次都刷新指针，扩展卡片才能读到当前的 detectedHit / ns / gid。
+        try { window.__qqsDockState = state } catch (e) { /* ignore */ }
+        // ★ 2026-10-27：每次重绘都确保滚轮/拖拽监听已装（幂等）。
+        //   不能只靠"挂扩展卡片时"装 —— 那样不开扩展页签就永远是死的。
+        try { extUiEnsureCss() } catch (e) { /* ignore */ }
         var b = panel.querySelector('.dk-b')
         if (!b) return
         var groupOpts = state.groups.map(function (g) {
@@ -4179,6 +4598,7 @@ var QQS_THEME_CSS = [
           var label = c.name ? (c.name + ' (' + tail + ')') : ('私聊 ' + tail)
           return '<option value="' + esc(c.id) + '"' + (c.id === state.sendTo ? ' selected' : '') + '>' + esc(label) + '</option>'
         }).join('')
+        ensureDockExtTabs()
         var tabs = '<div class="dk-tab">'
           + '<button data-t="roster" class="' + (state.tab === 'roster' ? 'on' : '') + '">📇 群组管理</button>'
           + '<button data-t="chat" class="' + (state.tab === 'chat' ? 'on' : '') + '">💬 聊天</button>'
@@ -4187,6 +4607,10 @@ var QQS_THEME_CSS = [
           + '<button data-t="out" class="' + (state.tab === 'out' ? 'on' : '') + '">⚙️ 出站</button>'
           + '<button data-t="send" class="' + (['send','broadcast','bp','card'].indexOf(state.tab) >= 0 ? 'on' : '') + '">📤 群发</button>'
           + '<button data-t="session" class="' + (state.tab === 'session' ? 'on' : '') + '">⚙ 单会话设置</button>'
+          // ★ 2026-10-26 扩展页签（slot=dock）：只收数据根下的 ui/<id>/，每个实例各一份
+          + (window.__qqsDockTabs || []).map(function (x) {
+              return '<button data-t="ext:' + esc(x.extId) + '" class="' + (state.tab === 'ext:' + x.extId ? 'on' : '') + '">' + esc(x.title || x.extId) + '</button>'
+            }).join('')
           + '</div>'
         var body = tabs
         var status = state.msg ? '<div class="dk-msg" style="color:#2f9e44;margin:4px 0">' + esc(state.msg) + '</div>' : ''
@@ -4369,6 +4793,10 @@ var QQS_THEME_CSS = [
           body += '详细主动=聊天行为与适配主动完全一样, 但额外把 AI 的工具调用(🔧 工具调用)与工具结果也推到 QQ —— 能在 QQ 上看她正在干什么; 消息会明显变多, 看完记得切回适配主动。'
           body += '被动=始终以「回复你那条」发出, 连发约4~5条后会被QQ吞掉。完全不出站=本机静默, 不向QQ发任何回复(AI 可用工具随时切回)。本开关对纯web(没绑QQ)的会话不生效。</div>'
           body += '<span class="dk-msg" id="dk-out-hint" style="color:#2f9e44;margin:4px 0"></span>'
+        } else if (String(state.tab || '').indexOf('ext:') === 0) {
+          // ★ 2026-10-26 扩展页签（slot=dock）：把卡片用 Shadow DOM 挂进面板，
+          //   并带上当前实例/会话上下文（dock.* 那套数据能力就靠它）。
+          body += '<div id="qqs-dock-ext-host" style="padding:2px 0"></div>'
         } else if (state.tab === 'session') {
           // ⚙ 单会话设置(2026-09-13 主人定): 放"每个会话单独生效"的设置。
           // 次级标签: 🧠 智能回复 / 📄 空白样板(留作以后加新设置的模板)。
@@ -4697,6 +5125,13 @@ var QQS_THEME_CSS = [
           + '<input class="qqs-txt" id="dk-bindname" placeholder="备注(可选)" value="' + esc(state.bindName) + '" style="width:110px">'
           + '<button class="dk-btn" id="dk-bind">绑定</button></div>'
         b.innerHTML = body
+        // ★ 2026-10-26：扩展页签的卡片在 DOM 写入之后才挂（Shadow DOM 需要真实容器）
+        if (String(state.tab || '').indexOf('ext:') === 0) {
+          try {
+            var extHost = b.querySelector('#qqs-dock-ext-host')
+            if (extHost) mountDockCard(extHost, String(state.tab).slice(4))
+          } catch (e) { /* 扩展崩了不该影响面板 */ }
+        }
         bindBodyEvents()
         bindPanelDrag()
         if (state.tab === 'send') applyTargetFilter(panel, state)
@@ -7116,14 +7551,36 @@ var QQS_THEME_CSS = [
                     loading: 'lazy',
                     className: 'qqs-mk-cover',
                     onError: function (e) {
+                      // ★ 2026-10-26：封面图原来只有 jsdelivr → gh-proxy 两级，中间挂一个就白板。
+                      //   改成四级降级链，全失败才隐藏（别破版）：
+                      //     jsdelivr → gh-proxy → ghproxy.net → raw.githubusercontent.com
+                      //   用 data-tries 记进度；img 不重渲染就不会丢这个属性。
                       try {
                         var el = e.target;
                         var cur = String(el.src || '');
-                        if (cur.indexOf('cdn.jsdelivr.net') >= 0) {
-                          // 换 gh-proxy 再试一次
-                          el.src = cur.replace('https://cdn.jsdelivr.net/gh/', 'https://gh-proxy.com/https://raw.githubusercontent.com/');
+                        var n = parseInt(el.getAttribute('data-tries') || '0', 10);
+                        var next = '';
+                        if (cur.indexOf('cdn.jsdelivr.net/gh/') >= 0) {
+                          // owner/repo@branch/path → 还原成 raw 地址
+                          var tail = cur.split('cdn.jsdelivr.net/gh/')[1] || '';
+                          var m = tail.match(/^([^@]+)@([^/]+)\/(.*)$/);
+                          if (m) {
+                            var raw = 'https://raw.githubusercontent.com/' + m[1] + '/' + m[2] + '/' + m[3];
+                            next = n === 0 ? ('https://gh-proxy.com/' + raw)
+                                 : n === 1 ? ('https://ghproxy.net/' + raw)
+                                 : raw;
+                          }
+                        } else if (cur.indexOf('gh-proxy.com/') >= 0) {
+                          var r2 = cur.replace('https://gh-proxy.com/', '');
+                          next = n <= 1 ? ('https://ghproxy.net/' + r2) : r2;
+                        } else if (cur.indexOf('ghproxy.net/') >= 0) {
+                          next = cur.replace('https://ghproxy.net/', '');
+                        }
+                        if (next && n < 3) {
+                          el.setAttribute('data-tries', String(n + 1));
+                          el.src = next;
                         } else {
-                          el.style.display = 'none';   // 都失败就藏掉，别破版
+                          el.style.display = 'none';   // 四个源都不通 → 藏掉，别破版
                         }
                       } catch (x) {}
                     },

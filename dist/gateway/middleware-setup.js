@@ -45,6 +45,15 @@ pluginCtx) {
         g.__qqbotReloaders ||= new Map();
         const dr = manager.dataRoot || '';
         g.__qqbotReloaders.set(dr, () => manager.reloadAllChannelTools());
+        // ★ 2026-10-27：把 manager 本身也登记 —— 设置面板的扩展 UI 卡片要「往当前会话
+        //   静默注入一条消息（不唤醒 AI）」，那就得能按 peer 找到该会话的 agent。
+        //   settings-host 是旁路桥、拿不到 manager，只能从这里取。
+        try {
+            const gm = globalThis;
+            gm.__qqbotManagers ||= new Map();
+            gm.__qqbotManagers.set(dr, manager);
+        }
+        catch { /* ignore */ }
     }
     catch { /* 挂不上不影响主流程 */ }
     // 0. 用户扩展命令(P4.1): 加载插件包外扩展目录的命令, 并入下方 cmdList/slash,
@@ -78,7 +87,8 @@ pluginCtx) {
     };
     await rebuildCommandTable();
     // 注册给热重载入口：工具热刷时顺带重扫扩展命令（解耦见 features/ext-reload.ts）
-    registerExtCommandReloader(rebuildCommandTable);
+    // ★ 2026-10-27：按本实例的 dataRoot 注册（多实例各存各的，不再互相覆盖）
+    registerExtCommandReloader(dataRootOf(config), rebuildCommandTable);
     /** 斜杠开头且命中真实命令(含 stop/bot-stop)→ 返回命令名小写; 未知命令/纯文本 → null(放行) */
     const knownCmdName = (content) => {
         const t = String(content ?? '').trim();

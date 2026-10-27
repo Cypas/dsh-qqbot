@@ -297,6 +297,8 @@ export interface ExtCapabilities {
      *    所以本来就是你的权利 —— 但别把它转手给不信任的代码。
      */
     kernel: unknown;
+    /** 注册自己的 HTTP 路由（2026-10-26）—— 让扩展用自有存储 + 自己的 UI 卡片 */
+    registerRoute?: (method: string, path: string, handler: (c: unknown) => unknown, idHint?: string) => boolean;
     /**
      * ★ **入站操控**（见 {@link ExtInboundCaps}）：**只有入站扩展（第五套）手里有值** ——
      * 只有它在"一条消息正在进站"的时刻跑。别的四套拿它会是 undefined，这不是缺失，是语义。

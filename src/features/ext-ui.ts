@@ -58,12 +58,12 @@ export interface ExtUiInfo {
 }
 
 /** 解析 card.html 顶部的 `<!-- qqbot-ui: {...} -->` */
-function parseMeta(html: string): { slot?: string; title?: string; order?: number } {
+function parseMeta(html: string): { id?: string; slot?: string; title?: string; order?: number } {
   try {
     const head = html.slice(0, 2048);              // 只看前 2KB
     const m = head.match(/<!--\s*qqbot-ui:\s*(\{[\s\S]*?\})\s*-->/);
     if (!m) return {};
-    const j = JSON.parse(m[1] ?? '{}') as { slot?: string; title?: string; order?: number };
+    const j = JSON.parse(m[1] ?? "{}") as { id?: string; slot?: string; title?: string; order?: number };
     return j && typeof j === 'object' ? j : {};
   } catch {
     return {};
@@ -115,18 +115,34 @@ function scanOneUiRoot(
     const orderNum = Number(meta.order);
     const files = EXT_UI_FILES.filter((f) => existsSync(join(dir, f)));
 
+    // ★ 2026-10-26：允许元信息里声明 id，覆盖目录名。
+    //   为什么需要：同一个逻辑扩展的两张卡片 —— settings 那张放 profile 级、dock 那张放数据根 ——
+    //   目录不同，但必须共用同一份配置 id；否则 getConfig() 会读到两份互不相通的配置。
+    const declaredId = String((meta as { id?: string }).id ?? '').trim();
+    const extIdFinal = EXT_ID_RE.test(declaredId) ? declaredId : extId;
+
     out.push({
-      extId,
+      extId: extIdFinal,
       dir,
       from,
       ...(pack ? { pack } : {}),
       slot,
-      title: String(meta.title ?? '').trim() || extId,
+      title: String(meta.title ?? '').trim() || extIdFinal,
       order: Number.isFinite(orderNum) ? orderNum : 100,
       files,
     });
   }
 }
+
+/**
+ * 扫描结果短缓存（2026-10-26）。
+ *
+ * 为什么需要：面板一次渲染要发 1 次 /ext-ui/list + 最多 3 次 /ext-ui/file，
+ * 而 readExtUiFile 内部也要调 listExtUi —— 等于同一次渲染把目录扫了 4 遍。
+ * 目录内容不会在 3 秒内变，缓存一下省掉 3/4 的 IO（这是"加载变慢"的直接原因之一）。
+ */
+let _uiCache: { key: string; at: number; list: ExtUiInfo[] } | null = null;
+const UI_CACHE_MS = 3000;
 
 /**
  * 列出所有扩展 UI 卡片。任何异常都安全跳过，绝不抛。
@@ -135,12 +151,21 @@ function scanOneUiRoot(
  * @param profileRoot  DSH profile 根（全 profile 一份）→ 只收 slot=settings
  */
 export function listExtUi(dataRoot: string, profileRoot?: string): ExtUiInfo[] {
+  const cacheKey = String(dataRoot || '') + '|' + String(profileRoot || '');
+  const now = Date.now();
+  if (_uiCache && _uiCache.key === cacheKey && now - _uiCache.at < UI_CACHE_MS) {
+    return _uiCache.list;
+  }
+
   const out: ExtUiInfo[] = [];
   const seen = new Set<string>();
 
   const push = (info: ExtUiInfo) => {
-    if (seen.has(info.extId)) return;              // 同名先到先得
-    seen.add(info.extId);
+    // ★ 2026-10-26：按**目录**去重，不是按 extId。
+    //   同一个 extId（如 demo）可以有两张卡：settings 那张在 profile、dock 那张在数据根，
+    //   按 extId 去重会把第二个直接吃掉。
+    if (seen.has(info.dir)) return;
+    seen.add(info.dir);
     out.push(info);
   };
 
@@ -175,6 +200,7 @@ export function listExtUi(dataRoot: string, profileRoot?: string): ExtUiInfo[] {
   }
 
   out.sort((a, b) => a.order - b.order || a.extId.localeCompare(b.extId));
+  _uiCache = { key: cacheKey, at: now, list: out };
   return out;
 }
 
@@ -188,23 +214,23 @@ export interface ExtUiFileResult {
 /**
  * 读一个扩展 UI 文件。
  *
- * 三重防护：
- *   ① extId 白名单正则 + 必须是 listExtUi 里真实存在的
- *   ② fileName 只允许 card.html / card.css / card.js
- *   ③ 拼完 resolve 再校验仍在所属目录内（防 `..` 穿越）
+ * @param slotHint 可选。同一个扩展 id 可能在两个源各有一张卡（settings 在 profile、dock 在数据根），
+ *                 带上 slot 才能取到对的那份文件。不传则取第一个匹配。
  */
 export function readExtUiFile(
   dataRoot: string,
   profileRoot: string | undefined,
   extId: string,
   fileName: string,
+  slotHint?: string,
 ): ExtUiFileResult {
   if (!EXT_ID_RE.test(String(extId ?? ''))) return { ok: false, reason: 'extId 不合法' };
   if (!(EXT_UI_FILES as readonly string[]).includes(fileName)) {
     return { ok: false, reason: '只允许 card.html / card.css / card.js' };
   }
 
-  const hit = listExtUi(dataRoot, profileRoot).find((x) => x.extId === extId);
+  const all = listExtUi(dataRoot, profileRoot).filter((x) => x.extId === extId);
+  const hit = (slotHint ? all.find((x) => x.slot === slotHint) : undefined) ?? all[0];
   if (!hit) return { ok: false, reason: '没有这个扩展 UI（没扫到 card.html，或 slot 放错了源）' };
 
   const target = resolve(hit.dir, fileName);

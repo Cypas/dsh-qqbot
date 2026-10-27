@@ -35,10 +35,8 @@ export interface ExtUiFileResult {
 /**
  * 读一个扩展 UI 文件。
  *
- * 三重防护：
- *   ① extId 白名单正则 + 必须是 listExtUi 里真实存在的
- *   ② fileName 只允许 card.html / card.css / card.js
- *   ③ 拼完 resolve 再校验仍在所属目录内（防 `..` 穿越）
+ * @param slotHint 可选。同一个扩展 id 可能在两个源各有一张卡（settings 在 profile、dock 在数据根），
+ *                 带上 slot 才能取到对的那份文件。不传则取第一个匹配。
  */
-export declare function readExtUiFile(dataRoot: string, profileRoot: string | undefined, extId: string, fileName: string): ExtUiFileResult;
+export declare function readExtUiFile(dataRoot: string, profileRoot: string | undefined, extId: string, fileName: string, slotHint?: string): ExtUiFileResult;
 //# sourceMappingURL=ext-ui.d.ts.map

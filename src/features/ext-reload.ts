@@ -22,12 +22,31 @@ export interface ExtCommandReloadResult {
   names: string[];
 }
 
-/** 由 middleware-setup 注册：重扫扩展目录并重建命令表（含基础命令） */
-let reloader: (() => Promise<ExtCommandReloadResult>) | undefined;
+/**
+ * 由 middleware-setup 注册：重扫扩展目录并重建命令表（含基础命令）
+ *
+ * ★★ 2026-10-27 修（主人实测：3 号机敲 /tools-reload，日志却记在 2 号机名下）：
+ *   原来是**模块级单例** `let reloader`，两个实例各 apply 一次 → 后 apply 的覆盖前一个
+ *   ⇒ 任何实例执行热刷，实际重载的都是"最后注册的那个实例"的命令表。
+ *   这是维护手册 §11.24「跨模块实例可见的状态绝不能存模块级变量」的同一个坑。
+ *   改成按 dataRoot 分开存，各刷各的。
+ */
+const reloaders = new Map<string, () => Promise<ExtCommandReloadResult>>();
+
+/** 归一化 dataRoot 作 key（Windows 大小写/斜杠不敏感） */
+function rlKey(dataRoot: string | undefined): string {
+  return String(dataRoot || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+}
 
 /** 注册/注销重建器（注销传 undefined；插件重载时调用方会覆盖为新的） */
-export function registerExtCommandReloader(fn: (() => Promise<ExtCommandReloadResult>) | undefined): void {
-  reloader = fn;
+export function registerExtCommandReloader(
+  dataRoot: string | undefined,
+  fn: (() => Promise<ExtCommandReloadResult>) | undefined,
+): void {
+  const k = rlKey(dataRoot);
+  if (!k) return;
+  if (fn) reloaders.set(k, fn);
+  else reloaders.delete(k);
 }
 
 /**
@@ -35,10 +54,15 @@ export function registerExtCommandReloader(fn: (() => Promise<ExtCommandReloadRe
  * 返回 `{ error }` 表示"没装成"（比如插件还没启动完），由调用方决定怎么提示 —— 不抛错，
  * 因为热刷的主职是刷工具，命令刷不动也不该把整次热刷弄失败。
  */
-export async function reloadExtCommands(): Promise<ExtCommandReloadResult | { error: string }> {
-  if (!reloader) return { error: '扩展命令表尚未注册(插件还没完成启动?)' };
+export async function reloadExtCommands(dataRoot?: string): Promise<ExtCommandReloadResult | { error: string }> {
+  const k = rlKey(dataRoot);
+  // 不传 dataRoot 时退回"唯一那个"（单实例场景仍能工作）
+  const fn = k ? reloaders.get(k) : (reloaders.size === 1 ? Array.from(reloaders.values())[0] : undefined);
+  if (!fn) {
+    return { error: `扩展命令表尚未注册(插件还没完成启动? dataRoot=${k || '(未传)'}, 已注册 ${reloaders.size} 个)` };
+  }
   try {
-    return await reloader();
+    return await fn();
   } catch (err) {
     return { error: `扩展命令重载失败: ${err instanceof Error ? err.message : String(err)}` };
   }

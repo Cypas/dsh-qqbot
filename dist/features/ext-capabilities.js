@@ -390,6 +390,44 @@ export function makeExtCaps(deps) {
         },
         // ── 内核句柄（遥控器）────────────────────────────────────────────
         kernel: deps.kernel,
+        /**
+         * 注册自己的 HTTP 路由（2026-10-26）
+         *
+         * 为什么需要：扩展想用自己的存储（SQLite / 自有 json / 任意目录），
+         * 就得有办法把数据交给自己的 UI 卡片。卡片跑在浏览器里，只能走 HTTP。
+         *
+         * 用法（hooks / tools 里）：
+         *   env.registerRoute('GET', '/rows', async ({ query }) => myDb.all(...));
+         *   env.registerRoute('POST', '/add', async ({ body }) => { ...; return { ok: true }; });
+         *
+         * 卡片里：
+         *   qqbotExt.api('/rows').then(r => r.data);
+         *
+         * 实现说明：
+         *   · 实际请求走 /api/ext/dispatch?id=<extId>&p=<path>，由 settings-host 派发；
+         *   · 返回 { ok:false, ... } 原样透传，其它值包成 { ok:true, data }；
+         *   · method 传 '*' 表示任意方法都收；
+         *   · 注册表放 globalThis.__qqbotExtRoutes —— settings-host 与扩展是两张模块图，
+         *     只有全局变量能跨过去。
+         */
+        registerRoute: (method, path, handler, idHint) => {
+            try {
+                const g = globalThis;
+                if (!g.__qqbotExtRoutes)
+                    g.__qqbotExtRoutes = new Map();
+                // extId 优先用能力包里的（若上游填了），否则用扩展自己传的 idHint
+                const extId = String(deps.extId || idHint || '').trim();
+                if (!extId)
+                    return false;
+                const m = String(method || 'GET').toUpperCase();
+                const p = String(path || '/').trim() || '/';
+                g.__qqbotExtRoutes.set(extId + '|' + m + '|' + p, handler);
+                return true;
+            }
+            catch {
+                return false;
+            }
+        },
         // ── 入站操控（只有"手上有消息"的那一套会给值）────────────────────
         //    2026-10-12 主人定：这一组也要进能力包 —— 契约是「一套包、五套扩展」，
         //    不能只写公共部分、把入站那一块留在包外面。

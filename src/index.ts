@@ -46,6 +46,79 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
 
+  // ── 扩展 UI 自动铺设（2026-10-27 主人要求）─────────────────────────────
+  //   为什么要在启动时做：
+  //     · slot=settings 的卡片必须落在 {PROFILE_ROOT}/.qqbot-extensions/ui/
+  //     · slot=dock 的卡片必须落在 {dataRoot}/.qqbot-extensions/ui/
+  //   但作者/示例不该手动往这两处复制。这里把两件事自动做掉：
+  //     ① 插件自带的 examples/ext-ui/<name>/{settings,dock}  → 铺到两个源
+  //     ② 已装扩展包 extension-packs/<pack>/ui/ 里 slot=settings → 铺到 profile
+  //   **只补不改**：目标已存在就跳过，绝不动用户改过的内容。
+  //   任何异常都吞掉 —— 铺 UI 失败不该影响插件启动。
+  try {
+    const { installExtUi } = await import('./features/ext-ui-seed.js');
+    const { dataRootOf } = await import('./gateway/data-root.js');
+    const { fileURLToPath } = await import('node:url');
+    const dr = dataRootOf(config);
+    // ★ 2026-10-27 修：不能只读环境变量 —— 这段代码在 apply **最开头**跑，
+    //   而 DSH_PROFILE_DIR 是后面 profileContext 那段才回写的，此刻还是空。
+    //   所以直接从宿主服务取，取不到再退环境变量。
+    let pr = String(process.env.DSH_PROFILE_DIR || process.env.DSH_PROFILE_ROOT || '').trim();
+    if (!pr) {
+      try {
+        const pc = (ctx as unknown as { get?: (n: string) => unknown }).get?.('profileContext') as
+          | { name?: string; dir?: string; root?: string; path?: string }
+          | undefined;
+        pr = String(pc?.dir || pc?.root || pc?.path || '').trim();
+      } catch { /* 老宿没有这个服务 */ }
+    }
+    let examplesDir = '';
+    try {
+      examplesDir = fileURLToPath(new URL('../examples/ext-ui', import.meta.url));
+    } catch { examplesDir = ''; }
+    // 收集其他实例的数据根 —— 只取前几个（主人要求：铺前 2 个实例即可，
+    // 用户可能建几十个实例，全铺太铺张）。来源是设置页自己落盘的
+    // ~/.dsh/qqbot-settings/<ns>.json（里面有各实例的 cwd）。
+    const extras: string[] = [];
+    try {
+      const { readdirSync, readFileSync, existsSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { homedir } = await import('node:os');
+      // ★ 2026-10-27 修（主人指出）：设置按 **profile 分层**！
+      //   真源是 ~/.dsh/qqbot-settings/<profileName>/<ns>.json，
+      //   根目录下那几个 *.json 是旧版遗留，读了会拿到过期的 cwd/appId。
+      //   （实测：根目录 im-qqbot-3.json 的 cwd=温柔鲸鱼娘、appId=1905554998，
+      //     而 web/ 下那份才是 cwd=测试客户端、appId=1905708994 —— 面板显示后者。）
+      const { basename: baseNameOf } = await import('node:path');
+      const profileName = pr ? baseNameOf(pr) : '';
+      // ★ 多 profile 隔离（维护手册有写）：每个 profile 的插件只读**自己那份**配置，
+      //   web 读 qqbot-settings/web/、desktop 读 qqbot-settings/desktop/，
+      //   第三方桌面版读它自己的 profile 名。
+      //   拿不到 profile 名时**不读任何额外实例** —— 宁可少铺，也不要跨 profile 乱读
+      //   （根目录下那几个 *.json 是旧版遗留，内容可能是过期的）。
+      const settingsDir = profileName ? join(homedir(), '.dsh', 'qqbot-settings', profileName) : '';
+      if (settingsDir && existsSync(settingsDir)) {
+        const files = readdirSync(settingsDir).filter((f) => f.endsWith('.json')).slice(0, 6);
+        for (const f of files) {
+          try {
+            const j = JSON.parse(readFileSync(join(settingsDir, f), 'utf8')) as { cwd?: string; dataRoot?: string };
+            if (j?.dataRoot) extras.push(String(j.dataRoot));
+            else if (j?.cwd) extras.push(join(String(j.cwd), 'dshqqbot'));
+          } catch { /* 单个文件坏了不影响其他 */ }
+        }
+      }
+    } catch { /* 读不到就只铺当前实例 */ }
+    const seeded = installExtUi({ dataRoot: dr, profileRoot: pr, examplesDir, extraDataRoots: extras, maxDataRoots: 2 });
+    if (seeded.installed.length > 0) {
+      logger.info?.('[ext-ui] 已自动铺设 ' + seeded.installed.length + ' 张卡片：' + seeded.installed.join(', '));
+    }
+    if (seeded.errors.length > 0) {
+      logger.warn?.('[ext-ui] 铺设时出错：' + seeded.errors.join('; '));
+    }
+  } catch (e) {
+    logger.warn?.('[ext-ui] 自动铺设跳过：' + (e instanceof Error ? e.message : String(e)));
+  }
+
   // ── 2026-10-22（issue #14 建议 1）：**用宿主给的 profileContext，别靠路径推断** ──
   //   宿主通过服务把"我是哪个 profile"告诉我们；拿得到就用它，拿不到（老版本宿主没有该服务）
   //   才回落 resolveProfileName() 的路径推断（DSH_PROFILE → 代码位置 → 扫描）。
@@ -106,7 +179,56 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   // ⚠️ 不做硬编码默认(上游用户在 dist 里写死 /mnt/... 不可移植), env 兜底通用且可覆盖。
   let appId = resolveEnv(config.appId, 'QQBOT_APPID');
   let appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');
-  const cwdOverride = resolveEnv(config.cwd ?? '', 'QQBOT_CWD') || undefined;
+  // ★★ 2026-10-27 重要修复（主人实测：3 号机加载了 2 号机的 25 个命令）：
+  //   cordis.patch.yml 里**不写** cwd（2026-09-24 起 cwd 只落自有存储），于是这里
+  //   config.cwd 是空的 → 落到 QQBOT_CWD 环境变量 → 那是**进程级**的、指向主实例
+  //   ⇒ 所有非主实例的 dataRoot 都会指到主实例目录，扩展（tools/commands/hooks/
+  //   inbound/outbound/botplay）全部串号，多实例隔离从来没生效过。
+  //   修：cwd 缺失时先按 settingsNs 去**自有存储**读（那才是用户保存的最新值），
+  //   再退环境变量，最后才留空。
+  let cwdOverride = resolveEnv(config.cwd ?? '', 'QQBOT_CWD') || undefined;
+  // ★★ 2026-10-27：这里**不能**加 `if (!config.cwd)` 守卫！
+  //   宿主会给所有实例注入同一个 cwd（当前工作区，如 鲸鱼娘），
+  //   于是 config.cwd 永远非空 ⇒ 补正被整体跳过 ⇒ 3 号机仍用 2 号机的目录。
+  //   自有存储才是用户保存的最新值，**无条件以它为准**。
+  if (true) {
+    try {
+      const { readFileSync: rf, existsSync: ex } = await import('node:fs');
+      const { join: jn } = await import('node:path');
+      const { homedir: hd } = await import('node:os');
+      // profile 名：环境变量（早于此段已回写）→ 宿主服务 → 留空
+      let profName = String(process.env.DSH_PROFILE_NAME || '').trim();
+      if (!profName) {
+        try {
+          const pc0 = (ctx as unknown as { get?: (n: string) => unknown }).get?.('profileContext') as
+            | { name?: string; dir?: string; root?: string } | undefined;
+          profName = String(pc0?.name || '').trim();
+          if (!profName && (pc0?.dir || pc0?.root)) {
+            const d = String(pc0.dir || pc0.root);
+            profName = d.replace(/[\/]+$/, '').split(/[\/]/).pop() || '';
+          }
+        } catch { /* 老宿主 */ }
+      }
+      const ns = String((config as { settingsNs?: string }).settingsNs || 'im-qqbot').trim();
+      if (profName && ns) {
+        const f = jn(hd(), '.dsh', 'qqbot-settings', profName, ns + '.json');
+        if (ex(f)) {
+          const j = JSON.parse(rf(f, 'utf8')) as { cwd?: string; dataRoot?: string };
+          // dataRoot 优先（显式配过就用它，插件侧另有 dataRootOf 会读 config.dataRoot）
+          // ★★ 必须写回 config，不能只改局部变量 cwdOverride！
+          //   dataRootOf(config)、loadExtensionCommands(dataRootOf(config))、
+          //   seedExampleTools(dataRootOf(config)) 全都读 config ——
+          //   只改局部变量的话这些地方照样落到 process.cwd()（宿主在用户主目录启动），
+          //   实测表现就是「ctx.dataRoot 对了，命令却还是加载了主实例那 25 个」。
+          if (j?.dataRoot) (config as { dataRoot?: string }).dataRoot = String(j.dataRoot);
+          if (j?.cwd) {
+            cwdOverride = String(j.cwd);
+            (config as { cwd?: string }).cwd = cwdOverride;
+          }
+        }
+      }
+    } catch { /* 读不到就按原逻辑 */ }
+  }
   const presetOverride = resolveEnv(config.preset ?? '', 'QQBOT_PRESET') || undefined;
 
   // ── 凭据检查（⚠️ 2026-09-28 重要改动：不再"缺凭据就整个 return"）──

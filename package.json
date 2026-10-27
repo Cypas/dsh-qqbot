@@ -1,6 +1,6 @@
 {
   "name": "@zaofan/dsh-qqbot",
-  "version": "1.10.48",
+  "version": "1.11.0",
   "description": "QQ Bot IM channel plugin for deepseek-harness (dsh)",
   "type": "module",
   "main": "./entry.js",
@@ -22,7 +22,8 @@
       "types": "./dist/features/schedule-store.d.ts",
       "import": "./dist/features/schedule-store.js"
     },
-    "./client": "./client/qqbot-settings.js"
+    "./client": "./client/qqbot-settings.js",
+    "./session-registry": "./dist/features/session-registry.js"
   },
   "scripts": {
     "build": "tsc",

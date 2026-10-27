@@ -408,6 +408,9 @@ export function seedExampleTools(dataRoot: string, logger: Logger): number {
       ['../../examples/ext-commands/', join(dataRoot, EXT_COMMANDS_SUBDIR)],
       //   只铺这一个：它只在"引用一条子会话转发消息"时改一下 @ 判定，不改内容、不写状态、不动手。
       ['../../examples/ext-inbound/', join(dataRoot, EXT_INBOUND_SUBDIR), ['no-wake-on-child-quote.mjs']],
+      // ⚠️ 注意：`examples/ext-ui/` **不走这里** —— 它要分两个源铺
+      //   （slot=settings → profile 级、slot=dock → 数据根），
+      //   由 features/ext-ui-seed.ts 的 installExtUi() 单独处理，见 apply()。
     ];
     // 2026-10-12：改成**递归**铺设（原来 readdirSync 只取直接子文件）。
     //   起因：跨会话工具示例（session_create / session_watch）把可变逻辑放在 `lib/*.mjs` 子目录里

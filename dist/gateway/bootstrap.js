@@ -596,8 +596,25 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
         try {
             const es = await import('../features/extension-store.js');
             const n = es.seedExampleTools(dataRootOf(config), logger);
-            if (n > 0)
+            if (n > 0) {
                 logger.info(`[im-qqbot] 已自动铺设 ${n} 个扩展示例`);
+                // ★ 2026-10-27 修（主人实测：3 号机 /扩展示例 不生效、/唤醒 正常）：
+                //   扩展命令是**插件启动时**扫描的，而示例是**启动之后**才铺进来的
+                //   ⇒ 新文件不被注册，表现为"文件明明在，命令却当普通文本进了上下文"。
+                //   所以铺完当场重载一次命令。reloadExtCommands 没装好时返回 {error}，
+                //   不抛错、不影响启动（最多需要下次重启才认）。
+                try {
+                    const rl = await import('../features/ext-reload.js');
+                    const r = await rl.reloadExtCommands();
+                    if (r && typeof r === 'object' && 'error' in r) {
+                        logger.debug?.('[im-qqbot] 铺完重载命令未生效: ' + String(r.error));
+                    }
+                    else {
+                        logger.info('[im-qqbot] 铺完已重载扩展命令: ' + JSON.stringify(r));
+                    }
+                }
+                catch { /* 重载失败不致命 */ }
+            }
         }
         catch { /* 静默 */ }
     })();

@@ -1427,6 +1427,10 @@ export function apply(ctx) {
             // 账号数据目录(各号各库各定时): 图库={cwd}/表情包, 定时={cwd}/.qqbot
             dataDir: droot ? join(droot, '表情包') : '',
             schedDir: droot ? join(droot, '.qqbot') : '',
+            // ★ 2026-10-27 补：把**数据根本身**也回给前端。
+            //   上面 dataDir 是「图库目录」({dataRoot}/表情包)，不是 dataRoot ——
+            //   扩展 UI 按 dataRoot 扫（{dataRoot}/.qqbot-extensions/ui/），拿 dataDir 会找错地方。
+            dataRoot: droot || '',
           };
         }),
       });
@@ -5291,15 +5295,24 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
   //        路径 resolve 后还要校验仍在扩展目录内（防 .. 穿越）—— 全在 ext-ui.ts 里做。
   route(ctx, 'GET', '/api/qqbot-settings/ext-ui/list', async (req, res) => {
     let cwd = '';
-    try { cwd = String(new URL(req.url ?? '/', 'http://x').searchParams.get('cwd') || '').trim(); } catch { cwd = ''; }
+    let explicitRoot = '';
     try {
-      const { dataRoot } = resolveDataRootForWorkspace(cwd);
+      const sp = new URL(req.url ?? '/', 'http://x').searchParams;
+      cwd = String(sp.get('cwd') || '').trim();
+      explicitRoot = String(sp.get('dataRoot') || '').trim();
+    } catch { cwd = ''; }
+    try {
+      // ★ 2026-10-27 修（主人实测：切到 im-qqbot-3 仍显示 im-qqbot-2 的扩展卡片）：
+      //   面板是「按机器人实例」看的，各实例 dataRoot 不同（im-qqbot-3 甚至没配 dataRoot、
+      //   只配了 cwd）。原来这里只按 cwd 推、前端又没传 → 永远落到宿主默认那份。
+      //   现在前端把当前实例的 dataDir 直接传上来（dataRoot 参数），优先用它。
+      const dataRoot = explicitRoot || (resolveDataRootForWorkspace(cwd) || {}).dataRoot;
       if (!dataRoot) return writeJson(res, 200, { ok: false, items: [], error: '推不出 dataRoot' });
       const mod = await import('./dist/features/ext-ui.js');
       const items = mod.listExtUi(dataRoot, PROFILE_ROOT).map((x) => ({
         extId: x.extId, slot: x.slot, title: x.title, order: x.order, files: x.files, from: x.from,
       }));
-      return writeJson(res, 200, { ok: true, items });
+      return writeJson(res, 200, { ok: true, items, dataRoot });
     } catch (e) {
       return writeJson(res, 200, { ok: false, items: [], error: e instanceof Error ? e.message : String(e) });
     }
@@ -5315,8 +5328,431 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
       const { dataRoot } = resolveDataRootForWorkspace(cwd);
       if (!dataRoot) return writeJson(res, 200, { ok: false, reason: '推不出 dataRoot' });
       const mod = await import('./dist/features/ext-ui.js');
-      const r = mod.readExtUiFile(dataRoot, PROFILE_ROOT, extId, fileName);
+      const r = mod.readExtUiFile(dataRoot, PROFILE_ROOT, extId, fileName, String(q?.get("slot") || "").trim());
       return writeJson(res, 200, r.ok ? { ok: true, text: r.text } : { ok: false, reason: r.reason });
+    } catch (e) {
+      return writeJson(res, 200, { ok: false, reason: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // ══ 扩展自己的配置（2026-10-26）：profile 级 / 数据根 双源 ══════════════════
+  //   为什么要两套：
+  //     scope=profile → {PROFILE_ROOT}/.qqbot-extensions/.state/ext-config/<id>.json
+  //                     全局一份，影响**所有机器人实例**（扩展在设置页里改的走这个）
+  //     scope=data    → {dataRoot}/.qqbot-extensions/.state/ext-config/<id>.json
+  //                     每个实例一份（扩展在 dock 球里改的走这个）
+  //   前端卡片用 qqbotExt.getConfig(scope) / setConfig(scope, patch) 调用。
+  function extCfgSafeId(extId) {
+    return String(extId || '').trim().replace(/[^a-zA-Z0-9_\-]/g, '');
+  }
+  function extCfgPathOf(scope, cwd, extId) {
+    const safe = extCfgSafeId(extId);
+    if (!safe) return '';
+    if (scope === 'profile') {
+      return join(PROFILE_ROOT, '.qqbot-extensions', '.state', 'ext-config', safe + '.json');
+    }
+    const { dataRoot } = resolveDataRootForWorkspace(cwd);
+    if (!dataRoot) return '';
+    return join(dataRoot, '.qqbot-extensions', '.state', 'ext-config', safe + '.json');
+  }
+
+  route(ctx, 'GET', '/api/qqbot-settings/ext-config', async (req, res) => {
+    let q = null;
+    try { q = new URL(req.url ?? '/', 'http://x').searchParams; } catch { q = null; }
+    const id = String(q?.get('id') || '').trim();
+    const scope = String(q?.get('scope') || 'data').trim() === 'profile' ? 'profile' : 'data';
+    const cwd = String(q?.get('cwd') || '').trim();
+    try {
+      const p = extCfgPathOf(scope, cwd, id);
+      if (!p) return writeJson(res, 200, { ok: false, reason: '推不出路径（id 非法或缺 dataRoot）' });
+      let config = {};
+      try { if (existsSync(p)) config = JSON.parse(readFileSync(p, 'utf8')) || {}; } catch { config = {}; }
+      return writeJson(res, 200, { ok: true, id, scope, path: p, config });
+    } catch (e) {
+      return writeJson(res, 200, { ok: false, reason: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  route(ctx, 'POST', '/api/qqbot-settings/ext-config', async (req, res) => {
+    const body = await readJsonBody(req);
+    if (!body || typeof body !== 'object') return writeJson(res, 400, { ok: false, reason: 'body 必须是 JSON' });
+    const id = String(body.id || '').trim();
+    const scope = String(body.scope || 'data').trim() === 'profile' ? 'profile' : 'data';
+    const cwd = String(body.cwd || '').trim();
+    const patch = body.patch && typeof body.patch === 'object' ? body.patch : {};
+    try {
+      const p = extCfgPathOf(scope, cwd, id);
+      if (!p) return writeJson(res, 200, { ok: false, reason: '推不出路径（id 非法或缺 dataRoot）' });
+      let cur = {};
+      try { if (existsSync(p)) cur = JSON.parse(readFileSync(p, 'utf8')) || {}; } catch { cur = {}; }
+      // 浅合并（够用；扩展要嵌套就自己整份写回）
+      const next = Object.assign({}, cur, patch);
+      mkdirSync(dirname(p), { recursive: true });
+      // 写前备份一份，出问题能捞回来
+      try { if (existsSync(p)) writeFileSync(p + '.bak-' + Date.now(), readFileSync(p)); } catch { /* ignore */ }
+      writeFileSync(p, JSON.stringify(next, null, 2), 'utf8');
+      return writeJson(res, 200, { ok: true, id, scope, path: p, config: next });
+    } catch (e) {
+      return writeJson(res, 200, { ok: false, reason: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // ══ dock 卡片的数据源（2026-10-26）══════════════════════════════════════════
+  //   dock 卡片的独特价值就是「能看到当前实例和会话的真实数据」。这里给四种：
+  //     what=context   当前实例 + 会话信息（ns/appId/dataRoot/peer/群名/几条统计）
+  //     what=sessions  这个机器人管过哪些会话（本实例）
+  //     what=history   当前会话最近 N 条消息（读 .qqbot/msg-history 的 jsonl）
+  //     what=members   群友台账（谁说过话、印象分）
+  //   数据范围天然按 dataRoot 隔离 —— 每个机器人实例看到的是自己那份。
+  route(ctx, 'GET', '/api/qqbot-settings/dock-data', async (req, res) => {
+    let q = null;
+    try { q = new URL(req.url ?? '/', 'http://x').searchParams; } catch { q = null; }
+    const what = String(q?.get('what') || 'context').trim();
+    const ns = String(q?.get('ns') || '').trim() || NS;
+    const peerId = String(q?.get('peer') || '').trim();
+    const scope = String(q?.get('scope') || 'group').trim() === 'c2c' ? 'c2c' : 'group';
+    const limit = Math.max(1, Math.min(200, Number(q?.get('limit') || 20) || 20));
+    // ★ 2026-10-27 修（主人实测：切到 im-qqbot-3 读到的还是鲸鱼娘的 dataRoot）：
+    //   前端原来只传 ns，没传 dataRoot → 这里 resolveDataRootForWorkspace('') 落到宿主默认。
+    //   现在前端把当前实例的 dataRoot 直接传上来，优先用它。
+    const explicitRoot = String(q?.get('dataRoot') || '').trim();
+    const explicitCwd = String(q?.get('cwd') || '').trim();
+    try {
+      const dataRoot = explicitRoot || (resolveDataRootForWorkspace(explicitCwd) || {}).dataRoot;
+      if (!dataRoot) return writeJson(res, 200, { ok: false, reason: '推不出 dataRoot' });
+
+      if (what === 'context') {
+        const view = viewOf(ctx.settings, ns) || {};
+        const v = view.value || {};
+        // ★ 2026-10-27 修（主人实测数据错）：
+        //   · ns 传空时原来直接用模块级 NS 默认值（im-qqbot），读到的是**别的实例**的配置，
+        //     于是 appId 显示出 "1111" 这种假值。现在把 ns 原样回显，前端能对照发现没传对。
+        //   · cwd 原来取 process.cwd()（宿主进程目录，如 C:\Users\作早饭），那是错的；
+        //     应取**该实例配置里的工作区**，没配就退回数据根。
+        return writeJson(res, 200, {
+          ok: true,
+          context: {
+            ns,
+            appId: String(v.appId || ''),
+            dataRoot,
+            cwd: String(v.cwd || dataRoot || ''),
+            processCwd: process.cwd(),
+            peer: peerId ? { scope, peerId } : null,
+            // 顺手给几个统计，卡片可以直接显示
+            counts: {
+              extensions: (() => { try { return readdirSync(join(dataRoot, '.qqbot-extensions')).length; } catch { return 0; } })(),
+              packs: (() => { try { return readdirSync(join(dataRoot, 'extension-packs')).length; } catch { return 0; } })(),
+            },
+          },
+        });
+      }
+
+      if (what === 'sessions') {
+        let out = [];
+        try {
+          const reg = join(dataRoot, '.qqbot', 'session-registry.json');
+          if (existsSync(reg)) out = JSON.parse(readFileSync(reg, 'utf8')) || [];
+        } catch { out = []; }
+        return writeJson(res, 200, { ok: true, sessions: Array.isArray(out) ? out.slice(0, 100) : [] });
+      }
+
+      if (what === 'history') {
+        if (!peerId) return writeJson(res, 200, { ok: false, reason: '需要 peer 参数', messages: [] });
+        // 消息历史落在 {dataRoot}/.qqbot/msg-history/<scope>/<peerId>/*.jsonl
+        const base = join(dataRoot, '.qqbot', 'msg-history');
+        const dirs = [join(base, scope, peerId), join(base, peerId)];
+        let rows = [];
+        for (const d of dirs) {
+          if (!existsSync(d)) continue;
+          let files = [];
+          try { files = readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort(); } catch { continue; }
+          for (const f of files.slice(-3)) {                 // 最近 3 天的文件足够拼出 limit 条
+            try {
+              const txt = readFileSync(join(d, f), 'utf8');
+              for (const line of txt.split('\n')) {
+                if (!line.trim()) continue;
+                try { rows.push(JSON.parse(line)); } catch { /* 坏行跳过 */ }
+              }
+            } catch { /* ignore */ }
+          }
+          if (rows.length) break;
+        }
+        rows = rows.slice(-limit);
+        return writeJson(res, 200, { ok: true, messages: rows });
+      }
+
+      if (what === 'members') {
+        // 群友台账（people-memo 落的那份）
+        let out = {};
+        try {
+          for (const p of [join(dataRoot, '.qqbot', 'people-memo.json'), join(dataRoot, '.qqbot-extensions', '.state', 'people-memo.json')]) {
+            if (existsSync(p)) { out = JSON.parse(readFileSync(p, 'utf8')) || {}; break; }
+          }
+        } catch { out = {}; }
+        return writeJson(res, 200, { ok: true, members: out });
+      }
+
+      return writeJson(res, 200, { ok: false, reason: '不认识的 what: ' + what });
+    } catch (e) {
+      return writeJson(res, 200, { ok: false, reason: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // ══ 扩展自有路由的出口（2026-10-26）══════════════════════════════════════
+  //   为什么要有：扩展想用自己的存储（SQLite / 自有 json / 任意目录），就得有办法把数据
+  //   通过 HTTP 交给自己的 UI 卡片。以前没出口，只能写 patch 改这个文件。
+  //
+  //   约定：
+  //     扩展在 hooks/tools 里调 env.registerRoute('GET', '/rows', handler) 注册；
+  //     卡片里写 qqbotExt.api('/rows')，前端请求：
+  //        /api/ext/dispatch?id=<extId>&p=/rows
+  //     本路由查 globalThis.__qqbotExtRoutes 派发。
+  //
+  //   handler 签名：async ({ req, path, query, body }) => 任意 JSON 可序列化值
+  //     返回 {ok:false,...} 原样透传；其他值包成 {ok:true, data}
+  // ══ 扩展 UI 卡片的「能力调用」通道（2026-10-27 主人要求）════════════════════
+  //   目标：让自定义 UI 卡片能用上**和其余扩展（tools/commands/hooks）同一套能力**
+  //   （store / api / markdown / kernel / owners / log …），以及 DSH 宿主的全能力。
+  //
+  //   为什么不能在浏览器直接用：卡片跑在浏览器里，能力都在服务端。
+  //   所以走 RPC：卡片 → /api/ext/dispatch?p=/__cap&fn=<名字> → 这里执行 → 返回 JSON。
+  //
+  //   安全：**只允许白名单里的功能**，绝不把整个 caps 对象丢给前端（里面有 sender、
+  //   kernel 的子对象等，序列化会炸、语义也不对）。
+  const EXT_CAP_ALLOW = {
+    // store：数据根下的 KV（扩展自己的持久化）
+    'store.load': (c) => (c.store && typeof c.store.load === 'function' ? c.store.load() : null),
+    'store.save': (c, a) => (c.store && typeof c.store.save === 'function' ? c.store.save(a[0]) : false),
+    // 元信息
+    'appId': (c) => c.appId || '',
+    'owners': (c) => (Array.isArray(c.owners) ? c.owners : []),
+    // 宿主能力（DSH cordis Context）：只暴露「读服务」和「注入」两件事
+    'kernel.get': (c, a) => {
+      const k = c.kernel;
+      if (!k || typeof k.get !== 'function') return { ok: false, reason: '宿主不支持 kernel.get' };
+      try {
+        const v = k.get(String(a[0]));
+        // 只回能序列化的东西；函数/复杂对象回描述
+        if (v === undefined || v === null) return null;
+        try { return JSON.parse(JSON.stringify(v)); } catch { return { __type: typeof v, __note: '不可序列化' }; }
+      } catch (e) {
+        return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    'kernel.has': (c, a) => {
+      const k = c.kernel;
+      if (!k || typeof k.get !== 'function') return false;
+      try { return k.get(String(a[0])) !== undefined; } catch { return false; }
+    },
+    // 日志（进宿主控制台，便于扩展自诊断）
+    'log': (c, a) => {
+      try { (c.log || console.log)('[ext-ui] ' + String(a[0])); return true; } catch { return false; }
+    },
+    // 往当前会话发消息（需要请求里带 peer）
+    'text': async (c, a) => (typeof c.text === 'function' ? await c.text(String(a[0])) : false),
+    // ★ 任意文本文件读写（2026-10-27 主人要求：卡片能选电脑上任意 txt 展示并修改）
+    //   只放行文本类扩展名，避免被当成二进制搬运工。
+    'fs.read': async (_c, a) => {
+      const p = String(a[0] || '').trim();
+      if (!p) return { ok: false, reason: '缺路径' };
+      if (!/\.(txt|md|json|log|yml|yaml|csv|ini|conf|js|ts|mjs|cjs|html|css)$/i.test(p)) {
+        return { ok: false, reason: '只允许文本文件（txt/md/json/log/yml/csv/ini/js/ts/html/css）' };
+      }
+      try {
+        if (!existsSync(p)) return { ok: false, reason: '文件不存在' };
+        const st = statSync(p);
+        if (!st.isFile()) return { ok: false, reason: '不是文件' };
+        if (st.size > 2 * 1024 * 1024) return { ok: false, reason: '文件太大（>2MB）' };
+        return { ok: true, path: p, text: readFileSync(p, 'utf8'), size: st.size, mtime: st.mtimeMs };
+      } catch (e) {
+        return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    'fs.write': async (_c, a) => {
+      const p = String(a[0] || '').trim();
+      const txt = String(a[1] == null ? '' : a[1]);
+      if (!p) return { ok: false, reason: '缺路径' };
+      if (!/\.(txt|md|json|log|yml|yaml|csv|ini|conf|js|ts|mjs|cjs|html|css)$/i.test(p)) {
+        return { ok: false, reason: '只允许文本文件' };
+      }
+      try {
+        // 写前备份一份（原地 .bak-时间戳），出问题能捞回来
+        if (existsSync(p)) {
+          try { writeFileSync(p + '.bak-' + Date.now(), readFileSync(p)); } catch { /* ignore */ }
+        } else {
+          mkdirSync(dirname(p), { recursive: true });
+        }
+        writeFileSync(p, txt, 'utf8');
+        return { ok: true, path: p, size: Buffer.byteLength(txt, 'utf8') };
+      } catch (e) {
+        return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    'markdown': async (c, a) => (typeof c.markdown === 'function' ? await c.markdown(String(a[0])) : false),
+    // 静默注入 / 唤醒（需要 agent，UI 侧一般不可用，可用性探测见 __caps）
+    'appendSilent': async (c, a) => {
+      if (typeof c.appendSilent !== 'function') return { ok: false, reason: '能力包没有 appendSilent' };
+      const r = await c.appendSilent(String(a[0]));
+      if (r === true) return true;
+      // ★ 2026-10-27：失败不再只回 false —— 把"为什么失败"带出去，否则没法排查。
+      const d = c.__diag || {};
+      return {
+        ok: false,
+        reason: !d.hasAgent
+          ? '拿不到当前会话的 agent（manager 里 findByPeer 没命中）'
+          : 'appendSilent 被拒（可能该会话人设还没落盘，见 canSilentlyAppend 的注释）',
+        diag: d,
+      };
+    },
+  };
+
+  route(ctx, ['GET', 'POST', 'PATCH', 'DELETE'], '/api/ext/dispatch', async (req, res) => {
+    let q = null;
+    try { q = new URL(req.url ?? '/', 'http://x').searchParams; } catch { q = null; }
+    const id = extCfgSafeId(String(q?.get('id') || ''));
+    const sub = String(q?.get('p') || '/').trim() || '/';
+    if (!id) return writeJson(res, 400, { ok: false, reason: '缺 id' });
+
+    // ★ 能力调用通道（2026-10-27）：p=/__cap&fn=<名字>&args=<JSON数组>
+    //   给 UI 卡片用，能力和其余扩展对齐（store / kernel / log / text …）。
+    if (sub === '/__cap') {
+      // ⚠️ 2026-10-27 修：这个分支是独立作用域，`ns` 必须自己算 ——
+      //   原来直接用了 dock-data 路由里的局部变量 ns，运行时报 "ns is not defined"，
+      //   导致 store/kernel/fs/appendSilent 全部返回 {ok:false}。
+      const capNs = String(q?.get('ns') || '').trim() || NS;
+      const fn = String(q?.get('fn') || '').trim();
+      let args = [];
+      try { args = JSON.parse(String(q?.get('args') || '[]')); } catch { args = []; }
+      if (!Array.isArray(args)) args = [args];
+      const impl = EXT_CAP_ALLOW[fn];
+      if (typeof impl !== 'function') {
+        return writeJson(res, 200, { ok: false, reason: '不在能力白名单里: ' + fn, allow: Object.keys(EXT_CAP_ALLOW) });
+      }
+      try {
+        // 按请求的数据根构造一份能力包（UI 卡片没有"加载时机"，只能即时构造）
+        const { dataRoot } = resolveDataRootForWorkspace(String(q?.get('cwd') || '').trim());
+        const explicit = String(q?.get('dataRoot') || '').trim();
+        const dr = explicit || dataRoot || '';
+        // ── 按 peer 找当前会话的 agent（appendSilent 等需要）──
+        //   ★ 2026-10-27：改用插件现成的 findManagerByPeer()，别自己造轮子。
+        //   它本身带三层兜底（活跃会话表 → 群注册表归属 → 任意已注册），
+        //   比我原来在 globalThis.__qqbotManagers 上遍历要准得多。
+        const __capSid = String(q?.get('sid') || '').trim();
+        const __capPeer = String(q?.get('peer') || '').trim();
+        const __capScope = String(q?.get('scope') || 'group').trim() === 'c2c' ? 'c2c' : 'group';
+        let __agentForCap = undefined;
+        const __diagFind = { peer: __capPeer, scope: __capScope, sid: __capSid, found: false, hasRec: false, err: '' };
+        try {
+          // ★★ 2026-10-27（主人点明）：**只要当前会话 id 就够了** —— 最短最准的一条路。
+          //   宿主自己就是按 sessionId 索引 agent 的，findManagerBySessionId 一步定位。
+          //   不用猜 scope/peer、不用查群注册表、不用建会话。
+          if (__capSid) {
+            const reg0 = await import('./dist/features/session-registry.js');
+            const mgrS = typeof reg0.findManagerBySessionId === 'function'
+              ? reg0.findManagerBySessionId(__capSid)
+              : undefined;
+            __diagFind.sidFound = !!mgrS;
+            if (mgrS) {
+              const recS = typeof mgrS.findBySessionId === 'function' ? mgrS.findBySessionId(__capSid) : undefined;
+              __diagFind.sidHasRec = !!recS;
+              if (recS && recS.agent) { __agentForCap = recS.agent; __diagFind.via = 'sid'; }
+              // 宿主全局 agent 表兜底（web / hub 这类非 QQ 会话也在这里）
+              if (!__agentForCap && typeof mgrS.findHostAgent === 'function') {
+                const ha = mgrS.findHostAgent(__capSid);
+                if (ha && ha.agent) { __agentForCap = ha.agent; __diagFind.via = 'sid-hostAgent'; }
+              }
+            }
+          }
+          if (!__agentForCap && __capPeer) {
+            // ⚠️ 不能用 '@zaofan/dsh-qqbot/session-registry' —— package.json 的 exports
+            //    里没暴露这个子路径（只有 channel-tools / sticker-store / schedule-store / client）。
+            //    settings-host.js 就在包根，直接用相对路径最稳。
+            const reg = await import('./dist/features/session-registry.js');
+            const mgr = typeof reg.findManagerByPeer === 'function'
+              ? reg.findManagerByPeer(__capScope, __capPeer)
+              : undefined;
+            __diagFind.found = !!mgr;
+            if (mgr && typeof mgr.findByPeer === 'function') {
+              let rec = mgr.findByPeer(__capScope, __capPeer);
+              __diagFind.hasRec = !!rec;
+              if (rec && rec.agent) __agentForCap = rec.agent;
+              // ★ 2026-10-27（主人指出）：不该要求"必须是活跃会话" ——
+              //   这是面板行为，凭什么非得先在 QQ 里发条消息把会话跑起来？
+              //   直接用插件早就有的 getOrCreateByPeerWeb()（与入群申请通知/定时任务
+              //   同一条路：活跃表 miss 就恢复/重建会话，**不开回合**）。
+              if (!__agentForCap && typeof reg.getOrCreateByPeerWeb === 'function') {
+                try {
+                  const w = await reg.getOrCreateByPeerWeb(capNs, __capScope, __capPeer, 'master');
+                  if (w && w.agent) {
+                    __agentForCap = w.agent;
+                    __diagFind.created = true;
+                  } else {
+                    __diagFind.createErr = 'getOrCreateByPeerWeb 没返回 agent';
+                  }
+                } catch (e2) {
+                  __diagFind.createErr = e2 instanceof Error ? e2.message : String(e2);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          __diagFind.err = e instanceof Error ? e.message : String(e);
+        }
+        const capsMod = await import('./dist/features/ext-capabilities.js');
+        const caps = capsMod.makeExtCaps({
+          dataRoot: dr,
+          logger: console,
+          selfName: id,
+          kind: 'ui',
+          appId: String(viewOf(ctx.settings, capNs)?.value?.appId || ''),
+          owners: (() => {
+            try {
+              const v = viewOf(ctx.settings, capNs)?.value || {};
+              const g = v.groupAdmin || {};
+              return Array.isArray(g.owners) ? g.owners.map(String) : [];
+            } catch { return []; }
+          })(),
+          scope: String(q?.get('scope') || 'group').trim() === 'c2c' ? 'c2c' : 'group',
+          peerId: String(q?.get('peer') || '').trim(),
+          // ★ 2026-10-27：按 peer 找当前会话的 agent —— appendSilent/appendWake 靠它
+          agent: __agentForCap,
+        });
+        // 诊断信息挂到 caps 上，白名单里的实现可以读它来解释"为什么失败"
+        try {
+          const gm = globalThis.__qqbotManagers;
+          caps.__diag = {
+            managers: gm && typeof gm.keys === 'function' ? Array.from(gm.keys()) : null,
+            managersSize: gm && typeof gm.size === 'number' ? gm.size : -1,
+            dr,
+            peer: String(q?.get('peer') || ''),
+            scope: String(q?.get('scope') || 'group'),
+            hasAgent: !!__agentForCap,
+            find: __diagFind,
+            peer: __capPeer,
+            scope: __capScope,
+          };
+        } catch { /* ignore */ }
+        const out = await impl(caps, args);
+        return writeJson(res, 200, { ok: true, data: out });
+      } catch (e) {
+        return writeJson(res, 200, { ok: false, reason: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    const table = globalThis.__qqbotExtRoutes;
+    if (!table || typeof table.get !== 'function') {
+      return writeJson(res, 200, { ok: false, reason: '还没有任何扩展注册路由' });
+    }
+    const method = String(req.method || 'GET').toUpperCase();
+    const h = table.get(id + '|' + method + '|' + sub) || table.get(id + '|*|' + sub);
+    if (typeof h !== 'function') {
+      return writeJson(res, 200, { ok: false, reason: '扩展没注册这个路由: ' + sub + ' (' + method + ')' });
+    }
+    try {
+      const body = method === 'GET' ? undefined : await readJsonBody(req);
+      const out = await h({ req, path: sub, query: Object.fromEntries(q || []), body });
+      if (out && typeof out === 'object' && 'ok' in out) return writeJson(res, 200, out);
+      return writeJson(res, 200, { ok: true, data: out });
     } catch (e) {
       return writeJson(res, 200, { ok: false, reason: e instanceof Error ? e.message : String(e) });
     }

@@ -880,7 +880,8 @@ export class SessionManager {
         }
         // 2026-10-12 主人定：命令表也要一起热重载（此前扩展命令改了必须重启插件才生效）。
         //   放在"有没有活动会话"判断**之前** —— 没有任何会话时，命令照样能刷。
-        const cmdLine = describeExtCommandReload(await reloadExtCommands());
+        // ★ 2026-10-27：传本实例的 dataRoot —— 否则会刷到别的实例的命令表
+        const cmdLine = describeExtCommandReload(await reloadExtCommands(this.dataRoot));
         // 2026-10-12 追加：入站中间件扩展（`.qqbot-extensions/inbound/*.mjs`）同一时机一起重扫。
         //   挂载点是个"现读可变列表"的代理，重扫只是换内容 ⇒ **不重启即生效**，不用另加一条热刷入口。
         const inboundLine = describeExtInboundReload(await reloadExtInbound());

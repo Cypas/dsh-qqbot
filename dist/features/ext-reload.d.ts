@@ -22,13 +22,13 @@ export interface ExtCommandReloadResult {
     names: string[];
 }
 /** 注册/注销重建器（注销传 undefined；插件重载时调用方会覆盖为新的） */
-export declare function registerExtCommandReloader(fn: (() => Promise<ExtCommandReloadResult>) | undefined): void;
+export declare function registerExtCommandReloader(dataRoot: string | undefined, fn: (() => Promise<ExtCommandReloadResult>) | undefined): void;
 /**
  * 热重载扩展命令。
  * 返回 `{ error }` 表示"没装成"（比如插件还没启动完），由调用方决定怎么提示 —— 不抛错，
  * 因为热刷的主职是刷工具，命令刷不动也不该把整次热刷弄失败。
  */
-export declare function reloadExtCommands(): Promise<ExtCommandReloadResult | {
+export declare function reloadExtCommands(dataRoot?: string): Promise<ExtCommandReloadResult | {
     error: string;
 }>;
 /** 给回执文本用：把重载结果拼成一句人话（工具热刷的 summary 会带上它） */
