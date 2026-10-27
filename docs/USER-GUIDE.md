@@ -3,7 +3,7 @@
 > [@zaofan/dsh-qqbot](../README.md) 的**详细文档**：配置项、内置命令、自定义扩展、群管理（含 🔨 锤子：禁言 / 踢人）、本地小模型、好感度系统、数据文件与日志、升级排障、架构与本地开发。
 > 只想看"它能干什么 + 怎么装" → 回 **[README](../README.md)**。
 
-**章节**：给AI的话 · 架构 · QQ 远程审批 · QQ 群管理（含 🔨 锤子：禁言 / 踢人）· 智能回复（本地小模型）· **好感度与熟识度** · 配置项 · 数据文件与日志 · 内置命令 · 用户扩展 · 富媒体指令 · 核心模块 · 会话路由 · 升级与兼容 · 常见问题 · 设计原则 · 本地开发
+**章节**：给AI的话 · 架构 · QQ 远程审批 · QQ 群管理（含 🔨 锤子：禁言 / 踢人）· 智能回复（本地小模型）· **好感度与熟识度** · 配置项 · 数据文件与日志 · 内置命令 · 用户扩展（含自定义界面卡片）· 富媒体指令 · 核心模块 · 会话路由 · 升级与兼容 · 常见问题 · 设计原则 · 本地开发
 
 > 📌 **版本**：本文对应插件 **v1.6.x**（含 1.6.2 → 1.6.5 的新功能与排障）。新增内容都标了版本与补充日期，便于你对照自己装的版本。
 
@@ -27,6 +27,10 @@
 - **你可以自己写 markdown、自己写工具、自己写斜杠命令**（不用等人给你做功能）：
   - 卡片正文就是**你直接写的 markdown**（`#` 标题、加粗、`![说明](图片URL)`、代码块）——**本插件没有模板引擎，模板就是你**；要"带按钮的卡片"则走 botplay 事件或 dock 卡片编辑器（按钮回调须由 host 注册）。
   - 工具/命令写在**账号数据目录**的 `.qqbot-extensions/{tools,commands}/`，**不在插件包内** → **升级/重装插件（换 node_modules）不会覆盖你的扩展**，扩展原样保留。
+  - **你还能给她做一个界面**（v1.11.0+）：往 `.qqbot-extensions/ui/<目录>/` 放 `card.html`（+ 可选 `card.css`/`card.js`），
+    悬浮球里就多一个页签；放 `{PROFILE_ROOT}/.qqbot-extensions/ui/` 则是设置页的全局页签。
+    卡片跑在 Shadow DOM 里，拿到 `qqbotExt`（读写配置/静默注入/读写文本文件/调宿主服务/自己注册的路由）和 `shadowRoot`。
+    用户说"给我做个面板/工具界面"时，照契约现场写即可 —— 路径和规则详见下面「自定义界面卡片」一节。
   - 工具 `run(args, env)` 的 `env` 里有 `sender` + `replyTarget`（内置 `send_media` 用的同一个发送器），**工具能自己发 markdown 卡/图/语音/文件**：所以「调接口取数据 → 拼卡片 → 发出去」一个工具就能闭环，不必绕回你。用户说"给我写个点歌工具"时，照契约现场写即可。
   - 生效方式：工具发 `/tools-reload`（或调 `tools_reload`）即时生效；命令需重启宿主；**同名工具改内容会被注册表跳过 → 换名或重启**。
 
@@ -475,7 +479,7 @@ contextMemoMaxItems: 20   # 备忘条数上限（超出丢最旧，1~500）
 |---|---|---|
 | `qun-cookie.json` | **QQ 群管理「踢人」的登录凭据**（v1.6.2+，2026-10-04 补充）—— 面板和 AI **共用这一份** | ❌ 删了就得重新扫码登录（功能不会坏，只是要重登） |
 | `表情包/` | 图库本体（图片文件 + `index.json`） | ❌ 删了图库就空了 |
-| `.qqbot-extensions/` | 你自己写的扩展（自定义命令 / 工具） | ❌ 你的扩展就在这儿（升级插件不会动它） |
+| `.qqbot-extensions/` | 你自己写的扩展（自定义命令 / 工具 / 界面卡片） | ❌ 你的扩展就在这儿（升级插件不会动它） |
 
 ### 诊断日志（在 `~/.dsh/` 下，**可以放心删**）（v1.6.5，2026-10-04 补充）
 
@@ -539,8 +543,12 @@ contextMemoMaxItems: 20   # 备忘条数上限（超出丢最旧，1~500）
 └── .qqbot-extensions/
     ├── commands/    # 自定义斜杠命令(重启后生效)
     ├── tools/       # 自定义 QQ 通道工具(AI 可调; 写完用 /tools-reload 或让 AI 调 tools_reload 热刷)
-    └── hooks/       # 启动钩子(插件启动时自动跑一次; 没人调用也跑; v1.8.9+)
+    ├── hooks/       # 启动钩子(插件启动时自动跑一次; 没人调用也跑; v1.8.9+)
+    └── ui/          # 自定义界面卡片(悬浮球页签; v1.11.0+)
 ```
+
+**设置页那张卡不在这里** —— `slot=settings` 的卡片放 `{PROFILE_ROOT}/.qqbot-extensions/ui/`，
+全局一份、所有机器人共用（详见下面「自定义界面卡片」）。
 数据目录 = `dataRoot`(已配置, 例 `D:\my-projects\qqbot-data`)或账号 cwd(未配置时, 向后兼容)。
 
 ### 自定义斜杠命令: .qqbot-extensions/commands/xxx.mjs
@@ -821,6 +829,58 @@ if (finallyDone) {
      官方未开放的接口（如查群成员信息）会返回 `code: 11253`，**当正常分支处理、别当异常**。
 8. 不确定的官方字段/事件/错误码去查 <https://bot.q.qq.com/wiki/develop/api-v2/>（按钮回调事件是 `interaction_create`）。
 
+
+### 自定义界面卡片: 给面板/悬浮球加自己的窗口 (v1.11.0+)
+
+不想只加命令和工具、还想**加个界面**？放三个文件进去，设置页顶栏或悬浮球里就多一个页签。
+
+```
+{PROFILE_ROOT}/.qqbot-extensions/ui/<目录>/   ← slot: settings（设置页，全局一份）
+{dataRoot}/.qqbot-extensions/ui/<目录>/       ← slot: dock（悬浮球，每个机器人一份）
+```
+
+每个目录里放（都可不写，写什么加载什么）：
+
+```
+card.html   必需（没有它这个扩展就不出现）
+card.css    可选
+card.js     可选
+```
+
+`card.html` 顶部注释声明元信息：
+
+```html
+<!-- qqbot-ui: { "id": "myui", "slot": "dock", "title": "我的面板", "order": 50 } -->
+```
+
+- `id` 可选，覆盖目录名。同一个扩展的两张卡（settings + dock）给相同的 id，就共用一份配置。
+- `slot` 必填：`settings` 或 `dock`。
+- `title` 页签文字；`order` 排序（小的在前）。
+
+**卡片里能用的**（`card.js` 里有两个变量：`qqbotExt` 和 `shadowRoot`）：
+
+```js
+qqbotExt.getConfig() / setConfig({...})     // 两级配置（profile 全局 / data 本实例）
+qqbotExt.acct                               // 当前选中的账号
+qqbotExt.store.load() / save(v)             // 数据根下的 KV
+qqbotExt.kernel.get('服务名')                // 宿主服务
+qqbotExt.cap('fs.read' | 'fs.write', 路径, 内容)   // 读写本机文本文件（≤2MB）
+qqbotExt.cap('appendSilent', 文本)           // 往当前会话静默注入一条消息（不唤醒 AI）
+qqbotExt.api('/你的路由')                    // 你在 hooks 里 registerRoute 的接口
+qqbotExt.theme / isDark() / onThemeChange()  // 主题
+qqbotExt.dock.sid / peerId / context() / history(n) / lastAssistantText()   // 仅 dock 卡
+```
+
+**颜色跟随宿主主题**：用 `--qqs-*` 变量（`var(--qqs-text, #1f2329)`），亮/暗自动切换。
+
+**卡片跑在 Shadow DOM 里** —— 你的样式不会污染面板，崩了也只白自己那张卡；
+代价是面板的 CSS/组件/DOM 也进不来，得自己写原生元素。
+
+**示例**：插件自带 `examples/ext-ui/demo/`（settings + dock 两套），
+插件启动时会**自动铺**到对应位置（只补不改，不会覆盖你改过的）。
+
+> 完整 API、硬边界、扩展包怎么带界面：见
+> [`docs/extension-contract.md`](extension-contract.md) §1 末尾「第六套：`ui/`」。
 
 ## 富媒体指令（AI 回复里写标记，自动变成真消息）
 
