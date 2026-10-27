@@ -6473,7 +6473,20 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
         else failed.push(r.rel + ': ' + (r.err || '未知'));
       }
 
-      writeJson(res, 200, { ok: written > 0, written, total: files.length, failed, dest });
+      // ★ 2026-10-27（主人问：市场装完包能自动铺 UI 吗）：
+      //   能，但原来只在**插件启动时**铺（installExtUi 在 apply 里跑），
+      //   装完包不重启就看不到那张卡。这里装完立刻铺一次 —— 扩展包里的
+      //   slot=settings 卡片会自动归位到 {PROFILE_ROOT}/.qqbot-extensions/ui/。
+      let uiSeeded = null;
+      try {
+        const seedMod = await import('./dist/features/ext-ui-seed.js');
+        const profileRoot = String(process.env.DSH_PROFILE_DIR || process.env.DSH_PROFILE_ROOT || '').trim();
+        const r = seedMod.installExtUi({ dataRoot, profileRoot });
+        uiSeeded = { installed: r.installed.length, skipped: r.skipped.length, errors: r.errors };
+      } catch (e) {
+        uiSeeded = { error: e instanceof Error ? e.message : String(e) };
+      }
+      writeJson(res, 200, { ok: written > 0, written, total: files.length, failed, dest, uiSeeded });
     } catch (e) {
       writeJson(res, 500, { ok: false, error: String((e && e.message) || e) });
     }
