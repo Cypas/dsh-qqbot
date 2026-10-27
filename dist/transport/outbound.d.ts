@@ -32,6 +32,8 @@ export interface SessionLike {
         id: string;
     };
 }
+/** 剔除正文里"已被 present 直发"的那部分 [MEDIA:file|…] 标记 */
+export declare function stripDeliveredFileMarkers(text: string, delivered: Set<string> | undefined, cwd: string | undefined): string;
 /**
  * 创建出站事件处理器
  *

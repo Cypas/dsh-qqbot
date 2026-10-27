@@ -72,8 +72,22 @@ export interface TurnEndEvent {
     type: 'turn/end';
     reason: TurnEndReason;
 }
+/** present 声明的一个文件（path 已是绝对路径） */
+export interface PresentedFileRef {
+    /** 绝对路径，或相对 Session 工作目录的路径（仅历史声明） */
+    path: string;
+    /** 模型提供的可选说明 */
+    description?: string;
+}
+/** deliverables/presented 事件 */
+export interface DeliverablesPresentedEvent {
+    type: 'deliverables/presented';
+    turn: number;
+    callId: string;
+    files: PresentedFileRef[];
+}
 /** 出站事件联合类型 */
-export type OutboundEvent = ChunkEvent | MessageEvent | ToolCallEvent | ToolResultEvent | TurnEndEvent;
+export type OutboundEvent = ChunkEvent | MessageEvent | ToolCallEvent | ToolResultEvent | TurnEndEvent | DeliverablesPresentedEvent;
 /**
  * 解析原始事件为强类型
  *

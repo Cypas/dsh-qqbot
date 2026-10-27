@@ -54,6 +54,25 @@ export function parseEvent(raw) {
             const reason = raw.data.reason ?? {};
             return { type: 'turn/end', reason };
         }
+        case 'deliverables/presented': {
+            const data = raw.data;
+            if (typeof data.turn !== 'number' || typeof data.callId !== 'string' || !data.callId)
+                return undefined;
+            if (!Array.isArray(data.files) || data.files.length === 0)
+                return undefined;
+            const files = [];
+            for (const file of data.files) {
+                if (file === null || typeof file !== 'object' || Array.isArray(file))
+                    return undefined;
+                const { path, description } = file;
+                if (typeof path !== 'string' || !path)
+                    return undefined;
+                if (description !== undefined && typeof description !== 'string')
+                    return undefined;
+                files.push(description === undefined ? { path } : { path, description });
+            }
+            return { type: 'deliverables/presented', turn: data.turn, callId: data.callId, files };
+        }
         default:
             return undefined;
     }

@@ -424,6 +424,15 @@ export interface ImQQBotConfig {
     groupAdmin: GroupAdminConfig;
     /** 是否展示工具调用成功结果（工具错误始终展示） */
     showToolResults: boolean;
+    /**
+     * 交付文件直发（present → deliverables/presented，2026-10-27 加）。
+     *   · maxFiles: 单轮最多投递几个文件，超出部分只提示不发（默认 4）
+     * 宿主自带 present 工具时，模型声明交付物后插件在轮末自动把文件发到当前会话。
+     */
+    sendFile?: {
+        /** 单轮最多投递几个文件（默认 4） */
+        maxFiles?: number;
+    };
     /** 调试模式 */
     debug: boolean;
     /**

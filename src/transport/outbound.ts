@@ -7,6 +7,7 @@
 import type { SessionManager, SessionRecord } from '../session/index.js';
 import type { ImQQBotConfig } from '../config.js';
 import type { Logger, ReplyTarget } from '../types.js';
+import { resolve as resolvePath } from 'node:path';
 import { OutboundBuffer, sendRichOutbound, type QQBotSender } from './outbound-buffer.js';
 import { resolveMsgIndex } from './msg-index.js';
 import { dataRootOf } from '../gateway/data-root.js';
@@ -42,9 +43,11 @@ import {
   type ToolCallEvent,
   type ToolResultEvent,
   type TurnEndEvent,
+  type DeliverablesPresentedEvent,
   type RawSessionEvent,
   type StreamDelta,
 } from './events.js';
+import { DeliverablesDeliverer } from './deliverables.js';
 import { feedReasoning, endReasoningTurn } from '../features/reasoning-bus.js';
 import { rewriteLocalMarkdownImages } from '../features/md-media-rewrite.js';
 
@@ -158,13 +161,25 @@ class OutboundRouter {
     userEmo?: string;
   }>();
 
+  /** 交付物投递器（readonly，构造时建一次） */
+  private readonly deliverables: DeliverablesDeliverer;
+  /**
+   * 本回合已由 present 直发的文件（sessionKey → 规范化路径集合）。
+   * 用途：模型常"既 present 又在正文写 [MEDIA:file|同一路径]"，若不拦会发两遍（2026-10-27）。
+   * turn/end 清空（deliverables/presented 先于 turn/end 到达，时序天然安全）。
+   */
+  private readonly deliveredFiles = new Map<string, Set<string>>();
+
   public constructor(
     private readonly manager: SessionManager,
     private readonly bot: QQBotSender,
     private readonly config: ImQQBotConfig,
     private readonly logger: Logger,
     private readonly toolsRegistry: ToolsRegistryLike | undefined,
-  ) {}
+  ) {
+    // present 声明的交付物投递器（2026-10-27）：宿主在 turn/end 前发 deliverables/presented
+    this.deliverables = new DeliverablesDeliverer(bot, config, logger, (r) => this.resolveTarget(r));
+  }
 
   /** 出站目标(每次实际发送前逐条调用, [RECALL] 除外):
    *  passive → 一律带 msg_id 回复(其余行为不变; 唯一例外: 回合主回复正文块>5 时
@@ -432,7 +447,39 @@ class OutboundRouter {
       case 'turn/end':
         this.onTurnEnd(session.header.id, record, event);
         break;
+      case 'deliverables/presented':
+        this.onDeliverables(record, event);
+        break;
     }
+  }
+
+  /**
+   * present 声明的交付物：轮末把文件逐个发到当前会话（2026-10-27）。
+   *
+   * 宿主在 turn/end **之前**发这个事件，所以直接投递即可；不 await（发送失败已内部降级）。
+   * 闸门静默的回合不发（模型既然决定不出声，就别甩文件）。
+   */
+  private onDeliverables(record: SessionRecord, event: DeliverablesPresentedEvent): void {
+    if (this.gateSilenced.has(record.sessionKey)) {
+      this.logger.debug(`im-qqbot: 闸门静默回合 → 跳过 ${event.files.length} 个交付物`);
+      return;
+    }
+    this.logger.debug(
+      `im-qqbot: deliverables/presented turn=${event.turn} callId=${event.callId} files=${event.files.length}`,
+    );
+    // 登记已交付路径：正文里若还写了 [MEDIA:file|同一文件]，send() 会剔除，避免重复发送
+    const key = record.sessionKey;
+    let set = this.deliveredFiles.get(key);
+    if (set === undefined) {
+      set = new Set<string>();
+      this.deliveredFiles.set(key, set);
+    }
+    for (const file of event.files) set.add(normalizePathForCompare(resolvePresentedPath(file.path, this.config.cwd)));
+    void this.deliverables.deliver(record, event.files).catch((err: unknown) => {
+      this.logger.error(
+        `im-qqbot: deliverables deliver failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
   }
 
   /** 流式文本增量：累积到会话 buffer */
@@ -603,12 +650,17 @@ class OutboundRouter {
     }
 
     this.gateSilenced.delete(_record.sessionKey);
+    this.deliveredFiles.delete(_record.sessionKey);
     this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}${silenced ? ' (闸门静默回合)' : ''}`);
   }
 
   /** 统一发送：逐条自适应目标(适配主动) + 富媒体感知分块；媒体指令([MEDIA:..]/[RECALL])被剔除，失败降级记录 */
   private async send(_record: SessionRecord, text: string, tag: string): Promise<void> {
     try {
+      // 2026-10-27: 已被 present 直发的文件，正文里同路径的 [MEDIA:file|…] 标记剔除，避免一份文件发两遍
+      const deduped = stripDeliveredFileMarkers(text, this.deliveredFiles.get(_record.sessionKey), this.config.cwd);
+      if (deduped.trim() === '') return; // 整段只剩"已被 present 的同一文件"→ 不再发空消息
+      text = deduped;
       // 2026-10-21: 正文里的本地图 markdown 自动传 QQ、转 qqbot-media 引用（失败保留原样）
       // 2026-10-21 修：不再依赖全局 factory（managersOf() 拿不到 groupAdmin），
       //   直接用本 router 自己的 manager —— 它一定就是这个会话实例的那个。
@@ -643,6 +695,44 @@ class OutboundRouter {
       this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+}
+
+// ── present 直发去重（2026-10-27） ──
+//   现象：模型常"既 present 又在正文写 [MEDIA:file|同一路径]"→ 同一份文件发两遍。
+//   做法：turn 内记下已 present 的规范化路径，正文里同路径的 [MEDIA:file|…] 标记剔除。
+
+/** present 给的路径 → 便于比较的绝对路径（file:// 剥前缀；相对路径按 cwd 解析） */
+function resolvePresentedPath(p: string, cwd: string | undefined): string {
+  const s = String(p ?? '').trim();
+  if (s.startsWith('file://')) return s.replace(/^file:\/\//, '');
+  if (/^[a-zA-Z]:[\\/]/.test(s) || s.startsWith('/') || s.startsWith('\\\\')) return s;
+  return cwd ? resolvePath(cwd, s) : s;
+}
+
+/** 路径比较键：斜杠统一；仅 Windows 盘符路径折叠大小写（POSIX 大小写敏感，不动） */
+function normalizePathForCompare(p: string): string {
+  const s = String(p ?? '').trim().replace(/^file:\/\//, '').replace(/\\/g, '/');
+  return /^[a-zA-Z]:\//.test(s) ? s.toLowerCase() : s;
+}
+
+/** 剔除正文里"已被 present 直发"的那部分 [MEDIA:file|…] 标记 */
+export function stripDeliveredFileMarkers(
+  text: string,
+  delivered: Set<string> | undefined,
+  cwd: string | undefined,
+): string {
+  if (delivered === undefined || delivered.size === 0) return text;
+  let hit = false;
+  const out = String(text ?? '').replace(/\[MEDIA:file\|([^\]\n]+)\]/g, (whole, rawPath: string) => {
+    const key = normalizePathForCompare(resolvePresentedPath(rawPath.trim(), cwd));
+    if (delivered.has(key)) {
+      hit = true;
+      return '';
+    }
+    return whole;
+  });
+  if (!hit) return out;
+  return out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /** 工具参数摘要(详细主动推送用): 压成一行并截断 */

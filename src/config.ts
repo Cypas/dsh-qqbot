@@ -753,6 +753,15 @@ export interface ImQQBotConfig {
   groupAdmin: GroupAdminConfig;
   /** 是否展示工具调用成功结果（工具错误始终展示） */
   showToolResults: boolean;
+  /**
+   * 交付文件直发（present → deliverables/presented，2026-10-27 加）。
+   *   · maxFiles: 单轮最多投递几个文件，超出部分只提示不发（默认 4）
+   * 宿主自带 present 工具时，模型声明交付物后插件在轮末自动把文件发到当前会话。
+   */
+  sendFile?: {
+    /** 单轮最多投递几个文件（默认 4） */
+    maxFiles?: number;
+  };
   /** 调试模式 */
   debug: boolean;
   /**
@@ -847,6 +856,9 @@ const ConfigSchemaRaw: Schema<ImQQBotConfig> = Schema.object({
   schedule: scheduleSchema,
   groupAdmin: groupAdminSchema,
   showToolResults: Schema.boolean().default(false).description('是否展示工具调用成功结果（工具错误始终展示）'),
+  sendFile: Schema.object({
+    maxFiles: Schema.number().default(4).description('交付文件直发: 单轮最多投递几个 present 声明的文件(超出只提示不发)'),
+  }).description('交付文件直发(2026-10-27): 宿主 present 工具声明的文件在轮末自动发到当前 QQ 会话'),
   debug: Schema.boolean().default(false),
   diagLog: Schema.boolean().default(false).description('诊断日志落盘(默认关): 开=把排查用的诊断日志写进 {DSH_HOME|~/.dsh}/*.log, 单文件 2MB 自动轮转(只留 1 份旧档); 平时别开, 会持续占盘'),
   enableApprovals: Schema.boolean().default(false).description('通过 QQ 接收并处理 dsh 一次性权限申请(远程审批: 发起者用 /approve CODE 放行)'),
