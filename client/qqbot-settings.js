@@ -587,14 +587,11 @@ window.__ModuleLoader__.load({
         if (document.getElementById(EXT_UI_CSS_ID)) return
         var s = document.createElement('style')
         s.id = EXT_UI_CSS_ID
-        s.textContent = ''
-          + '.qqs-ext-cards{display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;'
-          + '-webkit-overflow-scrolling:touch;scrollbar-width:none;'
-          + 'scroll-snap-type:x proximity;padding:2px 0 6px}'
-          + '.qqs-ext-cards::-webkit-scrollbar{display:none}'
-          + '.qqs-ext-card{flex:0 0 auto;scroll-snap-align:start;min-width:220px;max-width:320px}'
-          + '.qqs-top-tabs{scrollbar-width:none}'
+        // ★ 2026-10-27：内嵌卡片那条已删（改顶栏页签），这里只留页签/整页卡片需要的样式
+        s.textContent =
+          '.qqs-top-tabs{scrollbar-width:none}'
           + '.qqs-top-tabs::-webkit-scrollbar{display:none}'
+          + '.qqs-ext-card{flex:0 0 auto;scroll-snap-align:start;min-width:220px;max-width:320px}'
           + '.qqs-ext-page-card{display:block;min-width:260px}'
         document.head.appendChild(s)
         // 鼠标滚轮 → 横向滚动（2026-10-26 主人实测"不能横滑"）：
@@ -1226,12 +1223,7 @@ window.__ModuleLoader__.load({
       //     ② 扩展脚本报错只白自己那张卡，不整页崩
       var EXT_UI_LIST = '/api/qqbot-settings/ext-ui/list'
       var EXT_UI_FILE = '/api/qqbot-settings/ext-ui/file?f='
-      function extUiText(extId, f) {
-        return fetch(EXT_UI_FILE + encodeURIComponent(f) + '&id=' + encodeURIComponent(extId))
-          .then(function (r) { return r.json() })
-          .then(function (j) { return j && j.ok ? String(j.text || '') : '' })
-          .catch(function () { return '' })
-      }
+      // ★ 2026-10-27 删：extUiText 只被 mountExtUiCards 用过（已删），成死代码。
       function extUiApi(extId) {
         return {
           extId: extId,
@@ -1265,46 +1257,11 @@ window.__ModuleLoader__.load({
           + '.qqs-ext-page-card{display:block}'
         document.head.appendChild(s)
       }
-      function mountExtUiCards() {
-        injectExtUiCss()
-        var box = document.getElementById('qqs-ext-cards')
-        if (!box) return
-        fetch(EXT_UI_LIST).then(function (r) { return r.json() }).then(function (j) {
-          if (!j || !j.ok) return
-          var list = (j.items || []).filter(function (x) { return x.slot === 'settings' })
-          if (!list.length) { box.style.display = 'none'; return }
-          box.style.display = ''
-          // 幂等：卡片数量没变就不重挂（避免每次 setState 都把扩展的 DOM 冲掉）
-          var sig = list.map(function (x) { return x.extId }).join(',')
-          if (box.getAttribute('data-sig') === sig) return
-          box.setAttribute('data-sig', sig)
-          box.innerHTML = ''
-          list.forEach(function (it) {
-            var host = document.createElement('div')
-            host.className = 'qqs-ext-card'
-            var sr = host.attachShadow({ mode: 'open' })
-            box.appendChild(host)
-            Promise.all([
-              extUiText(it.extId, 'card.html'),
-              it.files && it.files.indexOf('card.css') >= 0 ? extUiText(it.extId, 'card.css') : Promise.resolve(''),
-              it.files && it.files.indexOf('card.js') >= 0 ? extUiText(it.extId, 'card.js') : Promise.resolve(''),
-            ]).then(function (res) {
-              sr.innerHTML = '<style>' + (res[1] || '') + '</style>' + (res[0] || '')
-              if (!res[2]) return
-              try {
-                // Function 而不是 eval：作用域干净，且把 qqbotExt 作为形参传进去
-                new Function('qqbotExt', 'shadowRoot', res[2])(extUiApi(it.extId), sr)
-              } catch (e) {
-                var d = document.createElement('div')
-                d.style.cssText = 'color:#c33;font-size:12px;padding:4px 0'
-                d.textContent = '卡片脚本出错: ' + (e && e.message ? e.message : e)
-                sr.appendChild(d)
-              }
-            })
-          })
-        }).catch(function () { /* 静默：扩展 UI 挂了不该影响设置页本体 */ })
-      }
-      setTimeout(function () { try { mountExtUiCards() } catch (e) { /* ignore */ } }, 0)
+      // ★ 2026-10-27 删：这是第一版「把扩展卡片内嵌在设置页内容区」的实现。
+      //   后来改成顶栏页签（ExtCardPage + Shadow DOM），两套并存会导致
+      //   同一张卡在设置页出现两次；而且这里用的还是闭包内那个旧 extUiApi
+      //   （没有 getConfig/setConfig）→ 卡片报 'qqbotExt.getConfig is not a function'。
+      //   统一走顶栏页签后删掉。
 
       return h('div', { style: { maxWidth: 720 } },
         h('h2', { style: { margin: '0 0 6px' } }, 'QQ 机器人设置'),
@@ -1317,8 +1274,8 @@ window.__ModuleLoader__.load({
           h(SButton, { variant: 'ghost', onClick: load }, '放弃修改(重新读取)'),
           msg ? h('span', { style: { fontSize: 13, color: T.text2 } }, msg) : null,
           close ? h(SButton, { variant: 'ghost', onClick: close }, '完成') : null),
-        // ★ 扩展卡片挂载点：横向可滑动，样式见文件末尾注入的 .qqs-ext-cards
-        h('div', { id: 'qqs-ext-cards', className: 'qqs-ext-cards' }))
+        // ★ 2026-10-27：这里原来挂 #qqs-ext-cards（内嵌卡片），已改为顶栏页签，容器不需要了
+        null)
     }
 
         // ── ⑥ QQ 群管理(单开大卡片; P3+ 设计系统版: 横排 Tab + 状态条 + 表格 + 空状态 + 预留接口位) ──
