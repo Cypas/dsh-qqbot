@@ -8,6 +8,8 @@ export interface QQChannel {
 }
 export declare const name = "qqbot-channel-tools";
 export declare const inject: string[];
+/** 某实例的标识：优先**人设 id**（config.preset），没配才回落工作区目录名 */
+export declare function instanceTagOfManager(m: unknown): string;
 export declare function setContextlessSmartGlobal(v: boolean): void;
 /** 读登记（session-manager 的 pre-step 用） */
 export declare function readContextPending(dataRoot: string, sessionKey: string): {
@@ -89,6 +91,8 @@ export declare function syncContextTools(agentCtx: unknown, shouldHave: boolean,
     dataRoot?: string;
     sessionKey?: string;
 }, reminderText?: string): void;
+/** 按当前会话的「已领取集合」重设一次剪枝（幂等：deny 名单没变就不动） */
+export declare function applyExtToolVisibility(agentCtx: unknown, selfTag?: string): void;
 export declare function ensureExtToolsGlobal(globalCtx: unknown): void;
 export declare function ensureContextToolsGlobal(globalCtx: unknown): void;
 /**

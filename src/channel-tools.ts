@@ -152,7 +152,7 @@ function workspaceTagOf(cwd: string | undefined): string {
 }
 
 /** 某实例的标识：优先**人设 id**（config.preset），没配才回落工作区目录名 */
-function instanceTagOfManager(m: unknown): string {
+export function instanceTagOfManager(m: unknown): string {
   const cfg = (m as { config?: { preset?: string } } | undefined)?.config;
   const p = String(cfg?.preset ?? '').trim();
   return p || workspaceTagOf((m as { cwd?: string } | undefined)?.cwd);
@@ -3572,8 +3572,70 @@ interface ExtToolEntry {
 
 /** 本轮扫描到的「可领取」扩展工具（full 名 → 条目） */
 const extToolIndex = new Map<string, ExtToolEntry>();
-/** 已领取到某个会话作用域的工具（agentCtx → full → disposer） */
+/** 已领取到某个会话作用域的工具（agentCtx → full → disposer）—— metaMode 下用 */
 const extGranted = new WeakMap<object, Map<string, () => void>>();
+
+/**
+ * 「默认全剪枝 + 按需放开」的授予集合（2026-10-28，主人定）。
+ *
+ * 目标形态：`expose:'all'` 的工具**始终全局注册**（注册表不动、不抖），
+ * 但每个会话**默认被 deny 掉全部**（模型清单里连名字都看不到 = 零 token），
+ * 只有 `gain_qq_tools.enable` 过的名字才从 deny 名单里拿掉。
+ *
+ * 复用的是仓库里已有的 `tools.restrict({ deny })` + `liftRestriction`（见 restrictContextTools 注释），
+ * 不新造机制。
+ */
+const extGrantSet = new WeakMap<object, Set<string>>();
+const extRestrictState2 = new WeakMap<object, { sig: string; dispose?: () => void }>();
+/** 见过的会话作用域 → 它的 selfTag（扫描完成后要按新索引**重放一次**剪枝） */
+const extSeenCtx = new Map<object, string>();
+
+/** 按当前会话的「已领取集合」重设一次剪枝（幂等：deny 名单没变就不动） */
+export function applyExtToolVisibility(agentCtx: unknown, selfTag?: string): void {
+  try {
+    const ctx = agentCtx as object | null | undefined;
+    if (!ctx || typeof ctx !== 'object') return;
+    // ⚠️ 2026-10-28（主人实测：enable 一个 standard 后，自己实例那 4 个被移除）：
+    //   gain_qq_tools 内部调本函数时**不传 selfTag**，原来会把 ownSuffix 算成空串 ⇒
+    //   连带把本实例自己的那份也 deny 掉。现在：不传就**沿用上次记住的 tag**。
+    const prevTag = extSeenCtx.get(ctx) ?? '';
+    const tag = selfTag !== undefined ? String(selfTag) : prevTag;
+    extSeenCtx.set(ctx, tag);
+    const all = [...extToolIndex.keys()];
+    if (!all.length) return;                     // 还没扫到东西：先不动（别把不该剪的剪了）
+    // ⚠️ 2026-10-28（主人纠正）：开关**不是**"关=不剪枝、全可见"。
+    //   关掉元工具 = "按需取用"这条通道整个关掉 ⇒ 别人实例 expose 的工具**永远不可见**
+    //   （没有 gain 入口，也就不该偷偷放出来）。所以无论开关开/关，都照常剪：
+    //     · 自己实例那份（xxx__本tag）：始终放开
+    //     · 别人那份：始终 deny；开关开着时可通过 gain_qq_tools 临时放开
+    // ★ 2026-10-28（主人实测：关了元工具，之前领取的工具还在）：开关关掉时
+    //   **忽略并清空领取记录** —— 通道一关，别人的工具就该彻底消失，不能靠残留的 granted 续命。
+    const metaOnNow = (globalThis as unknown as { __qqbotExtMetaOn?: boolean }).__qqbotExtMetaOn !== false;
+    if (!metaOnNow) extGrantSet.delete(ctx);
+    const granted = metaOnNow ? (extGrantSet.get(ctx) || new Set<string>()) : new Set<string>();
+    // ★ 2026-10-28（主人直觉）：**本实例自己的那份默认放开** —— 在 whale-girl 的会话里，
+    //   `bing_search__whale-girl` 本来就该看得见；别人的实例、以及自己没暴露的工具才要 gain 领取。
+    const ownSuffix = tag ? ('__' + tag) : '';
+    const deny = all.filter((n) => !granted.has(n) && !(ownSuffix && n.endsWith(ownSuffix)));
+    const sig = (metaOnNow ? '1' : '0') + '|' + deny.join(',');
+    const st = extRestrictState2.get(ctx);
+    if (st && st.sig === sig) return;
+    if (st?.dispose) liftRestriction(st.dispose);
+    const toolsObj = toolsOfScope(ctx) as { restrict?: (o: unknown) => unknown } | undefined;
+    const restrict = toolsObj?.restrict;
+    if (typeof restrict !== 'function') {
+      traceToolReg('[ext-vis] 剪枝失败: 拿不到 tools.restrict');
+      return;
+    }
+    if (!deny.length) { extRestrictState2.set(ctx, { sig }); return; }
+    const d = restrict.call(toolsObj, { deny });
+    const dispose = typeof d === 'function' ? (d as () => void) : undefined;
+    extRestrictState2.set(ctx, { sig, dispose });
+    traceToolReg('[ext-vis] deny=' + deny.length + ' 件 已领取=' + granted.size);
+  } catch (e) {
+    traceToolReg('[ext-vis] 异常: ' + String((e as Error)?.message ?? e).slice(0, 140));
+  }
+}
 const GAIN_TOOL_NAME = 'gain_qq_tools';
 
 /** 取当前调用方的 agent ctx（enable 的目标作用域） */
@@ -3636,16 +3698,16 @@ function makeGainTool(globalCtx: unknown, logger?: { info?: (m: string) => void 
       '按需取用「QQ 实例的扩展工具」：先 list / search 看有哪些（只回名字+一句话），'
       + '再 enable 把某个装进当前会话，之后就能调用它（非 QQ 会话想往 QQ 发消息、读会话时用）。'
       + 'disable 可卸下。',
+    // ⚠️ 2026-10-28（引擎控制台实录）：defineTool 的 parameters 要的是**扁平字段表**，
+    //   ；写成 JSON Schema（type/properties/required）
+    //   会被判 "unsupported JSON schema: parameters.type must be a value schema object" ⇒ 注册直接失败。
     parameters: {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['list', 'search', 'enable', 'disable'], description: 'list=列出全部 / search=按关键词搜 / enable=装到当前会话 / disable=卸下' },
-        query: { type: 'string', description: 'search 用：关键词（匹配工具名与描述）' },
-        tool: { type: 'string', description: 'enable/disable 用：工具名（形如 qq_send__whale-girl，可先 list 查）' },
-        tag: { type: 'string', description: '可选：只看某个实例（tag）' },
-      },
-      required: ['action'],
-    } as never,
+      action: { type: 'string', required: true, enum: ['list', 'search', 'enable', 'disable'], description: 'list=列出全部 / search=按关键词搜 / enable=装到当前会话 / disable=卸下' },
+      query: { type: 'string', description: 'search 用：关键词（匹配工具名与描述）' },
+      tool: { type: 'string', description: 'enable/disable 用：工具名，可用逗号或空格**批量**（如 qq_send__whale-girl,bing_search__standard；先 list 查）' },
+      tag: { type: 'string', description: '可选：只看某个实例（tag）' },
+      limit: { type: 'integer', description: 'list/search 返回条数 1~50（默认 20）' },
+    },
     output: {
       schema: {
         type: 'object', additionalProperties: false,
@@ -3656,8 +3718,11 @@ function makeGainTool(globalCtx: unknown, logger?: { info?: (m: string) => void 
     async execute(args: Record<string, unknown>, exec: unknown) {
       const action = String((args as { action?: unknown })?.action ?? 'list');
       const q = String((args as { query?: unknown })?.query ?? '').trim().toLowerCase();
-      const wantTool = String((args as { tool?: unknown })?.tool ?? '').trim();
+      const wantTools = String((args as { tool?: unknown })?.tool ?? '').trim()
+        .split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
       const wantTag = String((args as { tag?: unknown })?.tag ?? '').trim();
+      const limRaw = Number((args as { limit?: unknown })?.limit);
+      const lim = Math.max(1, Math.min(50, Number.isFinite(limRaw) && limRaw > 0 ? Math.trunc(limRaw) : 20));
       const rows = [...extToolIndex.values()].filter((e) => (!wantTag || e.tag === wantTag));
       try {
         if (action === 'list' || action === 'search') {
@@ -3665,31 +3730,70 @@ function makeGainTool(globalCtx: unknown, logger?: { info?: (m: string) => void 
             ? rows.filter((e) => !q || e.full.toLowerCase().includes(q) || String(e.description).toLowerCase().includes(q))
             : rows;
           if (!hit.length) return { ok: true, msg: rows.length ? '没有匹配的工具（换关键词试试）' : '当前没有可领取的扩展工具' };
-          const lines = hit.map((e) => e.full + '  —  ' + String(e.description || '').slice(0, 90)).join('\n');
-          return { ok: true, msg: '可领取的扩展工具 ' + hit.length + ' 个（enable 时 tool 写全名）:\n' + lines };
+          const shown = hit.slice(0, lim);
+          const lines = shown.map((e) => e.full + '  —  ' + String(e.description || '').slice(0, 90)).join('\n');
+          const more = hit.length > shown.length
+            ? ('\n……（共 ' + hit.length + ' 个，已显示前 ' + shown.length + ' 个；加 limit 或 search 缩小）')
+            : '';
+          return { ok: true, msg: '可领取的扩展工具 ' + hit.length + ' 个（enable 时 tool 写全名，可逗号批量）:\n' + lines + more };
         }
         if (action === 'enable') {
-          if (!wantTool) return { ok: false, msg: 'tool 必填（先 action=list 查名字）' };
-          const ent = extToolIndex.get(wantTool) || rows.find((e) => e.baseName === wantTool) || undefined;
-          if (!ent) return { ok: false, msg: '找不到工具: ' + wantTool + '（先 action=list）' };
+          if (!wantTools.length) return { ok: false, msg: 'tool 必填（先 action=list 查名字）' };
           const actx = agentCtxOf(exec);
           if (!actx) return { ok: false, msg: '拿不到当前会话作用域（本工具只能在会话内使用）' };
-          let m = extGranted.get(actx);
-          if (!m) { m = new Map(); extGranted.set(actx, m); }
-          if (m.has(ent.full)) return { ok: true, msg: '已经装好了：' + ent.full };
+          let gset = extGrantSet.get(actx);
+          if (!gset) { gset = new Set(); extGrantSet.set(actx, gset); }
           const toolsObj = toolsOfScope(actx) as { register?: (t: unknown) => unknown } | undefined;
           const regFn = toolsObj?.register;
-          if (!toolsObj || typeof regFn !== 'function') return { ok: false, msg: '当前会话拿不到 tools.register' };
-          const tool = buildExtTool(ent, globalCtx, logger);
-          const d = regFn.call(toolsObj, tool as never) as unknown;
-          if (typeof d === 'function') m.set(ent.full, d as () => void);
-          return { ok: true, msg: '已装进当前会话：' + ent.full + '（本回合后续步骤即可调用；换会话需重新 enable）' };
+          let mm = extGranted.get(actx);
+          if (!mm) { mm = new Map(); extGranted.set(actx, mm); }
+          const okList: string[] = [];
+          const badList: string[] = [];
+          for (const name of wantTools) {
+            const ent = extToolIndex.get(name) || rows.find((e) => e.baseName === name) || undefined;
+            if (!ent) { badList.push(name); continue; }
+            gset.add(ent.full);
+            // 兜底：按需取用模式下工具未全局注册，得真注册一次
+            if (!mm.has(ent.full) && toolsObj && typeof regFn === 'function') {
+              try {
+                const d = regFn.call(toolsObj, buildExtTool(ent, globalCtx, logger) as never) as unknown;
+                if (typeof d === 'function') mm.set(ent.full, d as () => void);
+              } catch { /* 已全局注册时覆盖同名，失败无妨 */ }
+            }
+            okList.push(ent.full);
+          }
+          applyExtToolVisibility(actx);
+          const head = okList.length ? ('已放开 ' + okList.length + ' 个：' + okList.join(', ')) : '没有放开任何工具';
+          const tail = badList.length ? ('；找不到：' + badList.join(', ')) : '';
+          return { ok: badList.length === 0, msg: head + tail + '（本会话可见；换会话要重新 enable）' };
         }
         if (action === 'disable') {
           const actx = agentCtxOf(exec);
-          const m = actx ? extGranted.get(actx) : undefined;
+          if (actx) {
+            const gset = extGrantSet.get(actx);
+            if (!gset || !gset.size) return { ok: true, msg: '当前会话没有领取过扩展工具' };
+            if (!wantTools.length) {
+              gset.clear();
+              applyExtToolVisibility(actx);
+              return { ok: true, msg: '已收回本会话领取的全部扩展工具' };
+            }
+            const done: string[] = [];
+            const miss: string[] = [];
+            for (const name of wantTools) {
+              const ent = extToolIndex.get(name) || rows.find((e) => e.baseName === name) || undefined;
+              const full = ent ? ent.full : name;
+              if (gset.delete(full)) done.push(full); else miss.push(name);
+            }
+            applyExtToolVisibility(actx);
+            return {
+              ok: miss.length === 0,
+              msg: (done.length ? '已收回 ' + done.length + ' 个：' + done.join(', ') : '没有收回任何工具')
+                + (miss.length ? ('；未领取：' + miss.join(', ')) : ''),
+            };
+          }
+          const m = extGranted.get(actx as never);
           if (!m || !m.size) return { ok: true, msg: '当前会话没有领取过扩展工具' };
-          const target = wantTool || '';
+          const target = wantTools[0] ?? '';
           if (target) {
             const d = m.get(target);
             if (!d) return { ok: false, msg: '当前会话没装: ' + target };
@@ -3709,10 +3813,20 @@ function makeGainTool(globalCtx: unknown, logger?: { info?: (m: string) => void 
   });
 }
 
-/** 全局注册元工具（幂等） */
-function ensureGainToolGlobal(globalCtx: unknown, logger?: { info?: (m: string) => void }): void {
+/** 全局注册/注销元工具（幂等；on=false 时**真注销**，对应设置页的热关闭） */
+function ensureGainToolGlobal(globalCtx: unknown, logger?: { info?: (m: string) => void }, on = true): void {
   try {
     const g = globalThis as unknown as { __qqbotGainToolReg?: () => void; __qqbotGainToolOn?: boolean };
+    // ★ 2026-10-28（主人 + issue 反馈）：**热关闭** —— 开关关掉时元工具必须真的消失，
+    //   否则「非 QQ 会话零 QQ 工具」这条做不到（还会白占几十 token）。
+    if (!on) {
+      if (typeof g.__qqbotGainToolReg === 'function') {
+        try { g.__qqbotGainToolReg(); } catch { /* ignore */ }
+        g.__qqbotGainToolReg = undefined;
+        logger?.info?.('[channel-tools] 已注销元工具 ' + GAIN_TOOL_NAME);
+      }
+      return;
+    }
     if (g.__qqbotGainToolReg) return;
     const rootCtx = (((globalCtx as { root?: unknown } | null)?.root) ?? globalCtx) as object;
     const gctx = rootCtx as { get?: (n: string) => unknown; logger?: { info?: (m: string) => void } };
@@ -3722,7 +3836,11 @@ function ensureGainToolGlobal(globalCtx: unknown, logger?: { info?: (m: string) 
     const d = toolsObj.register.call(toolsObj, makeGainTool(globalCtx, logger) as never) as unknown;
     if (typeof d === 'function') g.__qqbotGainToolReg = d as () => void;
     gctx.logger?.info?.('[channel-tools] 已注册元工具 ' + GAIN_TOOL_NAME);
-  } catch { /* ignore */ }
+  } catch (e) {
+    // ⚠️ 2026-10-28：这里原来静默 catch ⇒ "开了开关却连元工具都没有"，完全查不出原因。
+    const msg = e instanceof Error ? e.message : String(e);
+    try { console.error('[channel-tools] 元工具注册失败: ' + msg); } catch { /* ignore */ }
+  }
 }
 
 export function ensureExtToolsGlobal(globalCtx: unknown): void {
@@ -3749,6 +3867,39 @@ export function ensureExtToolsGlobal(globalCtx: unknown): void {
       let toolsObj: { register?: (t: unknown) => unknown } | undefined;
       try { toolsObj = gctx.get?.('tools') as typeof toolsObj; } catch { /* ignore */ }
       if (!toolsObj || typeof toolsObj.register !== 'function') { extGlobDiag('FAIL 拿不到 tools 服务'); extDiag('[extglob] 拿不到 tools 服务, 跳过'); return; }
+      // 2026-10-28：元工具**先注册**，且不依赖"有没有实例"——
+      //   上一版放在扫描末尾，若中途 early-return 就永远注册不上（实测：开了按需取用却连元工具都没有）。
+      const metaOn = (() => {
+        // ① **文件开关优先**（最可靠，2026-10-28 主人实测："重启了也读不到勾选"）：
+        //    settings-host 保存时写 {dataRoot}/.qqbot/ext-meta-tool.json，这里每次扫描现读；
+        //    不依赖 config 快照，也不依赖 globalThis 有没有被写过。
+        try {
+          const dr = String((managersOf()[0] as unknown as { dataRoot?: string } | undefined)?.dataRoot ?? '').trim();
+          if (dr) {
+            const o = JSON.parse(readFileSync(join(dr, '.qqbot', 'ext-meta-tool.json'), 'utf8')) as { on?: unknown };
+            if (typeof o?.on === 'boolean') return o.on;
+          }
+        } catch { /* 文件不存在 = 还没设过，往下走 */ }
+        // ② 进程级热标记：设置页保存时 settings-host 写入（config 是启动快照，不会自己变）。
+        try {
+          const live = (globalThis as unknown as { __qqbotExtMetaTool?: unknown }).__qqbotExtMetaTool;
+          if (typeof live === 'boolean') return live;
+        } catch { /* ignore */ }
+        // ② 回退 config —— ⚠️ 必须**遍历所有实例**，不能只看 managersOf()[0]：
+        //   index.ts 的 'qqbot/settings-changed' 监听会  把
+        //   保存值原地合并进当前实例的 config（这就是面板其它开关的热更路子）；但只有**被保存的那个
+        //   实例**里有这个字段，第一个 manager 未必是它 ⇒ 只看第 0 个会永远读到 undefined/false。
+        try {
+          for (const m of managersOf()) {
+            const cfgM = (m as unknown as { config?: { extMetaTool?: boolean } } | undefined)?.config;
+            if (cfgM && cfgM.extMetaTool === true) return true;
+          }
+        } catch { /* ignore */ }
+        return false;
+      })();
+      // ★ 2026-10-28（主人急）：**无条件注册元工具** —— 它是个极轻的入口，本来就不该被任何开关挡住。
+      //   "开了按需取用却连 gain_qq_tools 都看不到" 这种状态毫无意义：要么两个都有，要么两个都没有。
+      ensureGainToolGlobal(globalCtx, gctx.logger, metaOn);
       // 实例清单：每个账号实例注册一份（tag = 人设 id）
       const insts: Array<{ tag: string; dataRoot: string; cwd: string }> = [];
       try {
@@ -3764,40 +3915,51 @@ export function ensureExtToolsGlobal(globalCtx: unknown): void {
       if (!g.__qqbotExtToolsGlobal) g.__qqbotExtToolsGlobal = new Map();
       const reg = g.__qqbotExtToolsGlobal;
       // 开关（默认开 = 按需取用）：关掉后回到"扩展工具全部全局注册"的旧行为
-      let metaMode = true;
-      try {
-        const firstMgr = managersOf()[0] as unknown as { config?: { extMetaTool?: boolean } } | undefined;
-        if (firstMgr?.config && firstMgr.config.extMetaTool === false) metaMode = false;
-      } catch { /* ignore */ }
+      // 2026-10-28（主人实测纠正）：默认**保持旧行为**（全部 expose:'all' 全局注册）。
+      //   原因：第一版把默认值设成"按需取用"，结果元工具没注册上 => 所有会话一个扩展工具都没有
+      //   （主人截图："怎么你改一下代码把自己的扩展工具都给不注册了"）。
+      //   ⇒ 现在只有显式打开 extMetaTool 才进按需取用，默认一切照旧。
+      const metaMode = metaOn;   // 与上面同一个口径（含 live 标记）
       extToolIndex.clear();
+      (globalThis as unknown as { __qqbotExtMetaOn?: boolean }).__qqbotExtMetaOn = metaMode;
       extGlobDiag('metaMode=' + String(metaMode));
+      // ── 阶段 1：扫描，**只填索引**（不注册）────────────────────────────
       for (const inst of insts) {
         let defs: Awaited<ReturnType<typeof loadExtensionTools>> = [];
         try {
           defs = await loadExtensionTools(inst.dataRoot, (gctx.logger ?? console) as Parameters<typeof loadExtensionTools>[1]);
         } catch { defs = []; }
         const exposed = defs.filter((d) => d.expose === 'all');
-        extGlobDiag('inst=' + inst.tag + ' defs=' + defs.length + ' exposeAll=' + exposed.length + ' names=' + defs.map((d) => d.name + (d.expose === 'all' ? '*' : '')).join('|'));
-        if (!exposed.length) continue;
+        extGlobDiag('inst=' + inst.tag + ' defs=' + defs.length + ' exposeAll=' + exposed.length);
         for (const def of exposed) {
-          // ⚠️ 2026-10-10 事故真凶：分隔符必须在 [a-zA-Z0-9_-] 之内 ——
-          //   `@` 不在 LLM API 允许的工具名字符集里（^[a-zA-Z0-9_-]+$），
-          //   一旦注册进去就是"每一轮请求都被拒"（机器人整体瘫痪）。故改用 `__`。
+          // ⚠️ 工具名只允许 [a-zA-Z0-9_-]（LLM API 硬约束，2026-10-10 事故）
           const full = def.name + '__' + inst.tag;
-          // ⚠️ 兜底闸门：工具名只允许 [a-zA-Z0-9_-]（LLM API 硬约束）——
-          //   非法名一旦注册进工具表，**每一轮请求都会被 API 整轮拒绝**（2026-10-10 事故）。
           if (!/^[a-zA-Z0-9_-]+$/.test(full)) { extGlobDiag('SKIP illegal global name: ' + full); continue; }
-          // 2026-10-28：**按需取用模式**（默认）——只登记到索引，不注册到全局。
-          //   会话需要时由 gain_qq_tools.enable 装进它自己的 agent 作用域。
-          if (metaMode) {
-            extToolIndex.set(full, { full, tag: inst.tag, baseName: def.name, description: String(def.description ?? ''), def: def as never, inst });
-            continue;
-          }
-          if (reg.has(full)) continue;
+          extToolIndex.set(full, {
+            full, tag: inst.tag, baseName: def.name,
+            description: String(def.description ?? ''),
+            def: def as never, inst,
+          });
+        }
+      }
+      // ── 阶段 2：**先剪枝**（此时索引已完整）──────────────────────────
+      //   ★ 2026-10-28（主人抓到抖动："新增 7 个 → 下个 step 又移除 7 个"）：
+      //   以前是「循环里边扫描边注册」⇒ 注册发生时 deny 名单还不完整 ⇒ 模型先看到一步、下一步才被剪掉。
+      //   现在顺序固定为 **扫描 → 剪枝 → 注册**：注册落地时 deny 已经就位，模型永远看不到那一步。
+      for (const [c, tg] of extSeenCtx) applyExtToolVisibility(c, tg);
+      // ── 阶段 3：全局注册 —— **始终注册**（注册表 != 可见性；可见由 deny 控制）。
+      //   ⚠️ 2026-10-28 修：原来按需取用模式下跳过注册，结果连"自己实例那份"都调不到
+      //   （deny 只能隐藏，不能凭空造出工具）。
+      if (true) {
+        for (const ent of extToolIndex.values()) {
+          if (reg.has(ent.full)) continue;
+          const def = ent.def;
+          const inst = ent.inst;
+          const full = ent.full;
           try {
             const tool = defineTool({
               name: full,
-              description: def.description + ' (用户扩展工具 · ' + inst.tag + ')',
+              description: String(def.description ?? '') + ' (用户扩展工具 · ' + inst.tag + ')',
               parameters: def.inputSchema as never,
               output: {
                 schema: {
@@ -3807,7 +3969,6 @@ export function ensureExtToolsGlobal(globalCtx: unknown): void {
                 render: (_a: unknown, v: { ok: boolean; msg: string }) => [{ type: 'text' as const, text: v.ok ? v.msg : ('失败: ' + v.msg) }],
               },
               async execute(args: Record<string, unknown>, exec: unknown) {
-                // 账号包：按注册名里的 tag 反查（这就是"名字即归属"）
                 let pack: Record<string, unknown> | undefined;
                 try { pack = buildWorkspaceQqPack(inst.tag, inst.dataRoot); } catch { pack = undefined; }
                 const env: Record<string, unknown> = {
@@ -3817,7 +3978,6 @@ export function ensureExtToolsGlobal(globalCtx: unknown): void {
                   logger: gctx.logger,
                   qq: pack,
                 };
-                // 若这一次调用恰好来自 QQ 会话，则会话级上下文优先（sender/replyTarget/manager 用当前会话的）
                 try {
                   const sess = findSessionRec(channelOf(exec as never), exec as never);
                   if (sess) {
@@ -3840,15 +4000,11 @@ export function ensureExtToolsGlobal(globalCtx: unknown): void {
             const d = toolsObj.register.call(toolsObj, tool as never) as unknown;
             if (typeof d === 'function') reg.set(full, d as () => void);
             extGlobDiag('OK registered ' + full);
-            extDiag('[extglob] 全局注册 ' + full);
-            gctx.logger?.info?.('[channel-tools] 扩展工具已暴露给全部会话: ' + full);
           } catch (e) {
             extGlobDiag('FAIL register ' + full + ' :: ' + ((e instanceof Error ? e.message : String(e)) || '').slice(0, 200));
-            extDiag('[extglob] 注册失败 ' + full + ': ' + ((e instanceof Error ? e.message : String(e)) || '').slice(0, 160));
           }
         }
       }
-      if (metaMode) ensureGainToolGlobal(globalCtx, gctx.logger);
       extGlobDiag('index=' + extToolIndex.size + ' 可领取');
     } catch (e) {
       extGlobDiag('EXCEPTION ' + ((e instanceof Error ? e.message : String(e)) || '').slice(0, 200));

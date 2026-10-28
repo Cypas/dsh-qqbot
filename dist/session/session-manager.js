@@ -27,7 +27,7 @@ import { SettingsReader } from '../model/settings-reader.js';
 import { ModelResolver } from '../model/model-resolver.js';
 import { IdleEvictor } from './idle-evictor.js';
 import { markTurnAborted } from '../gateway/debounce.js';
-import { apply as mountChannelTools, readContextPending, clearContextPending, syncChannelScopedTools, ensureExtToolsGlobal } from '../channel-tools.js';
+import { apply as mountChannelTools, readContextPending, clearContextPending, syncChannelScopedTools, ensureExtToolsGlobal, applyExtToolVisibility, instanceTagOfManager } from '../channel-tools.js';
 import { createGroupAdmin } from '../api/group-admin.js';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { appendFileSync, statSync } from 'node:fs';
@@ -1012,8 +1012,32 @@ export class SessionManager {
         //   所以只在 pre-step 里注册会晚一步（实测：开关关掉后第一个 step 仍拿到旧工具表，调用报 unknown tool）。
         //   claimed 是**同步**派发且 payload 自带 agent ⇒ 在这里同步注册表，本 step 立刻生效。
         hostCtx.on('agent/inbox/claimed', (payload) => {
+            const agent0 = payload?.agent;
+            // ★ 2026-10-28（主人抓到）：扩展工具的注册 + 剪枝也放这里 —— 宿主是
+            //   claim → assemble(工具表快照) → pre-step，放在 pre-step 会**晚一个 step**
+            //   （现象：自己的工具"新增了一个 step，下个 step 又移除"）。
+            // 兜底（主路径已挪到 agent/inbox/claimed；这里只防 claimed 未触发的极端情况）
             try {
-                this.syncScopedToolsOnClaim(payload?.agent);
+                ensureExtToolsGlobal(this.ctx);
+            }
+            catch { /* ignore */ }
+            try {
+                // ⚠️ tag 必须取**该会话所属 manager** 的（`config.preset` 只是 patch 快照，自有存储里的
+                //   preset 不一定合进来 ⇒ 取到空串 ⇒ ownSuffix 为空 ⇒ 把自己实例那 4 个也 deny 了）。
+                let selfTag0 = '';
+                try {
+                    const rec0 = this.findByAgent(agent0);
+                    const mgr0 = rec0?.ch?.manager;
+                    selfTag0 = mgr0 ? instanceTagOfManager(mgr0) : '';
+                }
+                catch { /* ignore */ }
+                if (!selfTag0)
+                    selfTag0 = String(this.config.preset ?? '').trim();
+                applyExtToolVisibility(agent0?.ctx, selfTag0);
+            }
+            catch { /* ignore */ }
+            try {
+                this.syncScopedToolsOnClaim(agent0);
             }
             catch { /* ignore */ }
         });
@@ -1024,6 +1048,21 @@ export class SessionManager {
             //   函数内部：15s 节流 + 幂等（已注册的 name@tag 直接跳过）+ fail-soft（出错静默）。
             try {
                 ensureExtToolsGlobal(this.ctx);
+            }
+            catch { /* ignore */ }
+            // ★ 2026-10-28：扩展工具「默认全剪枝」—— 每个会话（含非 QQ）都按已领取集合重设一次 deny；
+            //   没领取 ⇒ 模型清单里连名字都没有（零 token），gain_qq_tools.enable 后才放开。
+            try {
+                const agentP = payload?.agent;
+                let selfTagP = '';
+                try {
+                    const recP = agentP ? this.findByAgent(agentP) : undefined;
+                    selfTagP = recP?.ch?.manager ? instanceTagOfManager(recP.ch.manager) : '';
+                }
+                catch { /* ignore */ }
+                if (!selfTagP)
+                    selfTagP = String(this.config.preset ?? '').trim();
+                applyExtToolVisibility(agentP?.ctx, selfTagP);
             }
             catch { /* ignore */ }
             // ★ 2026-10-28：原来这里对**每个会话**无条件 `restrictContextTools(ctx, false)` 兜底 deny

@@ -719,6 +719,16 @@ export function apply(ctx) {
       nsConflict: conflict ? { writtenBy: conflict.prev, currentProfile: conflict.me } : null,
     });
   });
+  // ★ 2026-10-28：启动时把各实例自有存储里的 extMetaTool 同步到进程级标记。
+  //   config 是启动快照（schema 默认 false），而用户可能早就勾了这个开关 —— 不同步的话，
+  //   重启后开关看着是勾上的、插件却读不到（"勾了但没生效"）。
+  try {
+    for (const b of (parsePatch()?.bots || [])) {
+      const mg = mergeOwnIntoCfg(b.cfg || {}, b.cfg?.settingsNs || b.id);
+      if (typeof mg?.extMetaTool === 'boolean') { globalThis.__qqbotExtMetaTool = mg.extMetaTool; break; }
+    }
+  } catch { /* ignore */ }
+
   route(ctx, 'POST', '/api/qqbot-settings/update', async (req, res) => {
     const body = await readJsonBody(req);
     if (!body || typeof body !== 'object') return writeJson(res, 400, { error: 'body must be JSON object' });
@@ -731,6 +741,20 @@ export function apply(ctx) {
       const cur = readOwnSettings(ns);
       const merged = mergeDeepOne(cur, body.patch ?? {});
       const file = writeOwnSettings(ns, merged);
+      // ★ 2026-10-28：extMetaTool 是「热开关」—— config 是启动快照，面板保存后不会自己变，
+      //   所以这里写一份进程级标记（桥与插件同进程，globalThis 共享），插件下次扫描(≤15s)即可读到。
+      try { if (typeof merged?.extMetaTool === 'boolean') globalThis.__qqbotExtMetaTool = merged.extMetaTool; } catch { /* ignore */ }
+      // ★ 2026-10-28：同时**落到数据根文件**（插件侧每次扫描现读，不依赖 config 快照 / globalThis 生命周期）
+      try {
+        if (typeof merged?.extMetaTool === 'boolean') {
+          const b0 = nsBot(ns);
+          const dr0 = String((b0 && (b0.dataRoot || (b0.cfg && b0.cfg.dataRoot))) || '').trim();
+          if (dr0) {
+            mkdirSync(join(dr0, '.qqbot'), { recursive: true });
+            writeFileSync(join(dr0, '.qqbot', 'ext-meta-tool.json'), JSON.stringify({ on: merged.extMetaTool }), 'utf8');
+          }
+        }
+      } catch { /* ignore */ }
       // 通知插件实例重新读取（桥与插件同进程；不写宿主配置 → 不触发任何热更新）
       try { ctx.emit('qqbot/settings-changed', ns); } catch { /* 无监听者也无妨 */ }
       const base = viewOf(ctx.settings, ns) || {};
