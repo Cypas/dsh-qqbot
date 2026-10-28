@@ -5116,16 +5116,45 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
         if (bot.disabled || !bot.cfg?.appId || !bot.cfg?.appSecret) continue;
         try {
           const ns = bot.id;
-          const gc = await groupClientOf(ns);
-          if (!gc) continue;
-          const reg = readGroupsJson(bot.cwd);
+          // ★ 2026-10-28（主人定）：这一条要同时满足三件事 —— 准确、快、和面板一致。
+          //   ① 数据根用 cfg.dataRoot（cwd 只是工作区，join-pending/groups 都在 <cwd>/<数据根> 下）；
+          //   ② 群集合与面板 accounts 同源：registry(groups.json) + pending + 表情包台账(known-chats)；
+          //   ③ 结果进 **30 秒内存缓存**：球每 10s 轮一次基本全部命中，只有过期那次才真去打官方接口
+          //      （6 个群串行调用很慢，这正是"打开面板才有、球上迟迟不亮"的另一半原因）。
+          const root = String(bot.cfg.dataRoot || '').trim() || String(bot.cwd || '');
+          const reg = readGroupsJson(root);
+          const pendM = readPendingJson(root);
+          const gids = new Set([...Object.keys(reg), ...Object.keys(pendM)]);
+          try {
+            const st = getStickerStore(join(root, '表情包'));
+            const rawKnown = readFileSync(join(st.dataDir, 'known-chats.jsonl'), 'utf8');
+            for (const ln of rawKnown.split(String.fromCharCode(10))) {
+              const t = ln.trim(); if (!t) continue;
+              try {
+                const o = JSON.parse(t);
+                if (o && o.scope === 'group' && typeof o.id === 'string' && o.id) gids.add(o.id);
+              } catch { /* 坏行跳过 */ }
+            }
+          } catch { /* 无台账 */ }
+          const cache = (globalThis.__qqsJoinSummaryCache = globalThis.__qqsJoinSummaryCache || new Map());
+          const hit = cache.get(ns);
           let pending = 0;
-          for (const gid of Object.keys(reg)) {
-            if (!gid) continue;
+          if (hit && Date.now() - hit.at < 30000) {
+            pending = hit.pending;
+          } else {
             try {
-              const r = await gc.client.listJoinRequests(gid);
-              if (r.ok && Array.isArray(r.data?.list)) pending += r.data.list.length;
-            } catch { /* 单群失败不阻断 */ }
+              const gc = await groupClientOf(ns);
+              if (gc) {
+                for (const gid of gids) {
+                  if (!gid) continue;
+                  try {
+                    const r = await gc.client.listJoinRequests(gid);
+                    if (r.ok && Array.isArray(r.data?.list)) pending += r.data.list.length;
+                  } catch { /* 单群失败不阻断 */ }
+                }
+              }
+            } catch { /* 实例异常按 0 处理 */ }
+            cache.set(ns, { at: Date.now(), pending });
           }
           out.push({ ns, pending });
         } catch { /* 实例失败跳过 */ }
