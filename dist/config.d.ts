@@ -298,6 +298,8 @@ export interface EditableConfig {
     schedule: ScheduleConfig;
     /** QQ 远程审批开关(live 热生效: 对"保存后的新审批请求"即时生效, 无需重启) */
     enableApprovals?: boolean;
+    /** 扩展工具按需取用(默认开): 全局只挂 gain_qq_tools 元工具; 关掉=全部 expose:'all' 工具全量全局注册 */
+    extMetaTool?: boolean;
     /** QQ 权限申请等待时长(ms), 超时自动拒绝 */
     approvalTimeoutMs?: number;
     /** 出站模式: adaptive=适配主动(默认; 前5次带msg_id被动回复后自动转主动), detail=详细主动(adaptive 发送行为 + 额外推送工具调用/结果), passive=全被动回复, silent=完全不出站(思考但不发), nothink=完全不思考(QQ入站不唤醒LLM, 仅记录; 仅设置页可配防自锁) */
@@ -443,6 +445,8 @@ export interface ImQQBotConfig {
     diagLog: boolean;
     /** 通过 QQ 接收并处理 dsh 的一次性权限申请(远程审批; 思路来源见 features/qq-approval.ts 头注) */
     enableApprovals: boolean;
+    /** 扩展工具按需取用（见 extMetaTool 说明） */
+    extMetaTool: boolean;
     /** QQ 权限申请等待时长(ms), 超时自动拒绝 */
     approvalTimeoutMs: number;
     /** QQ 远程提问(ask_user_question → QQ 按钮卡片), 默认开; false=交回 Web UI */
