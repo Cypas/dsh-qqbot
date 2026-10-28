@@ -2768,7 +2768,8 @@ var QQS_THEME_CSS = [
       var _dockHit = null
       var _dockPending = 0
       function refreshDockVisibility() {
-        if (_dockPending > 0) { wrap.style.display = ''; return }
+        // ★ v1.11.11（主人改口）：**不再跨会话常显** —— 群管理是强工作区相关的事，
+        //   切到编码项目/笔记库就该整块不见；"有审批"只作为 QQ 会话内的强调（橙红+呼吸+数字，见 refreshBadge）。
         var sid = ''
         try { sid = curSessionId() } catch (eS) { sid = '' }
         // 同一会话、已知结论 → 直接套用（不发请求，也不闪）
