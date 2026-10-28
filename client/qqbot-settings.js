@@ -2760,6 +2760,34 @@ var QQS_THEME_CSS = [
       document.body.appendChild(wrap)
       var ball = wrap.querySelector('#qqs-dock-ball')
       var badge = wrap.querySelector('#qqs-dock-badge')
+      // ── 2026-10-28（主人定）：悬浮球**只在 QQ 会话里显示** ──
+      //   判定沿用 session-lookup（state.detectedHit 的同一个接口），未命中就不显示。
+      //   为什么还要轮询：会话切换（web 侧点开另一个会话）不会通知这里；
+      //   只比 sessionId 字符串，变了才发请求，开销可忽略。
+      var _dockSid = ''
+      var _dockHit = null
+      function refreshDockVisibility() {
+        var sid = ''
+        try { sid = curSessionId() } catch (eS) { sid = '' }
+        // 同一会话、已知结论 → 直接套用（不发请求，也不闪）
+        if (sid === _dockSid && _dockHit !== null) { wrap.style.display = _dockHit ? '' : 'none'; return }
+        _dockSid = sid
+        if (!sid) { _dockHit = false; wrap.style.display = 'none'; return }
+        // 会话变了：先按"未命中"藏起来，拿到结论再显示（宁可晚一点，也别让它乱闪）
+        _dockHit = null
+        wrap.style.display = 'none'
+        qqHitOf(sid, function (hit) {
+          if (sid !== _dockSid) return   // 查询期间又切了会话：这次结论作废
+          _dockHit = hit
+          wrap.style.display = hit ? '' : 'none'
+        })
+      }
+      try {
+        refreshDockVisibility()
+        // 事件驱动（2026-10-28，主人嫌 2s 轮询费性能）：不再 setInterval ——
+        // apply() 里的 refreshQqUi 在「sessions.list 变化 / 窗口聚焦 / 页面重新可见」时调这里。
+        window.__qqsRefreshDock = refreshDockVisibility
+      } catch (eVis) { /* 显隐失败不影响球本身 */ }
       var panel = null
       var open = false
       // ⚠️ 2026-09-27 修复「拖到屏幕外后球永久消失」：拖拽时本来有 clamp(行1749)，
@@ -6718,6 +6746,31 @@ var QQS_THEME_CSS = [
       return ''
     }
 
+    /**
+     * 当前会话是不是 QQ 会话（2026-10-28）。
+     * 同一次查询在窗口内共享 —— 悬浮球显隐、扩展页签显隐都走这里，不重复打后端。
+     * ⚠️ 否定结论只缓存 2 秒：宿主刚启动时后端可能还没就绪，长缓存会让悬浮球一直不出现。
+     */
+    function qqHitOf(sid, cb) {
+      if (!sid) { try { cb(false) } catch (e0) {} ; return }
+      var c = (window.__qqsHitCache = window.__qqsHitCache || {})
+      var e = c[sid]
+      if (e && Date.now() - e.at < (e.hit ? 10000 : 2000)) { try { cb(e.hit) } catch (e1) {} ; return }
+      try {
+        fetch('/api/qqbot-settings/session-lookup?sessionId=' + encodeURIComponent(sid))
+          .then(function (r) { return r.json() })
+          .then(function (d) {
+            var hit = !!(d && d.hits && d.hits.length)
+            c[sid] = { at: Date.now(), hit: hit }
+            try { cb(hit) } catch (e2) {}
+          })
+          .catch(function () { try { cb(false) } catch (e3) {} })
+      } catch (e4) { try { cb(false) } catch (e5) {} }
+    }
+
+    // （2026-10-28）页签显隐不用 DOM 方案了 —— 见 apply() 里的 setExtTabVisible：
+    //   `slots.inject` 的返回值是 disposer，注销后宿主自己会刷新页签列表。
+
     function curWorkspaceCwd() {
       try {
         var svc = _extSessionsSvc
@@ -7762,14 +7815,28 @@ var QQS_THEME_CSS = [
             function (props) { return h(QqbotHome, { close: props && props.close }) })
         })
       })
-      // 「QQ机器人扩展」会话页签（2026-10-24）：与「对话/轨迹/记忆/白板看板」并列
-      safe('conversation view', function () {
-        slots.inject('conversation.view', function () {
-          return slots.register(
-            { name: 'conversation.view', id: 'qqbot-ext', order: 81, label: 'QQ机器人扩展' },
-            ExtPanel)
-        })
-      })
+      // 「QQ机器人扩展」会话页签：**只在 QQ 会话里注入**（2026-10-28 主人定）
+      //   为什么不用 DOM 隐藏：`slots.inject(key, cb)` 的返回值是 disposer（已核 ui-renderer 源码：
+      //   `return () => { disposeController(); }`），注销后宿主 `slots.subscribe("conversation.view")`
+      //   会自动刷新页签列表 —— 比按文案找按钮稳得多。
+      var _extTabDisposed = null
+      function setExtTabVisible(show) {
+        if (show) {
+          if (_extTabDisposed) return
+          try {
+            _extTabDisposed = slots.inject('conversation.view', function () {
+              return slots.register(
+                { name: 'conversation.view', id: 'qqbot-ext', order: 81, label: 'QQ机器人扩展' },
+                ExtPanel)
+            }) || null
+            if (!_extTabDisposed) _extTabDisposed = function () {}
+          } catch (eTab) { _extTabDisposed = null }
+        } else {
+          if (!_extTabDisposed) return
+          try { _extTabDisposed() } catch (eTab2) {}
+          _extTabDisposed = null
+        }
+      }
       safe('approval float', startApprovalFloat)
       // sessions 服务(宿主根服务): 权威读 web 当前会话(current)与 cwd(agent id === session id)
       var sessionsSvc = null
@@ -7777,6 +7844,44 @@ var QQS_THEME_CSS = [
       if (!sessionsSvc) { try { sessionsSvc = ctx.get && ctx.get('sessions') } catch (e) {} }
       _extSessionsSvc = sessionsSvc   // 供 ExtPanel 读当前工作区 cwd
       safe('dock', function () { startQqDock(sessionsSvc) })
+      // ── 统一刷新：页签 + 悬浮球，**事件驱动，不轮询**（2026-10-28）──
+      //   信号源：`sessions.list`（ObservableSnapshot，宿主在左侧会话列表切换时就会推）
+      //          ＋ window focus / 页面可见性（兜底，切回标签页时补一次）。
+      var _qqUiRetry = 0
+      var refreshQqUi = function () {
+        // dock 球的显隐也走这同一个信号（否则切会话时页签跟走了、球还赖着不动）
+        try { if (typeof window !== 'undefined' && typeof window.__qqsRefreshDock === 'function') window.__qqsRefreshDock() } catch (eDock) {}
+        var sid = ''
+        try { sid = curSessionId() } catch (eSid) { sid = '' }
+        // 有限次重试（≈7 秒内 6 次）：宿主刚启动时"当前会话"或后端 lookup 可能还没就绪，
+        // 一次性判空就再也不显示球了（2026-10-28 主人实测）。不是长期轮询。
+        function retryLater() {
+          if (_qqUiRetry >= 6) return
+          _qqUiRetry++
+          setTimeout(function () { refreshQqUi() }, 1200)
+        }
+        if (!sid) { setExtTabVisible(false); retryLater(); return }
+        qqHitOf(sid, function (hit) {
+          var now = ''
+          try { now = curSessionId() } catch (eNow) {}
+          if (now !== sid) return   // 查询期间切走了：别把旧结论套到新会话上
+          setExtTabVisible(!!hit)
+          if (hit) { _qqUiRetry = 0; return }
+          retryLater()
+        })
+      }
+      safe('qq ui refresh', function () {
+        refreshQqUi()
+        try {
+          if (sessionsSvc && sessionsSvc.list && typeof sessionsSvc.list.subscribe === 'function') {
+            sessionsSvc.list.subscribe(function () { refreshQqUi() })
+          }
+        } catch (eSub) {}
+        try {
+          window.addEventListener('focus', refreshQqUi)
+          document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshQqUi() })
+        } catch (eWin) {}
+      })
     }
 
     exports.inject = ['slots', 'sessions']

@@ -3727,15 +3727,18 @@ function liftRestriction(disposable: unknown): void {
 }
 
 /** 取某作用域的 tools 服务：`ctx.tools` 在未声明 inject 时会抛，退化到 cordis 运行时 `ctx.get('tools')`。 */
-function toolsOfScope(agentCtx: unknown): { restrict?: (f: unknown) => unknown } | undefined {
+function toolsOfScope(agentCtx: unknown): {
+  restrict?: (f: unknown) => unknown;
+  register?: (t: unknown) => unknown;
+} | undefined {
   const c = agentCtx as { tools?: unknown; get?: (n: string) => unknown } | null;
   try {
     const t = c?.tools;
-    if (t && typeof t === 'object') return t as { restrict?: (f: unknown) => unknown };
+    if (t && typeof t === 'object') return t as { restrict?: (f: unknown) => unknown; register?: (t: unknown) => unknown };
   } catch { /* 未 inject 时读 ctx.tools 会抛 */ }
   try {
     const t = c?.get?.('tools');
-    if (t && typeof t === 'object') return t as { restrict?: (f: unknown) => unknown };
+    if (t && typeof t === 'object') return t as { restrict?: (f: unknown) => unknown; register?: (t: unknown) => unknown };
   } catch { /* ignore */ }
   return undefined;
 }
@@ -3766,6 +3769,82 @@ function toolsOfScope(agentCtx: unknown): { restrict?: (f: unknown) => unknown }
  *
  * 幂等：restrict 返回 dispose；每次 apply 先撤销上一次的，再按当前 disabled 重挂。
  */
+// ══════════════════════════════════════════════════════════════════════════
+// 2026-10-28（主人定，对应 issue #26）：上下文/群管理工具改为**按 QQ 会话注册**
+// ══════════════════════════════════════════════════════════════════════════
+// 旧做法（2026-10-09 起）：「插件根作用域全局注册一次 + pre-step 逐会话 restrict deny」。
+//   · 当初改成全局，是为了避开"每步先注销再重注册 → 工具表反复变动 → 宿主每步发
+//     「工具已更新·移除/新增」"的抖动（那批通知还进上下文，纯烧 token）。
+//   · 代价是：① 第一次 pre-step 之前，无关工作区的会话也能看到这四个名字；
+//             ② `restrict` 只过滤**继承来的**工具，全局层本身就是泄漏源，剪枝只是事后补救。
+//
+// 现在照 `mountChannelTools` 的路子（**per-agent register**），配一个幂等状态机：
+//   · 状态没变 → 一根手指都不动（不产生任何变更通知，同样不抖）；
+//   · 状态变了 → 先撤旧的、再按新状态注册（面板一改开关，下一 step 生效）。
+// 非 QQ 会话根本不经过这里 ⇒ 天生看不到，零窗口期、零 token。
+const ctxScopeState = new WeakMap<object, { sig: string; disposers: Array<() => void> }>();
+
+/**
+ * 按会话同步「上下文压缩三件套 + QQ 群管理」的**注册状态**（幂等）。
+ *
+ * @param agentCtx 该 QQ 会话的 agent 作用域（`record.agentCtx` 或 `agent.ctx`）
+ * @param opts.ctxTools   要不要 context_memo / context_compact / context_drop（跟「无上下文·智能判断」开关）
+ * @param opts.groupAdmin 要不要 qq_group_admin（跟 groupAdmin.enabled）
+ * @param opts.dataRoot   会话坐标（工具执行时反查数据根用）
+ * @param opts.sessionKey 会话坐标（备忘类工具要求非空）
+ *
+ * 失败策略：拿不到 `tools.register` 或注册抛错时**不记状态**（写 `__retry`），下一次 pre-step 重试；
+ * 绝不影响会话主流程。
+ */
+export function syncChannelScopedTools(
+  agentCtx: unknown,
+  opts: { ctxTools: boolean; groupAdmin: boolean; dataRoot?: string; sessionKey?: string },
+): void {
+  try {
+    if (!agentCtx || typeof agentCtx !== 'object') return;
+    const key = agentCtx as object;
+    // 会话坐标每次都刷新（工具执行时靠它定位数据根/会话）
+    if (opts.dataRoot) {
+      ctxEnvMap.set(key, { dataRoot: String(opts.dataRoot), sessionKey: String(opts.sessionKey ?? '') });
+    }
+    const sig = `${opts.ctxTools ? '1' : '0'}${opts.groupAdmin ? '1' : '0'}`;
+    const st = ctxScopeState.get(key);
+    if (st && st.sig === sig) return;   // 状态一致 → 不动（这是"不抖"的关键）
+
+    const toolsObj = toolsOfScope(agentCtx);
+    const reg = toolsObj?.register;
+    if (!toolsObj || typeof reg !== 'function') {
+      traceToolReg('[scoped-tool] 拿不到 tools.register，跳过（下次再试）');
+      return;
+    }
+
+    // 先撤旧的（换开关后不能叠加）
+    if (st) for (const d of st.disposers) { try { d(); } catch { /* ignore */ } }
+
+    const want = [
+      ...(opts.ctxTools ? ctxToolsRef() : []),
+      ...(opts.groupAdmin ? qunAdminRef() : []),
+    ];
+    const disposers: Array<() => void> = [];
+    for (const t of want) {
+      try {
+        const d = reg.call(toolsObj, t);
+        if (typeof d === 'function') disposers.push(d as () => void);
+      } catch { /* 单个工具失败不影响其它 */ }
+    }
+    // 全成功才认这个 sig；否则标 __retry，下一 step 重来
+    const okAll = disposers.length === want.length;
+    ctxScopeState.set(key, { sig: okAll ? sig : `__retry-${sig}`, disposers });
+    traceToolReg(
+      `[scoped-tool] 按会话注册 ctx=${opts.ctxTools ? 1 : 0} groupAdmin=${opts.groupAdmin ? 1 : 0}`
+      + ` want=${want.length} ok=${disposers.length}`
+      + ` dataRoot=${String(opts.dataRoot ?? '')} sk=${String(opts.sessionKey ?? '')}`,
+    );
+  } catch (e) {
+    traceToolReg('[scoped-tool] 异常: ' + String((e as Error)?.message ?? e).slice(0, 160));
+  }
+}
+
 let __extRestrictDispose: (() => void) | undefined;
 
 export function applyExtDisabledRestrict(agentCtx: unknown, dataRoot: string, extToolNames: string[]): void {

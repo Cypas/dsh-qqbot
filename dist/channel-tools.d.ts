@@ -110,6 +110,24 @@ export declare function syncContextTools(agentCtx: unknown, shouldHave: boolean,
  */
 export declare function ensureExtToolsGlobal(globalCtx: unknown): void;
 export declare function ensureContextToolsGlobal(globalCtx: unknown): void;
+/**
+ * 按会话同步「上下文压缩三件套 + QQ 群管理」的**注册状态**（幂等）。
+ *
+ * @param agentCtx 该 QQ 会话的 agent 作用域（`record.agentCtx` 或 `agent.ctx`）
+ * @param opts.ctxTools   要不要 context_memo / context_compact / context_drop（跟「无上下文·智能判断」开关）
+ * @param opts.groupAdmin 要不要 qq_group_admin（跟 groupAdmin.enabled）
+ * @param opts.dataRoot   会话坐标（工具执行时反查数据根用）
+ * @param opts.sessionKey 会话坐标（备忘类工具要求非空）
+ *
+ * 失败策略：拿不到 `tools.register` 或注册抛错时**不记状态**（写 `__retry`），下一次 pre-step 重试；
+ * 绝不影响会话主流程。
+ */
+export declare function syncChannelScopedTools(agentCtx: unknown, opts: {
+    ctxTools: boolean;
+    groupAdmin: boolean;
+    dataRoot?: string;
+    sessionKey?: string;
+}): void;
 export declare function applyExtDisabledRestrict(agentCtx: unknown, dataRoot: string, extToolNames: string[]): void;
 export declare function restrictContextTools(agentCtx: unknown, shouldHave: boolean, env?: {
     dataRoot?: string;

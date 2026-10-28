@@ -2620,13 +2620,20 @@ export function apply(ctx) {
       const hits = [];
       const seen = new Set();
       // 按实例台账补昵称(dataRoot/表情包/known-chats.jsonl)
+      // ⚠️ 2026-10-28：加 30s 缓存 —— 每次 lookup 都重新扫台账是"判断命中慢"的另一半原因。
       const nameOf = (ns, scope, peerId) => {
         const bot = botByNs.get(ns);
         if (!bot) return '';
+        const nc = (globalThis.__qqsLedgerNameCache = globalThis.__qqsLedgerNameCache || new Map());
+        const ck = ns + '|' + scope + '|' + peerId;
+        const hitN = nc.get(ck);
+        if (hitN && Date.now() - hitN.at < 30000) return hitN.name;
         try {
           const cwd = bot.cfg.dataRoot || bot.cfg.cwd;
           const ld = chatLedgerNames(join(cwd, '表情包')).get(scope + ':' + peerId);
-          return (ld && ld.name) || '';
+          const name = (ld && ld.name) || '';
+          nc.set(ck, { at: Date.now(), name });
+          return name;
         } catch { return '' }
       };
       const pushHit = (ns, scope, peerId, name, via) => {
@@ -2635,35 +2642,77 @@ export function apply(ctx) {
         seen.add(key);
         hits.push({ ns, scope, peerId, name, via });
       };
-      // ① 权威: 真实会话记录(唯一可靠源 —— fork 后 sessionId 为 randomUUID, derive 推导会 miss)
-      const sessReg = await import('./dist/features/session-registry.js');
-      for (const r of sessReg.findSessionBySessionIdWeb(sessionId)) {
-        pushHit(r.ns, r.scope, r.peerId, nameOf(r.ns, r.scope, r.peerId), 'session');
-      }
-      // ② 兜底: 确定性推导(会话记录未建立/被回收时, 从注册表+台账推导; 与权威命中自动去重)
+      // ★ 2026-10-28（主人反馈"判断命中要两三秒、悬浮球显隐太慢"）：
+      //   ① 结果缓存 15s（front 端 5s 轮一次，命中缓存基本零延迟）；
+      //   ② 快路优先：prefs(单文件 JSON) → derive(台账/群注册表) → **最后**才 session-registry
+      //      （那个 `await import('./dist/...')` 冷启动要几百 ms 到数秒，是主要慢因）；
+      //      快路命中就直接返回，不再等它。
+      const cache = (globalThis.__qqsLookupCache = globalThis.__qqsLookupCache || new Map());
+      const cached = cache.get(sessionId);
+      if (cached && Date.now() - cached.at < 15000) return writeJson(res, 200, cached.data);
+
+      // ① 快路 A：反查持久偏好（{dataRoot}/.qqbot/model-prefs.json 的 sessionKey → 最新 sessionId）
+      //   覆盖"宿主刚启动、会话记录还没恢复"以及"fork/新建后 sessionId 是 randomUUID、derive 推不出"。
       for (const bot of bots) {
         if (bot.disabled || !bot.cfg?.appId || !bot.cfg?.cwd) continue;
-        const appId = bot.cfg.appId;
         const cwd = bot.cfg.dataRoot || bot.cfg.cwd;
         const ns = bot.id;
-        const ledger = chatLedgerNames(join(cwd, '表情包'));
-        const groups = readGroupsJson(cwd);
-        const gids = new Set([...Object.keys(groups), ...[...ledger.keys()].filter((k) => k.startsWith('group:')).map((k) => k.slice(6))]);
-        for (const gid of gids) {
-          if (!gid) continue;
-          if (deriveSessionIdOf(appId, 'group', gid) !== sessionId) continue;
-          const regMeta = groups[gid];
-          const ld = ledger.get('group:' + gid);
-          pushHit(ns, 'group', gid, (regMeta && regMeta.name) || (ld && ld.name) || '', 'derive');
-        }
-        for (const [key2, ld] of ledger) {
-          if (!key2.startsWith('c2c:')) continue;
-          const openid = key2.slice(4);
-          if (!openid || deriveSessionIdOf(appId, 'c2c', openid) !== sessionId) continue;
-          pushHit(ns, 'c2c', openid, ld.name || '', 'derive');
+        try {
+          const raw = readFileSync(join(cwd, '.qqbot', 'model-prefs.json'), 'utf8');
+          const prefs = JSON.parse(raw);
+          const ids = prefs && prefs.sessionIds;
+          if (!ids || typeof ids !== 'object') continue;
+          for (const [sk0, sid] of Object.entries(ids)) {
+            if (!sid || String(sid) !== sessionId) continue;
+            // 兼容 "sessionKey@sessionId" 形态（overrides 的键是那个形状，sessionIds 一般不带）
+            const sk = String(sk0).split('@')[0];
+            const i = sk.indexOf(':');
+            if (i <= 0) continue;
+            const scope = sk.slice(0, i);
+            const peerId = sk.slice(i + 1);
+            if (!peerId || (scope !== 'group' && scope !== 'c2c')) continue;
+            pushHit(ns, scope, peerId, nameOf(ns, scope, peerId), 'prefs');
+          }
+        } catch { /* 没有偏好文件 / JSON 坏了：跳过 */ }
+      }
+      // ② 快路 B：确定性推导（会话记录未建立/被回收时，从群注册表 + 台账推导）
+      if (hits.length === 0) {
+        for (const bot of bots) {
+          if (bot.disabled || !bot.cfg?.appId || !bot.cfg?.cwd) continue;
+          const appId = bot.cfg.appId;
+          const cwd = bot.cfg.dataRoot || bot.cfg.cwd;
+          const ns = bot.id;
+          const ledger = chatLedgerNames(join(cwd, '表情包'));
+          const groups = readGroupsJson(cwd);
+          const gids = new Set([...Object.keys(groups), ...[...ledger.keys()].filter((k) => k.startsWith('group:')).map((k) => k.slice(6))]);
+          for (const gid of gids) {
+            if (!gid) continue;
+            if (deriveSessionIdOf(appId, 'group', gid) !== sessionId) continue;
+            const regMeta = groups[gid];
+            const ld = ledger.get('group:' + gid);
+            pushHit(ns, 'group', gid, (regMeta && regMeta.name) || (ld && ld.name) || '', 'derive');
+          }
+          for (const [key2, ld] of ledger) {
+            if (!key2.startsWith('c2c:')) continue;
+            const openid = key2.slice(4);
+            if (!openid || deriveSessionIdOf(appId, 'c2c', openid) !== sessionId) continue;
+            pushHit(ns, 'c2c', openid, ld.name || '', 'derive');
+          }
         }
       }
-      writeJson(res, 200, { ok: true, sessionId, hits });
+      // ③ 慢路（只在快路全落空时才走）：真实会话记录，权威但需要动态 import
+      if (hits.length === 0) {
+        try {
+          const sessReg = await import('./dist/features/session-registry.js');
+          for (const r of sessReg.findSessionBySessionIdWeb(sessionId)) {
+            pushHit(r.ns, r.scope, r.peerId, nameOf(r.ns, r.scope, r.peerId), 'session');
+          }
+        } catch { /* 模块不可用：按未命中处理 */ }
+      }
+      const data = { ok: true, sessionId, hits };
+      cache.set(sessionId, { at: Date.now(), data });
+      if (cache.size > 300) { let n = 0; for (const k of cache.keys()) { cache.delete(k); if (++n >= 150) break } }
+      writeJson(res, 200, data);
     } catch (e) { writeJson(res, 500, { error: String((e && e.message) || e) }); }
   });
 

@@ -150,6 +150,22 @@ export declare class SessionManager {
     hotReloadChannelTools(agentCtx: Context): Promise<void>;
     /** 对所有活会话的 agentCtx 执行一次工具热刷新。返回给人看的摘要文本。 */
     reloadAllChannelTools(): Promise<string>;
+    /** 数据根（pre-step 与 inbox/claimed 共用一份算法 —— 差一级就会一处写、一处读）。 */
+    private resolveDataRootSmart;
+    /**
+     * ★ 2026-10-28：把「按会话注册 4 个工具」提前到**回合开始**。
+     *
+     * 主人实测：关掉无上下文模式后，回合**第一个 step** 模型仍拿到旧工具表 → 调 context_memo 报
+     * `unknown tool`，之后才出现「工具已更新·移除 3 个」。根因是宿主的 step 顺序（dsh-agent-loop
+     * lib/index.js 的 preStep）：
+     *   ① inbox.claim()             ← emit 'agent/inbox/claimed'（**同步**派发，payload 自带 agent）
+     *   ② systemPrompt.assemble()   ← 工具表在这里**快照**
+     *   ③ dispatch.waterfall('agent/pre-step') ← 我们原来在这里注册 ⇒ 晚了一步
+     * ⇒ 在 claimed 时同步一次注册表，本 step 的请求就能用上新表；
+     *   pre-step 里那次照旧保留（turn 内中途改开关 / 会话 key 反查失败时的兜底）。
+     * ⚠️ 只做同步动作（emit 不 await 监听器）；任何异常静默，绝不能影响入站主链。
+     */
+    private syncScopedToolsOnClaim;
     /** cwd 分流(通用, 不写死实例名): 只对本实例配置的 cwd 匹配的 agent 注入本实例群守则。
      *  每个实例在 patch 里配自己的 cwd + settingsNs, 即自动分流;
      *  其他实例/项目(web、别的 cwd)的 agent 一律不注入, 避免群守则污染非本 bot 会话。 */

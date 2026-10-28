@@ -44,7 +44,7 @@ import type {
 } from './types.js';
 import type { QQBotSender } from '../transport/outbound-buffer.js';
 import { markTurnAborted } from '../gateway/debounce.js';
-import { apply as mountChannelTools, readContextPending, clearContextPending, ensureContextToolsGlobal, restrictContextTools, ensureExtToolsGlobal } from '../channel-tools.js';
+import { apply as mountChannelTools, readContextPending, clearContextPending, syncChannelScopedTools, ensureExtToolsGlobal } from '../channel-tools.js';
 import { createGroupAdmin } from '../api/group-admin.js';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { appendFileSync, statSync } from 'node:fs';
@@ -950,6 +950,59 @@ export class SessionManager {
     return `✅ 工具热刷新完成: ${ok} 个会话成功${fail > 0 ? `, ${fail} 个失败(见日志)` : ''}。新工具下一条消息即可用。\n${extLines}`;
   }
 
+  /** 数据根（pre-step 与 inbox/claimed 共用一份算法 —— 差一级就会一处写、一处读）。 */
+  private resolveDataRootSmart(): string {
+    const direct = String(this.config.dataRoot ?? '').trim();
+    if (direct) return direct;
+    try {
+      const storeFile = describeStorePath();   // {dataRoot}/.qqbot/contextless.json
+      const m = /^(.*)[\\/]\.qqbot[\\/][^\\/]+$/.exec(String(storeFile ?? ''));
+      if (m && m[1]) return m[1];
+    } catch { /* ignore */ }
+    return String(this.config.cwd ?? '');
+  }
+
+  /**
+   * ★ 2026-10-28：把「按会话注册 4 个工具」提前到**回合开始**。
+   *
+   * 主人实测：关掉无上下文模式后，回合**第一个 step** 模型仍拿到旧工具表 → 调 context_memo 报
+   * `unknown tool`，之后才出现「工具已更新·移除 3 个」。根因是宿主的 step 顺序（dsh-agent-loop
+   * lib/index.js 的 preStep）：
+   *   ① inbox.claim()             ← emit 'agent/inbox/claimed'（**同步**派发，payload 自带 agent）
+   *   ② systemPrompt.assemble()   ← 工具表在这里**快照**
+   *   ③ dispatch.waterfall('agent/pre-step') ← 我们原来在这里注册 ⇒ 晚了一步
+   * ⇒ 在 claimed 时同步一次注册表，本 step 的请求就能用上新表；
+   *   pre-step 里那次照旧保留（turn 内中途改开关 / 会话 key 反查失败时的兜底）。
+   * ⚠️ 只做同步动作（emit 不 await 监听器）；任何异常静默，绝不能影响入站主链。
+   */
+  private syncScopedToolsOnClaim(agent: unknown): void {
+    const a = agent as {
+      ctx?: unknown;
+      session?: { id?: string; header?: { cwd?: string } };
+    } | undefined;
+    if (!a) return;
+    // 只碰本实例的 agent（cwd 分流：别的 bot 实例的会话工具集不归我们管）
+    if (!this.nsForCwd(String(a.session?.header?.cwd ?? ''))) return;
+    const rec = this.findByAgent(agent as never) as { agentCtx?: unknown; sessionKey?: string } | undefined;
+    const ctxOfTool = rec?.agentCtx ?? a.ctx;
+    if (!ctxOfTool) return;
+    let sk = String(rec?.sessionKey ?? '').trim();
+    if (!sk) {
+      const sid = String(a.session?.id ?? '');
+      if (sid) sk = String((this.findBySessionId(sid) as { sessionKey?: string } | undefined)?.sessionKey ?? '');
+    }
+    if (!sk) return;   // 未知 = 不动（绝不因为读不到而卸工具）
+    const smart = isContextlessActive(sk, this.config.contextlessMode)
+      && contextlessSmartOf(sk, this.config.contextlessSmart);
+    syncChannelScopedTools(ctxOfTool, {
+      ctxTools: smart,
+      groupAdmin: this.config.groupAdmin?.enabled === true,
+      dataRoot: this.resolveDataRootSmart(),
+      sessionKey: sk,
+    });
+    traceContextless('[ctxtool-claim] 回合开始同步 ctx=' + String(smart) + ' sk=' + sk);
+  }
+
   /** cwd 分流(通用, 不写死实例名): 只对本实例配置的 cwd 匹配的 agent 注入本实例群守则。
    *  每个实例在 patch 里配自己的 cwd + settingsNs, 即自动分流;
    *  其他实例/项目(web、别的 cwd)的 agent 一律不注入, 避免群守则污染非本 bot 会话。 */
@@ -995,20 +1048,22 @@ export class SessionManager {
     };
     if (!hostCtx?.on || (this as unknown as Record<string, unknown>).__rulesMounted) return;
     (this as unknown as Record<string, unknown>).__rulesMounted = true;
+    // ★ 2026-10-28：**回合开始前的工具表同步点**。宿主顺序是 claim → assemble（快照工具表）→ pre-step，
+    //   所以只在 pre-step 里注册会晚一步（实测：开关关掉后第一个 step 仍拿到旧工具表，调用报 unknown tool）。
+    //   claimed 是**同步**派发且 payload 自带 agent ⇒ 在这里同步注册表，本 step 立刻生效。
+    hostCtx.on('agent/inbox/claimed', (payload: unknown) => {
+      try { this.syncScopedToolsOnClaim((payload as { agent?: unknown } | undefined)?.agent); } catch { /* ignore */ }
+    });
     hostCtx.on('agent/pre-step', async (payload: unknown, next: unknown) => {
       // ★ 2026-10-10 主人要的"暴露给全部会话"：把 expose:'all' 的扩展工具挂到**插件根作用域**。
       //   ⚠️ 必须放在**最外层、无条件**执行 —— 它跟"无上下文模式"无关，任何会话的每一步都该保证注册到位。
       //   （人家最初把它塞进了下面的条件分支 ⇒ 条件不满足就永不执行 ⇒ 工具谁都看不到，连自己都看不见。）
       //   函数内部：15s 节流 + 幂等（已注册的 name@tag 直接跳过）+ fail-soft（出错静默）。
       try { ensureExtToolsGlobal(this.ctx); } catch { /* ignore */ }
-      // ★ 2026-10-10 主人定：剪枝要覆盖非 QQ 会话。
-      //   这里对每一个进来的会话先无条件设 deny（context_memo/compact/drop + qq_group_admin）；
-      //   若它确实是无上下文模式的 QQ 会话，下面那段会按开关把它放开（后设状态覆盖前者）。
-      //   非 QQ 会话（web / 终端）就保持 deny，那几个工具连名字都不出现（零 token）。
-      try {
-        const _nonQqCtx = ((payload as { agent?: { ctx?: unknown } } | undefined)?.agent)?.ctx;
-        if (_nonQqCtx) restrictContextTools(_nonQqCtx, false, { dataRoot: String(this.dataRoot ?? '') });
-      } catch { /* ignore */ }
+      // ★ 2026-10-28：原来这里对**每个会话**无条件 `restrictContextTools(ctx, false)` 兜底 deny
+      //   （全局注册时代的补救）。现在那四个工具改成**按 QQ 会话注册**了 ——
+      //   非 QQ 会话天生看不到，也就不需要这条 deny；再调 restrain 反而会报
+      //   "names unknown global tools"（全局层已经没有它们了）。整段删除。
       // ctxSmartOn 提到回调最外层（固定 trim 让位 + 后面的消费/注入都要用）
       let ctxSmartOn = false;
       // ⚠️ 2026-10-09：同一 pre-step 里有两个 try 块，后面"动态挂/卸三个上下文工具"那块
@@ -1119,16 +1174,7 @@ export class SessionManager {
         } catch (e) { traceContextless('pre-step 登记异常: ' + (e instanceof Error ? e.message : String(e))); this.logger?.debug?.('[contextless] 登记异常(已忽略): ' + (e instanceof Error ? e.message : String(e))); }
         // 数据根：优先 config.dataRoot；否则从 contextless-store 反推（它 bootstrap 时绑的就是真实 dataRoot）——
         // ⚠️ 不能用 config.cwd 兜底：实测 cwd=\...\测试 而真实 dataRoot=\...\测试\dshqqbot，差一级会导致 pending 写一处读另一处。
-        const dataRootSmart = (() => {
-          const direct = String(this.config.dataRoot ?? '').trim();
-          if (direct) return direct;
-          try {
-            const storeFile = describeStorePath();   // {dataRoot}/.qqbot/contextless.json
-            const m = /^(.*)[\\/]\.qqbot[\\/][^\\/]+$/.exec(String(storeFile ?? ''));
-            if (m && m[1]) return m[1];
-          } catch { /* ignore */ }
-          return String(this.config.cwd ?? '');
-        })();   // 数据根（提前声明：下面多处用）
+        const dataRootSmart = this.resolveDataRootSmart();   // 数据根（提前声明：下面多处用）
         // ── 按**会话**开关动态挂载/卸载三个上下文工具（照测试插件做法：面板改了下一回合就生效）──
         //   ⚠️ 2026-10-09 修（主人实测："开无上下文模式后，回合第一轮那三个工具被移除，AI 还以为是没开"）：
         //     旧实现的两个坑叠加 ——
@@ -1155,20 +1201,24 @@ export class SessionManager {
           traceContextless('[ctxtool] on=' + String(smartForTool) + ' known=' + String(smartKnown)
             + ' fromRec=' + String(Boolean(fromRec)) + ' fromAgent=' + String(Boolean(fromAgent))
             + ' sk=' + (skTool || '(未知)'));
-          // ── 2026-10-09 改造（主人定）：**注册不动 + 按会话实时剪枝可见性** ──
-          //   ① `ensureContextToolsGlobal` 全局注册一次（幂等、永不注销）⇒ 不再有"工具已更新·移除/新增"抖动；
-          //   ② `restrictContextTools` 只对**本会话**设/撤 restrict（deny 那三个工具）⇒
-          //      没开「无上下文模式+智能判断」的会话**连工具名都看不到**（零 token）；开了的会话正常继承。
-          //   面板一改开关 → 下次 pre-step（下一回合/下一步）即生效。
-          //   状态没变时两个函数都直接 return，所以"每步都跑"也**不产生任何变更通知**。
+          // ── 2026-10-28 改造（主人定，issue #26）：**按 QQ 会话注册**，不再全局注册 + deny 剪枝 ──
+          //   旧路子（10-09 起）是"插件根全局注册一次 + 每会话 restrict deny"：
+          //     · 优点是注册表不动、不抖；代价是第一次 pre-step 之前无关工作区也会看到这四个名字，
+          //       而且 restrict 只过滤"继承来的"工具 —— 全局层本身就是泄漏源。
+          //   现在换成 per-agent 注册（与 mountChannelTools 注册 send_media 等同一条路）：
+          //     · 非 QQ 会话根本不经过这里 ⇒ 天生看不到（零窗口期、零 token）；
+          //     · `syncChannelScopedTools` 自带幂等状态机：状态没变就不碰注册表（同样不抖），
+          //       开关一变下一 step 就重新注册（热开关保留）。
+          //   ⚠️ 提示文本那半段没动：仍旧在上面按同一个 smartForTool 拼进群守则 body。
           if (ctxOfTool && smartKnown) {
-            // ① 全局注册一次（幂等、永不注销）：必须用**插件根 ctx** ——
-            //    它 `get('tools')` 拿到的是**全局层**注册表，per-scope 的 restrict 才有资格剪它。
-            //    （若改成用 agentCtx 注册 = 变成"该 agent 自己注册的工具"，restrict 按文档管不到 —— 实测踩过。）
-            ensureContextToolsGlobal(this.ctx);
-            // ② 只对**本会话**声明可见性：没开的 deny 掉那三个，开了的撤限制
-            restrictContextTools(ctxOfTool, smartForTool, { dataRoot: dataRootSmart, sessionKey: skTool });
-          } else if (!smartKnown) traceContextless('[ctxtool] 会话 key 未知 → 保持现状(不动可见性)');
+            syncChannelScopedTools(ctxOfTool, {
+              ctxTools: smartForTool,
+              // 群管理工具跟 groupAdmin.enabled 走（此前被绑在 smart 开关上，语义不对）
+              groupAdmin: this.config.groupAdmin?.enabled === true,
+              dataRoot: dataRootSmart,
+              sessionKey: skTool,
+            });
+          } else if (!smartKnown) traceContextless('[ctxtool] 会话 key 未知 → 保持现状(不动注册表)');
           else traceContextless('[ctxtool] 两个来源都拿不到 ctx，跳过');
           traceContextless('[ctxtool-env] dataRoot=' + String(dataRootSmart) + ' sk=' + skTool);
         } catch (e) { traceContextless('[ctxtool] 动态挂载异常: ' + String(e)); }
