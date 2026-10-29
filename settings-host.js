@@ -6475,7 +6475,23 @@ const WHY_MAP = { busy: '目标会话回合活跃,已等待至回合结束仍超
     try {
       const q = new URL(req.url, 'http://localhost').searchParams;
       const cwdParam = String(q.get('cwd') || '').trim();
-      const { dataRoot } = resolveDataRootForWorkspace(cwdParam);
+      let { dataRoot } = resolveDataRootForWorkspace(cwdParam);
+      // ★ 2026-10-29（issue #29）：从**设置页**进「扩展 → 市场」时，前端 curWorkspaceCwd()
+      //   拿不到当前会话（既没有 sessions 快照、localStorage 也没有），于是请求**不带 cwd** ⇒
+      //   原来直接 500「推不出 dataRoot」，页面就显示 "0 / 0 个插件"。
+      //   这里加兜底：任意已配置实例的数据根 → 该工作区的 dshqqbot → process.cwd()。
+      if (!dataRoot) {
+        try {
+          const { bots } = parsePatch();
+          for (const b of (bots || [])) {
+            const cfg = (b && b.cfg) || {};
+            const dr = String(cfg.dataRoot || '').trim()
+              || (cfg.cwd ? join(absCwd(cfg.cwd) || String(cfg.cwd), 'dshqqbot') : '');
+            if (dr) { dataRoot = dr; break; }
+          }
+        } catch { /* ignore */ }
+      }
+      if (!dataRoot) dataRoot = join(process.cwd(), 'dshqqbot');
       if (!dataRoot) return writeJson(res, 500, { error: '推不出 dataRoot' });
       const packsRoot = join(dataRoot, 'extension-packs');
       const mcfg = readMarketConfig(dataRoot);
