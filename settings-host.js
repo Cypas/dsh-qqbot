@@ -2637,9 +2637,14 @@ export function apply(ctx) {
       for (const bot of bots) {
         // ⚠️ 2026-09-28：appId/cwd 可能只在【自有存储】里（2026-09-24 起的保存策略），
         //   合并后再判断，否则这类账号会被误跳过。
-        const mcfg = mergeOwnIntoCfg(bot.cfg || {}, bot.cfg?.settingsNs || bot.id);
-        if (bot.disabled || !mcfg.appId || !mcfg.cwd) continue;
-        botByNs.set(bot.id, { ...bot, cfg: mcfg });
+        // ⚠️ 2026-10-28 修（"未命中 QQ 会话"的根因）：
+        //   patch.yml 里早就没有 cwd 了（只写自有存储），光 mergeOwnIntoCfg 还差一步 ——
+        //   数据根 = dataRoot > `{cwd}/dshqqbot`，不是 cwd 本身；照 cwd 拼 .qqbot / 表情包
+        //   会落到工作目录根上（文件不存在 → 快路 A/B 全空 → 永远未命中）。
+        //   nsBot 已经按这个规则算好数据根（bot.cwd），直接复用它。
+        const merged = nsBot(bot.id);
+        if (bot.disabled || !merged) continue;
+        botByNs.set(bot.id, merged);
       }
       const hits = [];
       const seen = new Set();
@@ -2653,7 +2658,7 @@ export function apply(ctx) {
         const hitN = nc.get(ck);
         if (hitN && Date.now() - hitN.at < 30000) return hitN.name;
         try {
-          const cwd = bot.cfg.dataRoot || bot.cfg.cwd;
+          const cwd = bot.cwd;   // nsBot.cwd = 数据根（不是工作目录）
           const ld = chatLedgerNames(join(cwd, '表情包')).get(scope + ':' + peerId);
           const name = (ld && ld.name) || '';
           nc.set(ck, { at: Date.now(), name });
@@ -2677,9 +2682,10 @@ export function apply(ctx) {
 
       // ① 快路 A：反查持久偏好（{dataRoot}/.qqbot/model-prefs.json 的 sessionKey → 最新 sessionId）
       //   覆盖"宿主刚启动、会话记录还没恢复"以及"fork/新建后 sessionId 是 randomUUID、derive 推不出"。
-      for (const bot of bots) {
-        if (bot.disabled || !bot.cfg?.appId || !bot.cfg?.cwd) continue;
-        const cwd = bot.cfg.dataRoot || bot.cfg.cwd;
+      //   ⚠️ 2026-10-28：必须走 botByNs（合并自有存储 + 补 dshqqbot 数据根），
+      //      原来遍历 parsePatch 的裸 bots 且要求 bot.cfg.cwd —— patch 无 cwd 时整条快路被 continue 掉。
+      for (const bot of botByNs.values()) {
+        const cwd = bot.cwd;
         const ns = bot.id;
         try {
           const raw = readFileSync(join(cwd, '.qqbot', 'model-prefs.json'), 'utf8');
@@ -2701,10 +2707,9 @@ export function apply(ctx) {
       }
       // ② 快路 B：确定性推导（会话记录未建立/被回收时，从群注册表 + 台账推导）
       if (hits.length === 0) {
-        for (const bot of bots) {
-          if (bot.disabled || !bot.cfg?.appId || !bot.cfg?.cwd) continue;
-          const appId = bot.cfg.appId;
-          const cwd = bot.cfg.dataRoot || bot.cfg.cwd;
+        for (const bot of botByNs.values()) {
+          const appId = bot.appId;
+          const cwd = bot.cwd;
           const ns = bot.id;
           const ledger = chatLedgerNames(join(cwd, '表情包'));
           const groups = readGroupsJson(cwd);
