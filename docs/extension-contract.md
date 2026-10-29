@@ -13,7 +13,7 @@
 
 ```
                     ┌─────────────── 统一能力包（makeExtCaps）───────────────┐
-  tools/      env ──┤ text markdown markdownCard media image voice video file│
+  tools/      env ──┤ text markdown markdownCard card media image voice video file│
   commands/   ctx ──┤ at api() appId/appSecret store registerInteractionCard  │
   botplay/    env ──┤ appendSilent appendWake canAppendSilent                 │
   hooks/      env ──┤ user owners peer log kernel restart                     │
@@ -250,6 +250,7 @@ handler 返回 `{ok:false,...}` 会原样透传，其它值包成 `{ok:true, dat
 | 发纯文本 | `await env.text('hi')` | |
 | 发 markdown | `await env.markdown('# 标题')` | 富文本卡片通道，**自带纯文本降级** |
 | 发 markdown+按钮 | `await env.markdownCard(md, keyboard)` | 自己拼 keyboard（≤5 行） |
+| **发图文卡片** | `await env.card({ title, description, url, pic_url })` | 官方 `msg_type=8`（20261021 新增）：带封面大图的卡片，比纯链接富态得多。`title` ≤50 字 / `description` ≤200 字 / `url` 与 `pic_url` 必须 https（≤1024）。**卡片发不出去会自动降级成「markdown + 封面图」**，所以返回值 true 只代表"发出去了"，不代表"是卡片"。⚠️ 受 QQ 主动消息窗口限制：窗口过期时卡片会被拒（降级），这是平台行为。<br>**完整可抄的示例：插件市场里装「B站分享 · 视频卡片」（`bili-share`）** —— 它做了 B 站搜索 + 详情 + 发卡片 + 降级，源码在 `packs/bili-share/tools/bili_share.mjs`。 |
 | 发富媒体 | `await env.image(src)` / `voice` / `video` / `file` | `src` 可传 URL 字符串或 `{url}` / `{localPath}` |
 | 任意媒体 | `await env.media('file', src)` | kind = image / voice / video / file |
 | @人 | `env.at(openid)` | 返回 `<@openid>` 片段，拼进文本 |
