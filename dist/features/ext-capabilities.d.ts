@@ -12,6 +12,16 @@ export interface ExtSenderLike {
     sendMarkdown?: (target: unknown, content: string) => Promise<unknown>;
     sendMarkdownWithKeyboard?: (target: unknown, content: string, keyboard?: unknown) => Promise<unknown>;
     sendMedia?: (target: unknown, kind: string, source: ExtMediaSource) => Promise<unknown>;
+    /** 图文卡片（官方 msg_type=8）；没有就由 env.card 自动降级成 markdown */
+    sendTuwenCard?: (target: unknown, card: {
+        type: 'tuwen';
+        content: {
+            title: string;
+            description: string;
+            url: string;
+            pic_url: string;
+        };
+    }) => Promise<unknown>;
 }
 /** 官方 API 调用结果（与 GroupAdminClient.apiCall 同形） */
 export type ExtApiResult = {
@@ -210,6 +220,17 @@ export interface ExtCapabilities {
     text(s: string): Promise<boolean>;
     markdown(s: string): Promise<boolean>;
     markdownCard(s: string, keyboard?: unknown): Promise<boolean>;
+    /**
+     * 发**图文卡片**（官方 msg_type=8；2026-10-29 封装）。
+     * `env.card({ title, description, url, pic_url })` —— title ≤50 / description ≤200 / url、pic_url 必 https ≤1024。
+     * 卡片发不出去时**自动降级**成「markdown + 封面图」。
+     */
+    card(payload: {
+        title: string;
+        description?: string;
+        url: string;
+        pic_url?: string;
+    }): Promise<boolean>;
     media(kind: ExtMediaKind, source: ExtMediaSource): Promise<boolean>;
     image(source: ExtMediaSource | string): Promise<boolean>;
     voice(source: ExtMediaSource | string): Promise<boolean>;

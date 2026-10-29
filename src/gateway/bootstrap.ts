@@ -480,6 +480,16 @@ export async function bootstrapGateway(
         throw err;
       }
     },
+    // 官方 20261021：图文卡片 msg_type=8（群聊/单聊都支持）
+    // ⚠️ 2026-10-29 实测踩坑：SDK 的 bot.send() 只白名单了
+    //   msg_id/msg_type/content/markdown/ark/embed/media/keyboard/messageReference/**extra**
+    //   —— **没有 card**！直接传 { card } 会被静默丢弃，body 只剩 msg_type=8 ⇒ 卡片渲染成纯文本。
+    //   正解：走 extra 透传（SDK 里 ）。
+    sendTuwenCard: async (target, card) => {
+      const resp = (await bot.send({ target, msgType: 8, extra: { card } } as never)) as { id?: string } | undefined;
+      pushSent(target, resp?.id);
+      return resp;
+    },
     sendMarkdownWithKeyboard: async (target, content, keyboard) => {
       // 卡片按钮(审批/提问): bot.send 显式 msg_type=2 + keyboard。
       // 失败直接抛(不静默降级)——由调用方决定文本兜底, 避免"卡片+文本码"双发。
