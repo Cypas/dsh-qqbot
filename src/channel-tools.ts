@@ -1051,7 +1051,12 @@ export async function apply(ctx: Context): Promise<void> {
         },
       },
       render: (_a, v: { ok: boolean; stopped: boolean }) => [
-        { type: 'text' as const, text: v.stopped ? '(已静默: 本回合终止, 不再回复)' : '(继续回复)' },
+        { type: 'text' as const, text: v.stopped
+          ? '(已静默: 本回合终止, 不再回复)'
+          // ★ 2026-10-29（issue #28）：原来是「(继续回复)」—— 括号舞台提示体，天然被读成"接着演"，
+          //   而闸门把回合劈成两段后，待回的那条消息已被挤到上下文中间，末尾只剩这句提示 ⇒
+          //   模型最省力的行为就是**续写聊天记录 / 代写群友台词**。这里把输出契约直接写进回执。
+          : '(闸门已开：只写你自己这一条要发的话 —— 不要替群友写台词、不要输出 [昵称] 形式的对话行、不要续写后面的对话)' },
       ],
     },
     async execute(args, exec) {
