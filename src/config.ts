@@ -349,6 +349,10 @@ export const FIXED_CHANNEL_CONTEXT = [
   '  · 发图：[MEDIA:image|本地绝对路径或 http(s) 网址]　例：[MEDIA:image|D:\\pics\\cat.png]',
   '  · 发文件/语音/视频同理：[MEDIA:file|路径]　[MEDIA:voice|路径]　[MEDIA:video|路径]',
   '  · 撤回自己刚发的消息：单独输出一行 [RECALL]',
+  // ★ 2026-10-29（issue #28）：群消息是「记录」，不是等模型接的剧本。
+  //   闸门把回合劈成两段后（待回消息被挤到中间），最容易出现"续写聊天记录/代写群友台词"，
+  //   出站又不清洗，编出来的 `[小明] xxx` 会原样发进群，看起来像群里真有人说话。
+  '【输出契约】你只写**自己这一条**要说的话：不要扮演群友、不要替别人写台词、不要输出 `[昵称] …` 形式的对话行、不要续写聊天记录。群消息是别人说过的话（记录），不是等你去接着演的剧本。调完 reply_gate 放行之后尤其如此 —— 只回答当前那条，别把后面的对话一起编出来。',
   '  这些标记本身不会显示给群友（发出去的只有媒体本身）。',
 ].join('\n');
 
@@ -650,7 +654,7 @@ export const EditableConfigSchema: Schema<EditableConfig> = Schema.object({
   groupPrompt: Schema.string().default(DEFAULT_GROUP_PROMPT).description('群聊常驻守则(默认含表情包礼仪;可清空关闭)'),
   schedule: scheduleSchema,
   enableApprovals: Schema.boolean().default(false).description('QQ 远程审批: dsh 权限申请发到 QQ, 用 /approve CODE 放行(保存后对新请求生效)'),
-  extMetaTool: Schema.boolean().default(false).description('扩展工具按需取用(默认开): 全局只挂一个 gain_qq_tools 元工具, 非 QQ 会话需要时自己领取(省 token); 关掉=所有 expose:all 扩展工具全量全局注册(老行为)'),
+  extMetaTool: Schema.boolean().default(true).description('扩展工具按需取用(默认开): 全局只挂一个 gain_qq_tools 元工具, 非 QQ 会话需要时自己领取(省 token); 关掉=所有 expose:all 扩展工具全量全局注册(老行为)'),
   approvalTimeoutMs: Schema.number().default(120000).description('QQ 权限申请等待时长(ms), 超时自动拒绝'),
   outboundMode: Schema.union(['adaptive', 'detail', 'active', 'passive', 'silent', 'nothink']).default('adaptive').description('出站模式: 适配主动(默认)=收到新消息后前5次带msg_id被动回复, 超出/无新消息自动转主动(保连发); 详细主动=与适配主动相同 + 额外把工具调用/工具结果也推到QQ(看进度用, 会更啰嗦); 被动=全程带回复id(连发受QQ上限); 完全不出站=思考但不发(静默); 完全不思考=QQ入站不唤醒LLM(仅记录, 仅设置页可配)'),
   botplayEvents: Schema.array(botplayEventSchema).default(DEMO_BOTPLAY_EVENTS as never).description('botplay 互动事件(dock🎮装配器编辑, 保存即热更; /botplay 触发发卡)'),
@@ -867,7 +871,7 @@ const ConfigSchemaRaw: Schema<ImQQBotConfig> = Schema.object({
   debug: Schema.boolean().default(false),
   diagLog: Schema.boolean().default(false).description('诊断日志落盘(默认关): 开=把排查用的诊断日志写进 {DSH_HOME|~/.dsh}/*.log, 单文件 2MB 自动轮转(只留 1 份旧档); 平时别开, 会持续占盘'),
   enableApprovals: Schema.boolean().default(false).description('通过 QQ 接收并处理 dsh 一次性权限申请(远程审批: 发起者用 /approve CODE 放行)'),
-  extMetaTool: Schema.boolean().default(false).description('扩展工具按需取用(默认开): 全局只挂一个 gain_qq_tools 元工具, 非 QQ 会话需要时自己领取(省 token); 关掉=所有 expose:all 扩展工具全量全局注册(老行为)'),
+  extMetaTool: Schema.boolean().default(true).description('扩展工具按需取用(默认开): 全局只挂一个 gain_qq_tools 元工具, 非 QQ 会话需要时自己领取(省 token); 关掉=所有 expose:all 扩展工具全量全局注册(老行为)'),
   approvalTimeoutMs: Schema.number().default(120000).description('QQ 权限申请超时(ms), 超时自动拒绝'),
   questionsMode: Schema.union(['async', 'blocking']).default('async').description('提问卡片怎么等答案: 后台(async, 默认)=卡片发出后工具立刻返回, 她能继续聊天/干活, 对方答完的答案会自动作为一条回执消息送回来(她忙就插进当前回合、空闲就唤醒她处理); 阻塞(blocking)=旧行为, 工具一直挂到对方作答或超时才继续(期间她动不了)'),
   outboundMode: Schema.union(['adaptive', 'detail', 'active', 'passive', 'silent', 'nothink']).default('adaptive').description('出站模式: 适配主动(默认)=收到新消息后前5次带msg_id被动回复, 超出/无新消息自动转主动(连发不受限); 详细主动=同适配主动 + 额外推送工具调用/工具结果到QQ(看进度, 消息更多); 被动=携带msg_id回复(连发受QQ回复同一消息上限); 完全不出站=思考但不发(静默); 完全不思考=QQ入站不唤醒LLM, 仅记录上下文(仅设置页可配, 防机器人自锁)'),
