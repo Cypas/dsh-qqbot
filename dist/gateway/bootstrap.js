@@ -54,7 +54,8 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
     // 2026-10-21: 出站自动传图用 —— 给 md-media-rewrite 一个拿得到 token 的句柄
     try {
         setMaterialTargetFactory(() => {
-            const c = manager.groupAdmin;
+            // 2026-10-30: 素材上传不依赖群管理开关，groupAdmin 没有就回落 mediaApi
+            const c = manager.groupAdmin ?? manager.mediaApi;
             return c ? { apiCall: c.apiCall.bind(c) } : undefined;
         });
     }
