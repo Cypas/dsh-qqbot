@@ -61,6 +61,11 @@ export interface ExtSenderLike {
   sendMarkdown?: (target: unknown, content: string) => Promise<unknown>;
   sendMarkdownWithKeyboard?: (target: unknown, content: string, keyboard?: unknown) => Promise<unknown>;
   sendMedia?: (target: unknown, kind: string, source: ExtMediaSource) => Promise<unknown>;
+  /** 图文卡片（官方 msg_type=8）；没有就由 env.card 自动降级成 markdown */
+  sendTuwenCard?: (target: unknown, card: {
+    type: 'tuwen';
+    content: { title: string; description: string; url: string; pic_url: string };
+  }) => Promise<unknown>;
 }
 
 /** 官方 API 调用结果（与 GroupAdminClient.apiCall 同形） */
@@ -223,6 +228,12 @@ export interface ExtCapabilities {
   text(s: string): Promise<boolean>;
   markdown(s: string): Promise<boolean>;
   markdownCard(s: string, keyboard?: unknown): Promise<boolean>;
+  /**
+   * 发**图文卡片**（官方 msg_type=8；2026-10-29 封装）。
+   * `env.card({ title, description, url, pic_url })` —— title ≤50 / description ≤200 / url、pic_url 必 https ≤1024。
+   * 卡片发不出去时**自动降级**成「markdown + 封面图」。
+   */
+  card(payload: { title: string; description?: string; url: string; pic_url?: string }): Promise<boolean>;
   media(kind: ExtMediaKind, source: ExtMediaSource): Promise<boolean>;
   image(source: ExtMediaSource | string): Promise<boolean>;
   voice(source: ExtMediaSource | string): Promise<boolean>;
@@ -414,6 +425,25 @@ export function makeExtCaps(deps: ExtCapsDeps): ExtCapabilities {
       }
       if (deps.sender?.sendMarkdown) return send('markdownCard→markdown', () => deps.sender!.sendMarkdown!(deps.replyTarget, t));
       return Promise.resolve(false);
+    },
+    card: async (payload: { title: string; description?: string; url: string; pic_url?: string }) => {
+      const p = (payload && typeof payload === 'object' ? payload : {}) as { title?: unknown; description?: unknown; url?: unknown; pic_url?: unknown };
+      const title = String(p.title ?? '').trim().slice(0, 50);
+      const url = String(p.url ?? '').trim();
+      if (!title || !url) return false;
+      const description = (String(p.description ?? '').trim() || title).slice(0, 200);
+      const pic_url = String(p.pic_url ?? '').trim();
+      const body = { type: 'tuwen' as const, content: { title, description, url, pic_url } };
+      if (deps.sender?.sendTuwenCard) {
+        const ok = await send('card', () => deps.sender!.sendTuwenCard!(deps.replyTarget, body));
+        if (ok) return true;
+      }
+      // 降级：markdown + 封面
+      if (deps.sender?.sendMarkdown) {
+        const md = `**${title}**\n\n${description}\n\n${pic_url ? `![](${pic_url})\n\n` : ''}${url}`;
+        return send('card→markdown', () => deps.sender!.sendMarkdown!(deps.replyTarget, md));
+      }
+      return false;
     },
     media: (k: ExtMediaKind, source: ExtMediaSource) => {
       if (!deps.sender?.sendMedia) return Promise.resolve(false);

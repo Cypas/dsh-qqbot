@@ -144,6 +144,27 @@ export function makeExtCaps(deps) {
                 return send('markdownCard→markdown', () => deps.sender.sendMarkdown(deps.replyTarget, t));
             return Promise.resolve(false);
         },
+        card: async (payload) => {
+            const p = (payload && typeof payload === 'object' ? payload : {});
+            const title = String(p.title ?? '').trim().slice(0, 50);
+            const url = String(p.url ?? '').trim();
+            if (!title || !url)
+                return false;
+            const description = (String(p.description ?? '').trim() || title).slice(0, 200);
+            const pic_url = String(p.pic_url ?? '').trim();
+            const body = { type: 'tuwen', content: { title, description, url, pic_url } };
+            if (deps.sender?.sendTuwenCard) {
+                const ok = await send('card', () => deps.sender.sendTuwenCard(deps.replyTarget, body));
+                if (ok)
+                    return true;
+            }
+            // 降级：markdown + 封面
+            if (deps.sender?.sendMarkdown) {
+                const md = `**${title}**\n\n${description}\n\n${pic_url ? `![](${pic_url})\n\n` : ''}${url}`;
+                return send('card→markdown', () => deps.sender.sendMarkdown(deps.replyTarget, md));
+            }
+            return false;
+        },
         media: (k, source) => {
             if (!deps.sender?.sendMedia)
                 return Promise.resolve(false);

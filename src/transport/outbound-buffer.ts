@@ -37,6 +37,15 @@ export interface QQBotSender {
     content: string,
     keyboard: unknown,
   ): Promise<unknown>;
+  /**
+   * 发**图文卡片**（官方 20261021 新增 msg_type=8）。
+   * `card` 形如 `{ type:'tuwen', content:{ title, description, url, pic_url } }`
+   * （官方四个字段都必填：title 1-50 / description 1-200 / url、pic_url 必 https ≤1024）。
+   */
+  sendTuwenCard?(target: ReplyTarget, card: {
+    type: 'tuwen';
+    content: { title: string; description: string; url: string; pic_url: string };
+  }): Promise<unknown>;
   openStream(target: ReplyTarget): StreamSessionLike;
   /** 发送富媒体(图片/语音/视频/文件)；url/localPath 二选一；返回新消息 id(若可得) */
   sendMedia(
