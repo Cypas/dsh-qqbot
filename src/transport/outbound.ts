@@ -666,7 +666,8 @@ class OutboundRouter {
       //   直接用本 router 自己的 manager —— 它一定就是这个会话实例的那个。
       let mdTarget: { apiCall: (m: string, p: string, b?: unknown) => Promise<unknown> } | undefined;
       try {
-        const ga = this.manager.groupAdmin;
+        // 2026-10-30: groupAdmin 只在群管理开着时才有；素材上传跟那个开关无关，所以回落 mediaApi
+        const ga = this.manager.groupAdmin ?? this.manager.mediaApi;
         if (ga) mdTarget = { apiCall: ga.apiCall.bind(ga) as unknown as (m: string, p: string, b?: unknown) => Promise<unknown> };
       } catch { /* ignore */ }
       const outText = await rewriteLocalMarkdownImages(text, mdTarget as never);

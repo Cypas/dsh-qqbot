@@ -343,7 +343,7 @@ export async function bootstrapGateway(ctx, agents, config, logger, hooks) {
                 //   绕过了 OutboundRouter.send() 里的那次重写，所以这里必须再来一次。
                 if (rawText.indexOf('![') >= 0) {
                     try {
-                        const ga = manager.groupAdmin;
+                        const ga = manager.groupAdmin ?? manager.mediaApi;
                         if (ga)
                             rawText = await rewriteLocalMarkdownImages(rawText, { apiCall: ga.apiCall.bind(ga) });
                         // 2026-10-21（主人定）：markdown 卡片通道里，本地图没传成功就**不发送**这条（正文不受影响，正文走 send()）
